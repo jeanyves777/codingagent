@@ -282,8 +282,21 @@ class Gauntlet:
     def _hidden_roots(self) -> list[Path]:
         """Directories an external agent must not see: Coding Brain's repository (task sources,
         hidden tests and Git history), the task directory, and every Gauntlet run."""
-        roots = {Path(__file__).resolve().parents[1], self.workdir.resolve(), *self.task_roots}
-        return sorted(roots, key=lambda path: len(path.parts))
+        roots = sorted({Path(__file__).resolve().parents[1], self.workdir.resolve(), *self.task_roots},
+                       key=lambda path: len(path.parts))
+        # Mask only outermost directories: a nested one is already hidden by its parent's mount.
+        return [root for index, root in enumerate(roots)
+                if not any(root.is_relative_to(other) for other in roots[:index])]
+
+    def isolation_problems(self) -> list[str]:
+        """Prove the mount namespace hides every root before any external agent runs."""
+        masks = " && ".join(f"mount -t tmpfs -o size=1m,mode=000 none {shlex.quote(str(root))}"
+                            for root in self._hidden_roots())
+        checks = " && ".join(f"[ -z \"$(ls -A {shlex.quote(str(root))} 2>/dev/null)\" ]"
+                             for root in self._hidden_roots())
+        result = subprocess.run(["unshare", "--mount", "--propagation", "private", "sh", "-c",
+                                 f"{masks} && {checks}"], capture_output=True, text=True, timeout=30)
+        return [] if result.returncode == 0 else [f"isolation failed: {(result.stderr or 'roots visible')[:200]}"]
 
     def _external(self, condition: str, task: dict, target: Path) -> dict:
         """Run a premium CLI agent in its own mount namespace: the hidden roots are replaced by
@@ -327,6 +340,7 @@ class Gauntlet:
         base = {"task": task["id"], "category": task["category"], "condition": condition}
         if condition in ("claude_code", "codex"):
             available, problems = runtime_capabilities(condition)
+            problems = problems or self.isolation_problems()
         else:
             available, problems = self.brain_capabilities.get(condition) or (DESIGNED[condition], [])
         if problems:

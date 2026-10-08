@@ -321,3 +321,25 @@ def test_browser_inspects_javascript_rendered_page_and_blocks_internal_requests(
     assert result["refused_requests"] == ["https://169.254.169.254/latest/meta-data"]
     with pytest.raises(WebPolicyError):
         asyncio.run(inspector.inspect("https://127.0.0.1/"))
+
+
+def test_reviewer_sees_verified_facts_and_cannot_veto_passing_tests(tmp_path, monkeypatch):
+    from tests.test_phase8 import SequenceModel
+    routes = {**ROBOTS, "https://pypi.org/pypi/httpx/json": (200, {}, {"info": {"version": "0.28.1"}})}
+    brain, _ = web_brain(tmp_path, routes, ["x = 2\n"])
+    reviewed = []
+
+    async def stale_reviewer(goal, diff):
+        reviewed.append(goal)
+        return {"approved": False, "reason": "proxies= is the correct httpx argument"}
+    brain.model.review = stale_reviewer
+    monkeypatch.setattr("brain.service.run_tests", lambda *a, **k: {"passed": True, "exit_code": 0, "output": "ok"})
+    task = asyncio.run(create_direct(brain))
+    task = asyncio.run(brain.execute(task["id"], task["digest"]))
+    assert "Live-verified facts" in reviewed[0] and "proxy=" in reviewed[0]
+    assert task["status"] == "passed" and task["review_disputed"] is True
+    assert any(event["kind"] == "review_overruled_by_tests" for event in task["events"])
+    gate, _ = web_brain(tmp_path / "gate", routes, ["x = 2\n", "x = 3\n", "x = 4\n"])
+    gate.model.review, gate.review_mode = stale_reviewer, "gate"
+    task = asyncio.run(create_direct(gate))
+    assert asyncio.run(gate.execute(task["id"], task["digest"]))["status"] == "failed"

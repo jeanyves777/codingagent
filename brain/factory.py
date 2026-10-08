@@ -116,6 +116,7 @@ def build_brain_from_env(require_queue=False) -> Brain:
         knowledge=build_knowledge(data),
         web=build_web_intelligence(data),
         validation_retries=int(os.environ.get("BRAIN_VALIDATION_RETRIES", "2")),
+        review_mode=os.environ.get("BRAIN_REVIEW_MODE", "advisory"),
         max_free_attempts=int(os.environ.get("BRAIN_MAX_FREE_ATTEMPTS", "3")),
         workers=max(1, min(8, int(os.environ.get("BRAIN_WORKERS", "3"))))
     )

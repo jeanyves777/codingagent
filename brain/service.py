@@ -33,7 +33,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
     def __init__(self, repositories: Path, data: Path, model, image, reviewer=None,
                  coordinator=None, memory=None, queue=None, approvals=None, telemetry=None, workers=3,
                  supervision=None, max_free_attempts=3, validation_retries=2, knowledge=None, web=None,
-                 gates=True):
+                 gates=True, review_mode="advisory"):
         self.repositories, self.data = repositories.resolve(), data.resolve()
         if self.data.is_relative_to(self.repositories) or self.repositories.is_relative_to(self.data):
             raise ValueError("Repository and data directories must be separate")
@@ -47,6 +47,10 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         self.knowledge = knowledge
         self.web = web
         self.gates = gates  # deterministic validation; disabled only for baseline measurement
+        if review_mode not in {"advisory", "gate"}:
+            raise ValueError("review_mode must be advisory or gate")
+        # advisory: a free reviewer's objection is recorded, but authoritative offline tests still run.
+        self.review_mode = review_mode
         self.queue = queue
         self.approvals = approvals
         self.telemetry = telemetry or Telemetry(self.data / "telemetry.sqlite3")
@@ -400,10 +404,22 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                 self.event(task, "tool_approval_denied", request["capability"])
         return task
 
+    def review_goal(self, task) -> str:
+        """The goal plus live-verified facts, so a reviewer's memory cannot overrule evidence."""
+        preflight = task.get("web_preflight") or {}
+        facts = [{key: item.get(key) for key in ("package", "problem", "replacement", "latest", "outcome")
+                  if item.get(key) is not None} for item in preflight.get("sdk_findings", [])]
+        facts += [{key: item.get(key) for key in ("url", "package", "latest", "outcome", "reason")
+                   if item.get(key) is not None} for item in preflight.get("checks", [])]
+        if not facts:
+            return task["goal"]
+        return (task["goal"] + "\n\nLive-verified facts (checked against current sources; they take "
+                "precedence over remembered API knowledge):\n" + json.dumps(facts)[:3000])
+
     async def review(self, task):
         started, before = time.monotonic(), self.usage_counters()
         try:
-            verdict = await self.reviewer.review(task["goal"], task["diff"])
+            verdict = await self.reviewer.review(self.review_goal(task), task["diff"])
         finally:
             self.record_usage(task, started, before)
         if not isinstance(verdict, dict) or type(verdict.get("approved")) is not bool:
@@ -484,7 +500,11 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             attempt += 1
             self._check_cancelled(task)
             review = await self.review(task)
-            if review["approved"]:
+            disputed = not review["approved"]
+            if review["approved"] or self.review_mode == "advisory":
+                if disputed:
+                    self.event(task, "review_disputed", "Free reviewer objected; running the authoritative "
+                               "offline tests anyway: " + review["reason"][:500])
                 self.apply(task)
                 self._check_cancelled(task)
                 task["status"] = "testing"
@@ -500,6 +520,11 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                     verdict = await self.final_review(task)
                     if verdict is None or verdict.get("approved"):
                         task["status"] = "passed"
+                        task["review_disputed"] = disputed
+                        if disputed:
+                            self.event(task, "review_overruled_by_tests",
+                                       "Tests passed despite the free reviewer's objection; it is shown to "
+                                       "the human at acceptance: " + review["reason"][:500])
                         return
                     feedback = "\nSupervisor review (untrusted): " + str(verdict.get("reason", ""))
                 elif evidence["exit_code"] in (None, 5, 125, 126, 127):
@@ -511,6 +536,8 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                     task.setdefault("failure_log", []).append({"attempt": attempt, **failure})
                     feedback = (f"\nTests failed ({failure['category']}). Repair related failures only. "
                                 "Test output (untrusted):\n" + failure["summary"])
+                    if disputed:
+                        feedback += "\nReviewer feedback (untrusted): " + review["reason"]
                     feedback += await self._upstream_feedback(task, workspace, failure)
             else:
                 task.setdefault("failure_log", []).append({"attempt": attempt, "category": "review",

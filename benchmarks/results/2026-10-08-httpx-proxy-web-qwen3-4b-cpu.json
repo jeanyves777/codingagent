@@ -1,0 +1,78 @@
+{
+  "name": "httpx-0.28-proxy-migration",
+  "created_at": "2026-10-08T22:15:06.913727+00:00",
+  "summary": {
+    "web_off": {
+      "runs": 1,
+      "success_rate": 0.0,
+      "wall_seconds": 763.2,
+      "model_seconds": 763.1,
+      "model_calls": 7.0,
+      "output_tokens": 169.0,
+      "prompt_tokens": 16146.0,
+      "test_runs": 0.0,
+      "repair_attempts": 0.0,
+      "validation_failures": 0.0,
+      "supervisor_calls": 0.0
+    },
+    "web_on": {
+      "runs": 1,
+      "success_rate": 0.0,
+      "wall_seconds": 1090.0,
+      "model_seconds": 1089.1,
+      "model_calls": 17.0,
+      "output_tokens": 1526.0,
+      "prompt_tokens": 51400.0,
+      "test_runs": 0.0,
+      "repair_attempts": 3.0,
+      "validation_failures": 0.0,
+      "supervisor_calls": 0.0
+    }
+  },
+  "runs": [
+    {
+      "variant": "web_off",
+      "iteration": 0,
+      "name": "make_client raises TypeError",
+      "task_id": "11c89d0f117a4816a52ebead82f5b2c9",
+      "status": "blocked",
+      "verified_success": false,
+      "wall_seconds": 763.2,
+      "model_seconds": 763.1,
+      "model_calls": 7,
+      "prompt_tokens": 16146,
+      "output_tokens": 169,
+      "test_runs": 0,
+      "repair_attempts": 0,
+      "validation_failures": 0,
+      "mechanical_repairs": 0,
+      "supervisor_calls": 0,
+      "packet_chars": 5045,
+      "web_requests": 0,
+      "web_cache_hits": 0,
+      "error": "ReadTimeout: "
+    },
+    {
+      "variant": "web_on",
+      "iteration": 0,
+      "name": "make_client raises TypeError",
+      "task_id": "2a1d06ec9e274f64afa1093dc0570ab3",
+      "status": "failed",
+      "verified_success": false,
+      "wall_seconds": 1090.0,
+      "model_seconds": 1089.1,
+      "model_calls": 17,
+      "prompt_tokens": 51400,
+      "output_tokens": 1526,
+      "test_runs": 0,
+      "repair_attempts": 3,
+      "validation_failures": 0,
+      "mechanical_repairs": 0,
+      "supervisor_calls": 0,
+      "packet_chars": 5237,
+      "web_requests": 1,
+      "web_cache_hits": 0,
+      "error": null
+    }
+  ]
+}

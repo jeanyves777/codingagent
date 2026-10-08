@@ -103,3 +103,13 @@ def test_pass_requires_agent_completion_hidden_tests_and_no_violations(tmp_path,
     assert record["hidden_tests_passed"] and not record["agent_completed"] and record["outcome"] == "failed"
     monkeypatch.setattr(Gauntlet, "_brain_run", fake("passed"))
     assert asyncio.run(harness.run_one("B_coding_brain", task))["outcome"] == "passed"
+
+
+def test_isolation_masks_outermost_roots_and_is_probed(tmp_path):
+    import shutil as sh
+    harness = Gauntlet(tmp_path / "runs", [TASKS])
+    roots = harness._hidden_roots()
+    assert TASKS not in roots and TASKS.parents[1] in roots  # the task dir is hidden by the repo mount
+    if not sh.which("unshare"):
+        pytest.skip("unshare unavailable")
+    assert harness.isolation_problems() == []
