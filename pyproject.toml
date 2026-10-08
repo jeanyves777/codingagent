@@ -17,15 +17,22 @@ dependencies = [
   "psycopg[binary]>=3.2,<4",
   "pgvector>=0.4,<1",
   "mcp>=2,<3",
+  "jsonschema>=4.20,<5",
+  "pyyaml>=6,<7",
+  "packaging>=23",
 ]
 
 [project.optional-dependencies]
 claude = ["anthropic>=1.12,<2"]
 tools = ["ast-grep-cli>=0.30,<1"]
+browser = ["playwright>=1.45,<2"]
 dev = ["pytest>=8,<10", "anthropic>=1.12,<2"]
 
 [tool.setuptools.packages.find]
 include = ["brain*"]
+
+[tool.setuptools.package-data]
+brain = ["data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

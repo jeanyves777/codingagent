@@ -124,7 +124,7 @@ def diff_specs(old: dict, new: dict) -> dict:
         notes += [f"parameter removed: {name}" for name, _ in old_params.keys() - new_params.keys()]
         notes += [f"new required parameter: {name}" for (name, where), p in new_params.items()
                   if p["required"] and (name, where) not in old_params]
-        notes += [f"parameter became required: {name}" for key2, p in new_params.items()
+        notes += [f"parameter became required: {key2[0]}" for key2, p in new_params.items()
                   if p["required"] and key2 in old_params and not old_params[key2]["required"]]
         old_fields = (a["response_schema"] or {}).get("properties") or {}
         new_fields = (b["response_schema"] or {}).get("properties") or {}

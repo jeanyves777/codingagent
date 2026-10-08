@@ -150,6 +150,10 @@ def test_openapi_change_detection_and_endpoint_usage(tmp_path):
     assert "new required parameter: tenant" in notes["GET /items"]
     assert "response field removed: next" in notes["GET /items"]
     assert diff["version"] == ["1.0", "2.0"]
+    required = json.loads(json.dumps(SPEC_V1))
+    required["paths"]["/items"]["get"]["parameters"][0]["required"] = True
+    assert api.diff_specs(SPEC_V1, required)["changed"] == [
+        {"endpoint": "GET /items", "changes": ["parameter became required: limit"]}]
     usage = api.verify_endpoints(spec_v2(), [("GET", "/v1/items"), ("DELETE", "/v1/items/42"),
                                              ("GET", "https://api.example.com/v1/items/7"), ("GET", "/v1/orders")])
     assert [item["outcome"] for item in usage] == ["verified", "failed", "verified", "failed"]

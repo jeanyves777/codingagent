@@ -11,7 +11,8 @@ This is an agent-runtime foundation, not a trained model or a multi-tenant servi
     PHASE 2  ORCHESTRATION   Coding Brain
                              delegation, memory, goal tracking, recovery, routing,
                              supervision budgets, Engineering Knowledge Router,
-                             deterministic validation
+                             deterministic validation, Live Web Intelligence
+                             (verification broker, browser, API intelligence)
     PHASE 3  EXECUTION       free/local models (Ollama, LM Studio, llama.cpp, ...)
                              implementation, debugging, testing, refactoring, Git
                              GitHub PR + CI review as verification and fallback
@@ -50,6 +51,12 @@ and validation itself, so the free model solves a smaller problem.
 - **Tool-first code intelligence (v0.8.3).** Optional ast-grep `structural_search`;
   the MCP gateway exposes only tools relevant to the goal; Serena can be added as a
   read-only MCP server.
+- **Live web and API verification.** A policy-enforcing Web Verification Broker lets
+  Coding Brain check current facts instead of trusting model memory: URLs and
+  redirects, OpenAPI descriptions and their changes, documented endpoints versus the
+  ones the code calls, JSON responses and data integrity, declared versus published
+  package versions, and known outdated SDK usage. Results become verified evidence
+  in the task packet; failures are checked upstream before any supervisor call.
 - **Measurement (v0.8.4).** `benchmark --compare` replays identical tasks with the
   knowledge layer off and on and reports verified success, time, tokens, model calls,
   test runs, repairs, validation failures and supervisor calls. Every task records
@@ -401,6 +408,60 @@ Measure the effect on your own tasks and hardware:
 
     .\.venv\Scripts\python.exe -m brain.benchmark benchmarks\textstats.json --compare --no-supervisors --output compare.json
 
+## Live web and API verification
+
+Enable it by naming the hosts Coding Brain may contact:
+
+    $env:BRAIN_WEB_ALLOWLIST = "pypi.org,registry.npmjs.org,raw.githubusercontent.com,docs.stripe.com"
+
+All web access goes through the broker in the orchestrator; the Docker test sandbox
+stays offline. The broker allows only `https` on the default port, only allowlisted
+hosts (`*.example.com` patterns are supported), and only GET and HEAD. Every host's
+DNS answers are checked on every redirect hop, and private, loopback, link-local,
+multicast, reserved and cloud-metadata addresses are refused. It sends no cookies or
+credentials and does not read `.netrc`. It honors `robots.txt` when reading pages
+(documented JSON APIs such as package registries are called directly), paces each
+host, caps responses (2 MB) and time (20 s), and caches responses with ETag
+revalidation. Each result is evidence: URL, final URL, time, HTTP status, SHA-256,
+redirects, and an outcome of `verified`, `failed` or `inconclusive`.
+
+What happens automatically:
+
+- **Preflight** (once per task): URLs in the goal are checked; OpenAPI descriptions
+  are fetched, snapshotted and compared with the last snapshot; endpoints the code
+  calls are checked against the description; declared packages mentioned in the
+  goal are checked against PyPI or npm; known outdated SDK patterns
+  (`brain/data/deprecations.json`) are confirmed against the live registry. The
+  result goes into the task packet with an instruction never to substitute a
+  guessed URL or endpoint for one that failed verification.
+- **Import gate**: a Python proposal that imports a repository module which does not
+  exist is rejected deterministically.
+- **Upstream check** after a test failure and before any premium consultation:
+  missing modules (local or PyPI), URLs in the failure, and outdated SDK usage.
+
+Read-only tools for the free model: `web_fetch`, `check_url`, `package_info`,
+`api_endpoints`, and with `BRAIN_BROWSER=true`, `browser_inspect`. The browser
+renders JavaScript pages with Playwright and reports compact text, console errors,
+failed requests and a network summary. Every request the page makes passes the
+same policy. The model cannot click, type, submit forms or run scripts. Set
+`BRAIN_BROWSER_EXECUTABLE` to use an installed Chromium.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| BRAIN_WEB_ALLOWLIST | empty (off) | Hosts the broker may contact |
+| BRAIN_WEB_TTL_SECONDS | 86400 | Cache freshness before revalidation |
+| BRAIN_WEB_MAX_BYTES | 2000000 | Response size limit |
+| BRAIN_WEB_RESPECT_ROBOTS | true | Honor robots.txt when reading pages |
+| BRAIN_WEB_FIXTURES | empty | Directory of recorded responses (deterministic mode) |
+| BRAIN_WEB_RECORD | false | Record missing fixtures from the network |
+| BRAIN_BROWSER | false | Offer browser_inspect |
+
+API contract testing: `brain.api_intelligence.validate_response` and `integrity`
+validate recorded or staging responses against the documented schema and configured
+invariants (required non-null fields, uniqueness, freshness). Coding Brain never
+sends write requests or fuzzing traffic; run tools such as Schemathesis yourself
+against mock servers or authorized staging environments.
+
 ## Cancellation and recovery
 
     .\.venv\Scripts\python.exe client.py cancel --id TASK_OR_ORCHESTRATION_ID
@@ -669,6 +730,10 @@ there is no background retention job.
 | brain/validators.py | Deterministic syntax/scope gates, mechanical repair, failure classes |
 | brain/knowledge.py | Knowledge library, Engineering Knowledge Router, task tools |
 | brain/skills.py | SKILL.md and Markdown parsing |
+| brain/web_verification.py | Web Verification Broker: policy, cache, evidence, fixtures |
+| brain/browser.py | Controlled Playwright inspection of rendered pages |
+| brain/api_intelligence.py | OpenAPI discovery, diffs, endpoint and response checks, SDK versions |
+| brain/web_intelligence.py | Preflight evidence, upstream checks, and web tools |
 | brain/repository.py | Allowed source paths, snapshots, read/search tools |
 | brain/sandbox.py | Isolated Python and Node profile runner |
 | brain/store.py | Persistent tasks, indexes, and accepted memory |
@@ -679,6 +744,7 @@ there is no background retention job.
 | tests/test_phase6.py | Brains, failover, providers, cancellation, call graph, and cleanup proofs |
 | tests/test_phase7.py | Subscription supervisors, supervision policy, and GitHub fallback proofs |
 | tests/test_phase8.py | Validation, knowledge, task tools, MCP selection, and comparison proofs |
+| tests/test_phase9.py | Web policy, evidence, cache, API intelligence, browser, and preflight proofs |
 
 ## Primary references
 

@@ -1,0 +1,11 @@
+{
+  "name": "httpx-0.28-proxy-migration",
+  "cases": [
+    {
+      "name": "make_client raises TypeError",
+      "repository": "httpclient",
+      "goal": "test_client.py fails: make_client in client.py raises a TypeError. Fix client.py so the tests pass and HTTPS traffic still goes through proxy_url. Do not change the tests.",
+      "expected_paths": ["client.py"]
+    }
+  ]
+}
