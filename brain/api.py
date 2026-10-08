@@ -133,11 +133,11 @@ def create_app(brain=None, token=None):
         return brain.decide_tool_approval(request_id, False)
 
     @app.post("/tasks/{task_id}/cancel")
-    def cancel(task_id: str):
+    async def cancel(task_id: str):
         return brain.cancel(task_id)
 
     @app.post("/tasks/{task_id}/retry")
-    def retry(task_id: str):
+    async def retry(task_id: str):
         return brain.retry(task_id)
 
     @app.post("/tasks/{task_id}/cleanup")

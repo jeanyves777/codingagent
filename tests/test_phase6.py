@@ -317,3 +317,50 @@ def test_default_provider_is_ollama(tmp_path, monkeypatch):
     brain = build_brain_from_env()
     assert isinstance(brain.model.strong, OllamaModel) and isinstance(brain.reviewer, OllamaModel)
     assert brain.model.strong.url == "http://localhost:11434"
+
+
+def test_api_retry_and_cancel_schedule_on_event_loop(brain):
+    from fastapi.testclient import TestClient
+    from brain.api import create_app
+    token = "t" * 32
+    headers = {"Authorization": "Bearer " + token}
+    task = brain.submit("demo", "Fix x", launch=False)
+    task["status"] = "blocked"
+    brain.store.save(task)
+    with TestClient(create_app(brain, token)) as client:
+        response = client.post(f"/tasks/{task['id']}/retry", headers=headers)
+        assert response.status_code == 200 and response.json()["status"] == "queued"
+        response = client.post(f"/tasks/{task['id']}/cancel", headers=headers)
+        assert response.status_code == 200
+
+
+def test_ollama_prose_answer_is_finalized_with_structured_output(tmp_path, monkeypatch):
+    from brain.model import OllamaModel, json_object
+    (tmp_path / "main.py").write_text("x = 1\n")
+    sent = []
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self.payload
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def post(self, url, json):
+            sent.append(copy.deepcopy(json))
+            if "format" in json:
+                return Response({"message": {"content": '{"plan": "p", "changes": []}'}})
+            return Response({"message": {"role": "assistant", "content": "Here is my plan in prose."}})
+    monkeypatch.setattr("brain.model.httpx.AsyncClient", Client)
+    result = asyncio.run(OllamaModel("http://localhost:11434", "m").propose(tmp_path, "g", []))
+    assert json.loads(result) == {"plan": "p", "changes": []}
+    assert sent[-1]["format"]["required"] == ["plan", "changes"] and "tools" not in sent[-1]
+    assert json_object('note {not json} then {"plan": "a", "changes": []} {"x": 1}')["plan"] == "a"

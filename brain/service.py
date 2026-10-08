@@ -82,7 +82,7 @@ class Brain(OrchestrationMixin):
                     task = self.store.get(task_id)
                     if task["status"] != "cancelled":
                         task["status"] = "blocked"
-                        self.event(task, "blocked", str(error)[:1000])
+                        self.event(task, "blocked", (str(error) or type(error).__name__)[:1000])
                     if task.get("parent_id"):
                         self.advance_group(task["parent_id"])
                 finally:
