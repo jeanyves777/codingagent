@@ -7,3 +7,4 @@ repositories/
 secrets/
 verified-learning.jsonl
 brains.json
+*.egg-info/
