@@ -1,9 +1,11 @@
 README.md
 pyproject.toml
 brain/__init__.py
+brain/anthropic_model.py
 brain/api.py
 brain/approvals.py
 brain/benchmark.py
+brain/brains.py
 brain/capabilities.py
 brain/contracts.py
 brain/durable_queue.py
@@ -13,6 +15,7 @@ brain/intelligence.py
 brain/mcp_gateway.py
 brain/memory.py
 brain/model.py
+brain/openai_compatible.py
 brain/orchestration.py
 brain/repository.py
 brain/routing.py
@@ -30,3 +33,4 @@ coding_brain.egg-info/top_level.txt
 tests/test_brain.py
 tests/test_phase4.py
 tests/test_phase5.py
+tests/test_phase6.py

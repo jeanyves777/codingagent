@@ -1,4 +1,4 @@
-# Coding Brain v0.6 — Claude provider, immediate cancellation, and call graphs
+# Coding Brain v0.6 — multiple free brains, immediate cancellation, and call graphs
 
 Coding Brain is a local, single-user coding-agent backend that owns orchestration,
 repository context, accepted memory, isolated execution, review, testing, and Git
@@ -7,8 +7,11 @@ not a trained model or a production multi-tenant service.
 
 ## What v0.6 adds
 
-- A Claude model provider (`BRAIN_PROVIDER=anthropic`) for the coordinator,
-  implementer, and reviewer, with server-side refusal fallbacks enabled by default.
+- Multiple free "brains": Ollama stays the default, and any OpenAI-compatible
+  server (LM Studio, llama.cpp, vLLM, LocalAI, Jan, or a free hosted tier) can be
+  added. Each role (implementer, fast, reviewer, coordinator) takes an ordered list
+  of brains and fails over to the next one when a brain is down or misbehaves.
+- An optional, paid Claude provider (`pip install -e ".[claude]"`).
 - Immediate cancellation of running sandbox tests: the container is removed as
   soon as cancellation is requested instead of running to completion.
 - Call-graph extraction (callers and callees) for Python, JavaScript, TypeScript,
@@ -83,8 +86,8 @@ required project files before submitting work.
 
 - Python 3.11 or newer
 - Git
-- Either Ollama with one or more installed tool-capable models, or Anthropic API
-  credentials for the Claude provider
+- Ollama with one or more installed tool-capable models (free, local, the default),
+  and optionally other free OpenAI-compatible servers. Claude is an optional extra.
 - Docker Desktop using Linux containers
 - Windows PowerShell examples below
 
@@ -170,22 +173,59 @@ Only run the merge after inspecting the diff and confirming the original branch
 still points at the orchestration base. If it has moved, use your normal reviewed
 Git integration workflow.
 
-## Claude provider
+## Model brains
 
-Select Claude instead of Ollama for every role:
+Everything runs on free, local models by default. With only `BRAIN_MODEL` set, every
+role uses that Ollama model at `BRAIN_MODEL_URL` (default http://localhost:11434).
 
+### One free OpenAI-compatible server
+
+    $env:BRAIN_PROVIDER = "openai"
+    $env:BRAIN_MODEL_URL = "http://localhost:1234/v1"   # LM Studio; llama.cpp server uses :8080/v1
+    $env:BRAIN_MODEL = "LOADED_MODEL_ID"
+
+For a hosted free tier, also set `BRAIN_MODEL_API_KEY_ENV` to the *name* of the
+environment variable that holds the key (for example `GROQ_API_KEY`).
+
+### Several brains with failover
+
+Copy `brains.example.json` to `brains.json`, edit the models to ones you have, and:
+
+    $env:BRAIN_BRAINS_CONFIG = "brains.json"
+
+Each entry under `brains` is a named backend with a `provider` (`ollama`,
+`openai`, or `anthropic`), a `model`, a `url`, and, for hosted services, an
+`api_key_env` naming the variable that holds its key. Keys never go in the file.
+`roles` lists brains in order for `implementer`, `fast`, `reviewer`, and
+`coordinator`. A role that is omitted uses the implementer list; with no roles at
+all, every role uses every brain in file order.
+
+When a brain fails (connection refused, HTTP error, timeout, malformed JSON, or an
+exhausted round budget) the request moves to the next brain in the role's list,
+and the task blocks only when every brain has failed. A pending tool approval is
+never treated as a failure, so a side-effecting request is not re-issued
+elsewhere. `client.py routes` reports which brain served each request and how
+many failovers happened; `/health` shows each role's brains. Using a different
+model for `reviewer` than for `implementer` gives a more independent review.
+
+URLs must use HTTPS, or plain HTTP to this machine or a private-network address
+(192.168.x, 10.x, *.local). An API key is only sent over HTTPS or to this machine.
+Free hosted tiers change their model lists and limits often; check the provider
+before relying on one, and remember that repository source is sent to every
+configured brain.
+
+### Optional: Claude
+
+Claude is a paid API. Install the extra and select it for every role, or add an
+`"anthropic"` brain to `brains.json`:
+
+    .\.venv\Scripts\python.exe -m pip install -e ".[claude]"
     $env:BRAIN_PROVIDER = "anthropic"
     $env:ANTHROPIC_API_KEY = "YOUR_KEY"   # or sign in once with `ant auth login`
 
-`BRAIN_MODEL` defaults to `claude-opus-5-5` for this provider. `BRAIN_FAST_MODEL`,
-`BRAIN_REVIEW_MODEL`, and `BRAIN_COORDINATOR_MODEL` still select per-role models,
-for example `claude-sonnet-5-5` as the fast implementer. `BRAIN_ANTHROPIC_EFFORT`
-(default `high`) sets reasoning effort. Requests opt into server-side refusal
-fallbacks so a declined request is retried on Anthropic's recommended fallback
-model; set `BRAIN_ANTHROPIC_FALLBACKS=false` to disable that. A request that is
-still declined blocks the task with the refusal category. The same read-only
-repository tools, MCP gateway, and approval pause/resume apply. Repository source
-is sent to the Anthropic API.
+`BRAIN_MODEL` defaults to `claude-opus-5-5`. `BRAIN_ANTHROPIC_EFFORT` (default
+`high`) sets reasoning effort. Requests opt into server-side refusal fallbacks;
+set `BRAIN_ANTHROPIC_FALLBACKS=false` to disable them.
 
 ## Cancellation and recovery
 
@@ -344,14 +384,17 @@ source replacements and diffs, so protect exports like the repository itself.
 | Environment variable | Default or requirement |
 | --- | --- |
 | BRAIN_API_TOKEN | Required; random string of at least 32 characters |
-| BRAIN_PROVIDER | ollama; or anthropic for Claude |
-| BRAIN_MODEL | Required for Ollama; claude-opus-5-5 for anthropic |
+| BRAIN_PROVIDER | ollama; or openai (any OpenAI-compatible server) or anthropic |
+| BRAIN_MODEL | Required for ollama and openai; claude-opus-5-5 for anthropic |
+| BRAIN_BRAINS_CONFIG | Optional path to a multi-brain JSON file; overrides the provider variables |
+| BRAIN_MODEL_API_KEY_ENV | Optional name of the variable holding an openai-provider key |
+| BRAIN_EMBEDDING_URL | Ollama URL for embeddings; defaults to BRAIN_MODEL_URL for ollama |
 | BRAIN_ANTHROPIC_EFFORT | high; low, medium, high, xhigh, or max |
 | BRAIN_ANTHROPIC_FALLBACKS | true; server-side refusal fallbacks for Claude |
 | BRAIN_FAST_MODEL | Defaults to BRAIN_MODEL; optional smaller implementer |
 | BRAIN_COORDINATOR_MODEL | Defaults to BRAIN_MODEL |
 | BRAIN_REVIEW_MODEL | Defaults to BRAIN_MODEL |
-| BRAIN_MODEL_URL | http://localhost:11434 |
+| BRAIN_MODEL_URL | http://localhost:11434; the /v1 endpoint for openai |
 | BRAIN_REPOSITORIES | repositories |
 | BRAIN_DATA | brain-data, outside the repository root |
 | BRAIN_WORKERS | 3, clamped to 1–8 |
@@ -386,7 +429,7 @@ execute a fixed command. Dependency installation does not occur during a task.
 
 ## Validation
 
-The release passed 55 automated tests covering path and data restrictions,
+The release passed 60 automated tests covering path and data restrictions,
 Tree-sitter Python and TypeScript indexing, graph cycle rejection, proposal
 approval, memory gating, worker limits, repository isolation, real worktree
 commits, dependency inheritance, downstream blocking, integration conflicts,
@@ -395,12 +438,12 @@ context, sandbox flags, timeout cleanup, Ollama tool messages, vector ranking,
 verified-memory gates, embedding contracts, capability denial, model routing,
 Node profiles, metrics, learning-export filtering, durable approval pause/resume,
 at-most-once MCP execution, event cursors, nested traces, workflow dispatch, and
-adaptive model selection, the Claude tool loop and refusal handling, provider
-selection, supervised sandbox cancellation and timeout, call-graph extraction, and
+adaptive model selection, the OpenAI-compatible and Claude tool loops, brain
+failover and configuration validation, provider selection, supervised sandbox cancellation and timeout, call-graph extraction, and
 commit-pinning workspace cleanup.
 
 Tests use a deterministic fake model and substitute the Docker invocation.
-Claude responses are also substituted in tests. An actual Ollama or Claude model,
+Model responses from every provider are substituted in tests. An actual model,
 PostgreSQL/pgvector service, and actual Docker test run must still be verified on
 your machine.
 
@@ -429,7 +472,9 @@ there is no background retention job.
 | brain/workspaces.py | Detached worktrees, commits, cherry-pick integration, pinned refs |
 | brain/intelligence.py | Tree-sitter symbols, imports, call graph, and relevant context |
 | brain/model.py | Ollama coordinator, implementer tool loop, and reviewer |
-| brain/anthropic_model.py | Claude coordinator, implementer tool loop, and reviewer |
+| brain/openai_compatible.py | OpenAI-compatible coordinator, implementer tool loop, and reviewer |
+| brain/anthropic_model.py | Optional Claude coordinator, implementer tool loop, and reviewer |
+| brain/brains.py | Named brains, URL policy, and per-role failover chains |
 | brain/factory.py | Environment configuration and provider selection |
 | brain/repository.py | Allowed source paths, snapshots, read/search tools |
 | brain/sandbox.py | Isolated Python and Node profile runner |
@@ -438,7 +483,7 @@ there is no background retention job.
 | client.py | PowerShell-friendly command client |
 | tests/test_brain.py | Runtime, Git, index, memory, API, and security checks |
 | tests/test_phase5.py | Approval, event, trace, workflow, and adaptive-routing proofs |
-| tests/test_phase6.py | Claude provider, cancellation, call graph, and cleanup proofs |
+| tests/test_phase6.py | Brains, failover, providers, cancellation, call graph, and cleanup proofs |
 
 ## Primary references
 

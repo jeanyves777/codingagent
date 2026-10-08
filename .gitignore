@@ -6,3 +6,4 @@ repositories/
 .env
 secrets/
 verified-learning.jsonl
+brains.json

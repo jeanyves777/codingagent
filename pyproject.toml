@@ -17,11 +17,11 @@ dependencies = [
   "psycopg[binary]>=3.2,<4",
   "pgvector>=0.4,<1",
   "mcp>=2,<3",
-  "anthropic>=1.12,<2",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10"]
+claude = ["anthropic>=1.12,<2"]
+dev = ["pytest>=8,<10", "anthropic>=1.12,<2"]
 
 [tool.setuptools.packages.find]
 include = ["brain*"]

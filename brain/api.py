@@ -53,7 +53,10 @@ def create_app(brain=None, token=None):
     @app.get("/health")
     def health():
         return {"status": "ok", "version": "0.6.0", "semantic_memory": brain.memory is not None,
-                "model": getattr(getattr(brain.model, "strong", brain.model), "name", None),
+                "brains": {role: getattr(model, "name", None) for role, model in {
+                    "implementer": getattr(brain.model, "strong", brain.model),
+                    "fast": getattr(brain.model, "fast", None),
+                    "reviewer": brain.reviewer, "coordinator": brain.coordinator}.items()},
                 "durable_queue": brain.queue is not None,
                 "tool_approvals": brain.approvals is not None}
 
@@ -185,7 +188,12 @@ def create_app(brain=None, token=None):
                 "implementer_usage": getattr(getattr(brain.model, "strong", None), "usage", []) +
                                      getattr(getattr(brain.model, "fast", None), "usage", []),
                 "reviewer_usage": getattr(brain.reviewer, "usage", []),
-                "coordinator_usage": getattr(brain.coordinator, "usage", [])}
+                "coordinator_usage": getattr(brain.coordinator, "usage", []),
+                "failover": {role: getattr(model, "served", []) for role, model in {
+                    "implementer": getattr(brain.model, "strong", None),
+                    "fast": getattr(brain.model, "fast", None),
+                    "reviewer": brain.reviewer, "coordinator": brain.coordinator}.items()
+                    if hasattr(model, "served")}}
 
     @app.get("/mcp/tools")
     async def mcp_tools():

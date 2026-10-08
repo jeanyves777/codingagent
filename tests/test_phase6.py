@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import subprocess
 from pathlib import Path
@@ -82,6 +83,7 @@ def test_anthropic_review_decompose_and_refusal():
 
 
 def test_factory_selects_anthropic_provider(tmp_path, monkeypatch):
+    pytest.importorskip("anthropic")
     monkeypatch.setenv("BRAIN_PROVIDER", "anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.delenv("BRAIN_MODEL", raising=False)
@@ -191,3 +193,127 @@ def test_orchestration_cleanup_and_prune(git_brain, monkeypatch):
     assert git(repository, "rev-parse", group["retained_ref"]) == state["integration_head"]
     assert all(git_brain.store.get(child["id"])["workspace_removed"] for child in state["children"])
     assert git(repository, "worktree", "list").count("\n") == 0
+
+
+def test_openai_compatible_tool_loop(tmp_path, monkeypatch):
+    from brain.openai_compatible import OpenAICompatibleModel
+    (tmp_path / "main.py").write_text("x = 1\n")
+    sent = []
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self.payload
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def post(self, url, json, headers):
+            sent.append({"url": url, "body": copy.deepcopy(json), "headers": headers})
+            if len(sent) == 1:
+                return Response({"choices": [{"finish_reason": "tool_calls", "message": {
+                    "role": "assistant", "content": None, "tool_calls": [{
+                        "id": "t1", "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"path": "main.py"}'}}]}}]})
+            return Response({"usage": {"prompt_tokens": 7, "completion_tokens": 3},
+                             "choices": [{"finish_reason": "stop", "message": {
+                                 "role": "assistant", "content": '{"plan": "ok", "changes": []}'}}]})
+    monkeypatch.setattr("brain.openai_compatible.httpx.AsyncClient", Client)
+    model = OpenAICompatibleModel("http://localhost:1234/v1/", "local", api_key="k")
+    result = asyncio.run(model.propose(tmp_path, "inspect", []))
+    assert json.loads(result)["plan"] == "ok"
+    assert sent[0]["url"] == "http://localhost:1234/v1/chat/completions"
+    assert sent[0]["headers"] == {"Authorization": "Bearer k"}
+    assert sent[0]["body"]["tools"][0]["type"] == "function"
+    tool_message = sent[1]["body"]["messages"][-1]
+    assert tool_message == {"role": "tool", "tool_call_id": "t1", "content": "x = 1\n"}
+    assert model.usage[-1]["output_tokens"] == 3
+
+
+class Brain_:
+    def __init__(self, name, error=None):
+        self.name, self.error, self.calls, self.usage = name, error, 0, [{"model": name}]
+    async def review(self, goal, diff):
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return {"approved": True, "reason": self.name}
+
+
+def test_failover_uses_next_brain_but_not_on_approval():
+    from brain.approvals import ApprovalRequired
+    from brain.brains import FailoverModel
+    down, up = Brain_("down", ConnectionError("refused")), Brain_("up")
+    chain = FailoverModel([down, up])
+    assert asyncio.run(chain.review("g", "d"))["reason"] == "up"
+    assert chain.served[-1] == {"method": "review", "model": "up", "failed_over": 1}
+    assert chain.name == "down+up" and len(chain.usage) == 2
+    with pytest.raises(ValueError, match="All brains failed.*down.*refused"):
+        asyncio.run(FailoverModel([down]).review("g", "d"))
+    pending = Brain_("pending", ApprovalRequired({"id": "r1"}))
+    with pytest.raises(ApprovalRequired):
+        asyncio.run(FailoverModel([pending, up]).review("g", "d"))
+    assert up.calls == 1
+
+
+def test_brains_config_validation_and_role_defaults(tmp_path):
+    from brain.brains import load_brains, validate_url
+    path = tmp_path / "brains.json"
+    path.write_text(json.dumps({"brains": {
+        "a": {"provider": "ollama", "model": "m1"},
+        "b": {"provider": "openai", "url": "http://192.168.1.5:8080/v1", "model": "m2"}},
+        "roles": {"implementer": ["a", "b"], "reviewer": ["b"]}}))
+    config = load_brains(path)
+    assert config["brains"]["a"]["url"] == "http://localhost:11434"
+    assert config["roles"]["fast"] == ["a", "b"] and config["roles"]["coordinator"] == ["a", "b"]
+    assert config["roles"]["reviewer"] == ["b"]
+    for url, key in [("http://example.com/v1", False), ("http://192.168.1.5/v1", True),
+                     ("https://user:pw@host/v1", False), ("ftp://localhost", False)]:
+        with pytest.raises(ValueError):
+            validate_url(url, key)
+    assert validate_url("http://127.0.0.1:1234/v1", True)
+    path.write_text(json.dumps({"brains": {"a": {"provider": "ollama", "model": "m"}},
+                                "roles": {"reviewer": ["missing"]}}))
+    with pytest.raises(ValueError, match="unknown brain"):
+        load_brains(path)
+
+
+def test_factory_builds_free_failover_roles(tmp_path, monkeypatch):
+    from brain.brains import FailoverModel
+    from brain.model import OllamaModel
+    from brain.openai_compatible import OpenAICompatibleModel
+    config = tmp_path / "brains.json"
+    config.write_text(Path("brains.example.json").read_text())
+    monkeypatch.setenv("BRAIN_BRAINS_CONFIG", str(config))
+    monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
+    monkeypatch.setenv("BRAIN_REPOSITORIES", str(tmp_path / "repos"))
+    monkeypatch.setenv("BRAIN_DATA", str(tmp_path / "data"))
+    brain = build_brain_from_env()
+    implementer = brain.model.strong
+    assert isinstance(implementer, FailoverModel)
+    assert [type(model) for model in implementer.models] == [
+        OllamaModel, OpenAICompatibleModel, OpenAICompatibleModel]
+    assert implementer.models[2].api_key == "gsk-test"
+    assert brain.reviewer.name == "LOADED_MODEL_ID+qwen2.5-coder:14b"
+    monkeypatch.delenv("GROQ_API_KEY")
+    with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
+        build_brain_from_env()
+
+
+def test_default_provider_is_ollama(tmp_path, monkeypatch):
+    from brain.model import OllamaModel
+    for name in ("BRAIN_PROVIDER", "BRAIN_BRAINS_CONFIG"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("BRAIN_MODEL", "qwen2.5-coder:14b")
+    monkeypatch.setenv("BRAIN_REPOSITORIES", str(tmp_path / "repos"))
+    monkeypatch.setenv("BRAIN_DATA", str(tmp_path / "data"))
+    brain = build_brain_from_env()
+    assert isinstance(brain.model.strong, OllamaModel) and isinstance(brain.reviewer, OllamaModel)
+    assert brain.model.strong.url == "http://localhost:11434"

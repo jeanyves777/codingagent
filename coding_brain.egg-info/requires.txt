@@ -9,5 +9,9 @@ psycopg[binary]<4,>=3.2
 pgvector<1,>=0.4
 mcp<3,>=2
 
+[claude]
+anthropic<2,>=1.12
+
 [dev]
 pytest<10,>=8
+anthropic<2,>=1.12
