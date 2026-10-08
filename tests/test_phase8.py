@@ -277,3 +277,61 @@ def test_per_directory_licenses_skip_proprietary_and_unlicensed_skills(tmp_path)
     assert sorted(result["skipped_unlicensed"]) == ["skills/bare/SKILL.md", "skills/closed/SKILL.md"]
     assert [hit["name"] for hit in library.search("debugging", 5)] == ["open"]
     assert intents("Fix the failing login test") == ["systematic debugging root cause", "test driven development"]
+
+
+def test_mcp_gateway_exposes_only_tools_relevant_to_the_task():
+    from brain.capabilities import TASK_QUERY
+    from brain.mcp_gateway import MCPGateway, select_tools
+    from tests.test_phase4 import FakeClient
+    schemas = [{"type": "function", "function": {"name": f"mcp__s__{name}", "description": text,
+                                                 "parameters": {}}}
+               for name, text in [("find_symbol", "Find a code symbol by name"),
+                                  ("query_database", "Run a read-only SQL query"),
+                                  ("search_docs", "Search product documentation")]]
+    assert select_tools(schemas, "", 8) == schemas
+    chosen = select_tools(schemas, "Fix the symbol lookup in the parser", 8)
+    assert [item["function"]["name"] for item in chosen] == ["mcp__s__find_symbol"]
+    assert select_tools(schemas, "unrelated goal about colors", 8) == []
+    gateway = MCPGateway({"docs": {"url": "http://127.0.0.1:9000/mcp",
+                                   "tools": {"search": "read_only", "write": "approval_required"}}},
+                         client_factory=FakeClient)
+    assert len(asyncio.run(gateway.schemas())) == 2
+    token = TASK_QUERY.set("search for the token rotation code")
+    try:
+        names = [item["function"]["name"] for item in asyncio.run(gateway.schemas())]
+    finally:
+        TASK_QUERY.reset(token)
+    assert names == ["mcp__docs__search"]
+
+
+def test_structural_search_is_read_only_and_bounded(tmp_path):
+    from brain.knowledge import structural_search_tool
+    tool = structural_search_tool(tmp_path)
+    if tool is None:
+        pytest.skip("ast-grep is not installed")
+    (tmp_path / "a.py").write_text("def f(t):\n    return len(t.split(' '))\n")
+    before = (tmp_path / "a.py").read_text()
+    assert tool.handler({"pattern": "len($X.split($$$))", "language": "python"}) == \
+        "a.py:2: return len(t.split(' '))"
+    assert (tmp_path / "a.py").read_text() == before
+    with pytest.raises(ValueError, match="language"):
+        tool.handler({"pattern": "x", "language": "bash"})
+    assert not tool.mutating and not tool.approval_required
+
+
+def test_compare_replays_identical_cases_with_knowledge_off_and_on(tmp_path, monkeypatch):
+    from brain.benchmark import BenchmarkRunner
+    from brain.knowledge import KnowledgeRouter
+    monkeypatch.setattr("brain.service.run_tests",
+                        lambda workspace, *a, **k: {"passed": (workspace / "main.py").read_text() == "x = 2\n",
+                                                    "exit_code": 1, "output": "FAILED"})
+    repository = make_repository(tmp_path / "repos" / "demo")
+    brain = Brain(repository.parent, tmp_path / "data", SequenceModel(["x = 2\n"]), "img",
+                  knowledge=KnowledgeRouter())
+    suite = {"name": "s", "cases": [{"name": "c", "repository": "demo", "goal": "Set x to 2",
+                                     "expected_paths": ["main.py"]}]}
+    result = asyncio.run(BenchmarkRunner(brain).compare(suite, repeat=2))
+    assert [run["variant"] for run in result["runs"]] == ["knowledge_off", "knowledge_on"] * 2
+    assert result["summary"]["knowledge_on"]["success_rate"] == 1.0
+    assert result["runs"][0]["packet_chars"] == 0 and result["runs"][1]["packet_chars"] > 0
+    assert brain.knowledge is not None

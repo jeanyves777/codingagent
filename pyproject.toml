@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 claude = ["anthropic>=1.12,<2"]
+tools = ["ast-grep-cli>=0.30,<1"]
 dev = ["pytest>=8,<10", "anthropic>=1.12,<2"]
 
 [tool.setuptools.packages.find]

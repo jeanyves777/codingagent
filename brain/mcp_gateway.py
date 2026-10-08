@@ -5,14 +5,31 @@ from pathlib import Path
 from urllib.parse import urlparse
 from mcp import Client
 from .approvals import ToolApprovalStore
+from .capabilities import TASK_QUERY
 
 
 NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+def select_tools(schemas: list[dict], query: str, limit: int) -> list[dict]:
+    """Expose only the allowlisted tools relevant to the task, instead of the whole catalog."""
+    if not query:
+        return schemas
+    from .intelligence import _terms
+    words = _terms(query)
+    scored = []
+    for position, schema in enumerate(schemas):
+        function = schema["function"]
+        overlap = len(words & _terms(function["name"].split("__")[-1] + " " + function["description"]))
+        if overlap:
+            scored.append((-overlap, position, schema))
+    return [schema for _, _, schema in sorted(scored)[:limit]]
+
+
 class MCPGateway:
     def __init__(self, servers: dict, client_factory=Client, output_limit=16_000,
-                 approvals: ToolApprovalStore | None = None):
+                 approvals: ToolApprovalStore | None = None, max_tools: int = 8):
+        self.max_tools = max(1, min(50, max_tools))
         self.servers, self.client_factory = {}, client_factory
         self.approvals = approvals
         self.output_limit = max(1000, min(100_000, output_limit))
@@ -61,7 +78,7 @@ class MCPGateway:
                 schemas.append(schema)
                 if len(schemas) > 50:
                     raise ValueError("MCP tool count exceeds the configured limit")
-        return schemas
+        return select_tools(schemas, TASK_QUERY.get(), self.max_tools)
 
     async def invoke(self, qualified_name: str, arguments: dict, task_id=None) -> str:
         parts = qualified_name.split("__", 2)

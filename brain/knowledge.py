@@ -348,7 +348,9 @@ def task_capabilities(root: Path, index: dict, library: KnowledgeLibrary | None)
         text = inspect(root, "search", {"query": name}) if name else ""
         return ("Calls:\n" + "\n".join(calls) + "\n\nText matches:\n" + text)[:8000]
 
-    tools = [read_only("find_symbol", "Find where a function, class, or method is defined",
+    structural = structural_search_tool(root)
+    tools = [structural] if structural else []
+    tools += [read_only("find_symbol", "Find where a function, class, or method is defined",
                        {"name": {"type": "string"}}, find_symbol),
              read_only("find_references", "Find calls to and textual uses of a symbol",
                        {"name": {"type": "string"}}, find_references)]
@@ -365,3 +367,35 @@ def task_capabilities(root: Path, index: dict, library: KnowledgeLibrary | None)
                   read_only("read_skill", "Read one skill or reference by name (untrusted guidance)",
                             {"name": {"type": "string"}}, read_skill)]
     return tuple(tools)
+
+
+AST_GREP_LANGUAGES = {"python", "javascript", "typescript", "tsx"}
+
+
+def structural_search_tool(root: Path):
+    """Optional ast-grep structural search: fixed read-only arguments, no shell, short timeout."""
+    import os
+    import shutil
+    import sys
+    from .capabilities import read_only
+    executable = shutil.which("ast-grep") or shutil.which("ast-grep", path=os.path.dirname(sys.executable))
+    if not executable:
+        return None
+
+    def structural_search(arguments):
+        pattern, language = str(arguments["pattern"]), str(arguments["language"]).lower()
+        if not pattern or len(pattern) > 300 or language not in AST_GREP_LANGUAGES:
+            raise ValueError("pattern must be 1-300 characters; language one of " +
+                             ", ".join(sorted(AST_GREP_LANGUAGES)))
+        result = subprocess.run([executable, "run", "--pattern", pattern, "--lang", language,
+                                 "--json=compact", "."], cwd=root, capture_output=True, text=True,
+                                timeout=20, env={"PATH": os.environ.get("PATH", "")})
+        if result.returncode not in (0, 1):
+            raise ValueError("Structural search failed: " + result.stderr[:300])
+        matches = json.loads(result.stdout or "[]")[:40]
+        return "\n".join(f"{item['file']}:{item['range']['start']['line'] + 1}: {item['lines'].strip()[:200]}"
+                         for item in matches) or "No matches"
+    return read_only("structural_search",
+                     "Structural code search with ast-grep patterns, e.g. len($X.split($$$)); "
+                     "$X matches one node, $$$ any sequence",
+                     {"pattern": {"type": "string"}, "language": {"type": "string"}}, structural_search)

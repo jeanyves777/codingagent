@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from .approvals import ApprovalRequired
-from .capabilities import TASK_CAPABILITIES
+from .capabilities import TASK_CAPABILITIES, TASK_QUERY
 from .brains import is_unavailable
 from .contracts import Assignment, Delegation, Proposal, validate_graph
 from .intelligence import build_index, relevant_context
@@ -218,7 +218,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             context, tools = self._engineering_packet(task, workspace, goal, index, memories, context)
             memories = []  # verified fixes travel inside the packet
         started, before = time.monotonic(), self.usage_counters()
-        token = TASK_CAPABILITIES.set(tools)
+        token, query_token = TASK_CAPABILITIES.set(tools), TASK_QUERY.set(goal)
         try:
             with self.telemetry.span(task["trace_id"], "model.propose", task["id"]):
                 parameters = inspect.signature(self.model.propose).parameters.values()
@@ -248,6 +248,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             return False
         finally:
             TASK_CAPABILITIES.reset(token)
+            TASK_QUERY.reset(query_token)
         self.record_usage(task, started, before)
         try:
             proposal = Proposal.model_validate_json(raw)

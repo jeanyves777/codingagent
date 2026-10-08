@@ -51,6 +51,10 @@ TASK_CAPABILITIES: contextvars.ContextVar[tuple] = contextvars.ContextVar(
     "coding_brain_task_capabilities", default=())
 
 
+# The current task's goal, used to expose only relevant external (MCP) tools.
+TASK_QUERY: contextvars.ContextVar[str] = contextvars.ContextVar("coding_brain_task_query", default="")
+
+
 def read_only(name: str, description: str, properties: dict, handler) -> Capability:
     return Capability(name=name, description=description, handler=handler, parameters={
         "type": "object", "properties": properties, "required": list(properties),
