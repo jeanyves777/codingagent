@@ -20,23 +20,44 @@ def enabled(name: str, default=False) -> bool:
     return value.lower() in {"true", "1"}
 
 
+def model_builder(provider: str, model_url: str, options: dict):
+    """Return a constructor for the configured model provider."""
+    if provider == "ollama":
+        return lambda name, gateway=None: OllamaModel(model_url, name, mcp_gateway=gateway, **options)
+    if provider == "anthropic":
+        from .anthropic_model import AnthropicModel
+        effort = os.environ.get("BRAIN_ANTHROPIC_EFFORT", "high")
+        if effort not in {"low", "medium", "high", "xhigh", "max"}:
+            raise RuntimeError("BRAIN_ANTHROPIC_EFFORT must be low, medium, high, xhigh, or max")
+        fallbacks = enabled("BRAIN_ANTHROPIC_FALLBACKS", True)
+        return lambda name, gateway=None: AnthropicModel(name, mcp_gateway=gateway, effort=effort,
+                                                        fallbacks=fallbacks, **options)
+    raise RuntimeError("BRAIN_PROVIDER must be ollama or anthropic")
+
+
 def build_brain_from_env(require_queue=False) -> Brain:
+    provider = os.environ.get("BRAIN_PROVIDER", "ollama").lower()
+    if provider not in {"ollama", "anthropic"}:
+        raise RuntimeError("BRAIN_PROVIDER must be ollama or anthropic")
     model_name = os.environ.get("BRAIN_MODEL")
+    if not model_name and provider == "anthropic":
+        from .anthropic_model import DEFAULT_MODEL
+        model_name = DEFAULT_MODEL
     if not model_name:
         raise RuntimeError("Set BRAIN_MODEL to an installed Ollama tool-capable model")
     model_url = os.environ.get("BRAIN_MODEL_URL", "http://localhost:11434")
     options = {"max_tool_rounds": int(os.environ.get("BRAIN_MAX_TOOL_ROUNDS", "8")),
                "max_output_tokens": int(os.environ.get("BRAIN_MAX_OUTPUT_TOKENS", "8192")),
                "max_context_chars": int(os.environ.get("BRAIN_MAX_CONTEXT_CHARS", "200000"))}
+    build_model = model_builder(provider, model_url, options)
     data = Path(os.environ.get("BRAIN_DATA", "brain-data"))
     approvals = ToolApprovalStore(data / "tool-approvals.sqlite3")
     telemetry = Telemetry(data / "telemetry.sqlite3")
     mcp_config = os.environ.get("BRAIN_MCP_CONFIG")
     gateway = (MCPGateway.from_file(Path(mcp_config), approvals=approvals)
                if mcp_config else None)
-    strong = OllamaModel(model_url, model_name, mcp_gateway=gateway, **options)
-    fast = OllamaModel(model_url, os.environ.get("BRAIN_FAST_MODEL", model_name),
-                       mcp_gateway=gateway, **options)
+    strong = build_model(model_name, gateway)
+    fast = build_model(os.environ.get("BRAIN_FAST_MODEL", model_name), gateway)
     performance = RoutingPerformance(data / "routing.sqlite3")
     implementer = RoutedModel(fast, strong, int(os.environ.get("BRAIN_STRONG_THRESHOLD", "4")),
                               performance=performance)
@@ -58,8 +79,8 @@ def build_brain_from_env(require_queue=False) -> Brain:
         {"python": os.environ.get("BRAIN_PYTHON_SANDBOX_IMAGE",
                                   os.environ.get("BRAIN_SANDBOX_IMAGE", "coding-brain-sandbox:0.1")),
          "node": os.environ.get("BRAIN_NODE_SANDBOX_IMAGE", "coding-brain-node-sandbox:0.1")},
-        reviewer=OllamaModel(model_url, os.environ.get("BRAIN_REVIEW_MODEL", model_name)),
-        coordinator=OllamaModel(model_url, os.environ.get("BRAIN_COORDINATOR_MODEL", model_name)),
+        reviewer=build_model(os.environ.get("BRAIN_REVIEW_MODEL", model_name)),
+        coordinator=build_model(os.environ.get("BRAIN_COORDINATOR_MODEL", model_name)),
         memory=memory, queue=queue, approvals=approvals, telemetry=telemetry,
         workers=max(1, min(8, int(os.environ.get("BRAIN_WORKERS", "3"))))
     )

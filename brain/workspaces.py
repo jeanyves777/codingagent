@@ -58,6 +58,10 @@ class WorkspaceManager:
             raise ValueError(result.stderr.strip() or "Integration conflict")
         return self._git(workspace, "rev-parse", "HEAD")
 
+    def keep(self, repository: Path, ref: str, commit: str) -> None:
+        """Pin a commit with a private ref so removing its worktree cannot let Git collect it."""
+        self._git(repository, "update-ref", ref, commit)
+
     def remove(self, repository: Path, workspace: Path) -> None:
         if self.is_git(workspace):
             self._git(repository, "worktree", "remove", "--force", str(workspace))

@@ -141,7 +141,7 @@ def test_graph_validation():
 
 def test_approval_memory_and_original_unchanged(brain, monkeypatch):
     monkeypatch.setattr("brain.service.run_tests",
-                        lambda *a: {"passed": True, "exit_code": 0, "output": "passed"})
+                        lambda *a, **k: {"passed": True, "exit_code": 0, "output": "passed"})
 
     async def flow():
         task = await create_direct(brain)
@@ -160,7 +160,7 @@ def test_approval_memory_and_original_unchanged(brain, monkeypatch):
 
 def test_no_tests_fails_closed(brain, monkeypatch):
     monkeypatch.setattr("brain.service.run_tests",
-                        lambda *a: {"passed": False, "exit_code": 5, "output": "no tests"})
+                        lambda *a, **k: {"passed": False, "exit_code": 5, "output": "no tests"})
 
     async def flow():
         task = await create_direct(brain)
@@ -193,7 +193,7 @@ def test_worker_limit(brain):
 
 def test_dependency_inherits_accepted_commit(git_brain, monkeypatch):
     monkeypatch.setattr("brain.service.run_tests",
-                        lambda *a: {"passed": True, "exit_code": 0, "output": "passed"})
+                        lambda *a, **k: {"passed": True, "exit_code": 0, "output": "passed"})
 
     async def flow():
         group = git_brain.delegate("demo", "Sequential changes")
@@ -221,7 +221,7 @@ def test_dependency_inherits_accepted_commit(git_brain, monkeypatch):
 
 def test_dependency_failure_blocks_downstream(git_brain, monkeypatch):
     monkeypatch.setattr("brain.service.run_tests",
-                        lambda *a: {"passed": False, "exit_code": 5, "output": "no tests"})
+                        lambda *a, **k: {"passed": False, "exit_code": 5, "output": "no tests"})
 
     async def flow():
         group = git_brain.delegate("demo", "Sequential changes")
@@ -241,7 +241,7 @@ def test_parallel_conflict_is_reported(git_brain, monkeypatch):
     ]}
     git_brain.model.answers = {"left": "x = 'left'\n", "right": "x = 'right'\n"}
     monkeypatch.setattr("brain.service.run_tests",
-                        lambda *a: {"passed": True, "exit_code": 0, "output": "passed"})
+                        lambda *a, **k: {"passed": True, "exit_code": 0, "output": "passed"})
 
     async def flow():
         group = git_brain.delegate("demo", "Parallel conflict")
@@ -300,7 +300,7 @@ def test_api_auth_events_and_context(brain):
     headers = {"Authorization": "Bearer " + "t" * 32}
     with TestClient(create_app(brain, "t" * 32)) as client:
         assert client.get("/health").status_code == 401
-        assert client.get("/health", headers=headers).json()["version"] == "0.5.0"
+        assert client.get("/health", headers=headers).json()["version"] == "0.6.0"
         events = client.get("/tasks/task/events", headers=headers)
         assert '"kind": "proposal"' in events.text
         context = client.get("/repositories/demo/context?query=Engine", headers=headers).json()
@@ -469,7 +469,7 @@ def test_semantic_memory_failure_does_not_undo_acceptance(brain, monkeypatch):
         async def search(self, *args, **kwargs): raise RuntimeError("offline")
     brain.memory = BrokenMemory()
     monkeypatch.setattr("brain.service.run_tests",
-                        lambda *a: {"passed": True, "exit_code": 0, "output": "passed"})
+                        lambda *a, **k: {"passed": True, "exit_code": 0, "output": "passed"})
 
     async def flow():
         task = await create_direct(brain)

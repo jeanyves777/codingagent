@@ -1,11 +1,22 @@
-# Coding Brain v0.5 — resumable agents and observable workflows
+# Coding Brain v0.6 — Claude provider, immediate cancellation, and call graphs
 
 Coding Brain is a local, single-user coding-agent backend that owns orchestration,
 repository context, accepted memory, isolated execution, review, testing, and Git
 integration. Models and external tool servers are replaceable. This release is an agent-runtime foundation,
 not a trained model or a production multi-tenant service.
 
-## What v0.5 adds
+## What v0.6 adds
+
+- A Claude model provider (`BRAIN_PROVIDER=anthropic`) for the coordinator,
+  implementer, and reviewer, with server-side refusal fallbacks enabled by default.
+- Immediate cancellation of running sandbox tests: the container is removed as
+  soon as cancellation is requested instead of running to completion.
+- Call-graph extraction (callers and callees) for Python, JavaScript, TypeScript,
+  and TSX, supplied to the implementing model with the structural context.
+- Reviewed workspace retention: cleanup of finished tasks and orchestrations,
+  age-based pruning, and private Git refs that keep accepted commits reachable.
+
+## Retained from v0.5
 
 - Persistent approval requests for side-effecting MCP tools.
 - Safe pause and resume from the existing worktree after approval.
@@ -72,7 +83,8 @@ required project files before submitting work.
 
 - Python 3.11 or newer
 - Git
-- Ollama with one or more installed tool-capable models
+- Either Ollama with one or more installed tool-capable models, or Anthropic API
+  credentials for the Claude provider
 - Docker Desktop using Linux containers
 - Windows PowerShell examples below
 
@@ -94,6 +106,17 @@ Extract the archive and open PowerShell in the coding-brain folder:
     .\.venv\Scripts\python.exe -m pytest -q
     .\.venv\Scripts\python.exe -m uvicorn brain.api:create_app --factory --host 127.0.0.1 --port 8000
     .\.venv\Scripts\python.exe -m brain.worker
+
+On Linux or macOS the equivalent is:
+
+    python3 -m venv .venv
+    .venv/bin/python -m pip install -e ".[dev]"
+    mkdir -p repositories
+    export BRAIN_API_TOKEN="$(.venv/bin/python -c 'import secrets; print(secrets.token_hex(32))')"
+    export BRAIN_MODEL=YOUR_INSTALLED_IMPLEMENTER_MODEL
+    export BRAIN_DURABLE_QUEUE=true
+    .venv/bin/python -m uvicorn brain.api:create_app --factory --host 127.0.0.1 --port 8000
+    .venv/bin/python -m brain.worker
 
 Keep the API bound to 127.0.0.1. Set the same environment in every worker
 terminal. Use one Uvicorn process and start additional `brain.worker` processes
@@ -147,13 +170,31 @@ Only run the merge after inspecting the diff and confirming the original branch
 still points at the orchestration base. If it has moved, use your normal reviewed
 Git integration workflow.
 
+## Claude provider
+
+Select Claude instead of Ollama for every role:
+
+    $env:BRAIN_PROVIDER = "anthropic"
+    $env:ANTHROPIC_API_KEY = "YOUR_KEY"   # or sign in once with `ant auth login`
+
+`BRAIN_MODEL` defaults to `claude-opus-5-5` for this provider. `BRAIN_FAST_MODEL`,
+`BRAIN_REVIEW_MODEL`, and `BRAIN_COORDINATOR_MODEL` still select per-role models,
+for example `claude-sonnet-5-5` as the fast implementer. `BRAIN_ANTHROPIC_EFFORT`
+(default `high`) sets reasoning effort. Requests opt into server-side refusal
+fallbacks so a declined request is retried on Anthropic's recommended fallback
+model; set `BRAIN_ANTHROPIC_FALLBACKS=false` to disable that. A request that is
+still declined blocks the task with the refusal category. The same read-only
+repository tools, MCP gateway, and approval pause/resume apply. Repository source
+is sent to the Anthropic API.
+
 ## Cancellation and recovery
 
     .\.venv\Scripts\python.exe client.py cancel --id TASK_OR_ORCHESTRATION_ID
     .\.venv\Scripts\python.exe client.py retry --id FAILED_TASK_ID
 
-Cancellation is cooperative. A running model request or Docker test is allowed
-to reach the next safe boundary. Restarted in-flight tasks are marked blocked
+Cancellation is cooperative for model requests: a running model request is allowed
+to reach the next safe boundary. A running Docker test is stopped immediately; the
+container is removed within about half a second of the cancellation request. Restarted in-flight tasks are marked blocked
 instead of being silently resumed. Retry creates a fresh workspace from the
 current valid base. Orchestrations themselves cannot yet be retried; retry the
 blocked child or create a new orchestration.
@@ -162,6 +203,27 @@ With the durable queue enabled, queued jobs survive API and worker restarts.
 Workers renew a lease while operating. An expired lease is marked failed and its
 task becomes blocked when the API reconciles the queue. This avoids automatically
 replaying an operation that may already have changed a worktree.
+
+## Workspace retention and cleanup
+
+Task and orchestration worktrees are kept after completion as audit artifacts.
+Remove them once reviewed:
+
+    .\.venv\Scripts\python.exe client.py cleanup --id TASK_OR_ORCHESTRATION_ID
+    .\.venv\Scripts\python.exe client.py prune --days 7
+
+Only finished work (accepted, completed, failed, blocked, cancelled, or
+integration_conflict) can be cleaned up. Cleaning an orchestration also cleans
+its assignments and requires all of them to be finished. Before an accepted
+commit's worktree is removed it is pinned at `refs/coding-brain/tasks/TASK_ID`;
+an orchestration's integration head is pinned at
+`refs/coding-brain/orchestrations/ORCHESTRATION_ID`. Merge from those refs later:
+
+    git -C repositories\demo merge --ff-only refs/coding-brain/orchestrations/ORCHESTRATION_ID
+
+Delete a ref with `git update-ref -d` once it is no longer needed. Pruning only
+considers standalone tasks and orchestrations whose last event is older than the
+window.
 
 ## MCP tool gateway
 
@@ -212,9 +274,12 @@ changes or write verified memory.
     .\.venv\Scripts\python.exe client.py context --repository demo --goal "authentication token"
     .\.venv\Scripts\python.exe client.py memory --repository demo
 
-The structural index extracts named declarations and imports. Relevant entries
-are supplied to the implementing model before it edits. Indexing is structural,
-not yet semantic embedding search.
+The structural index extracts named declarations, imports, and calls. Relevant
+entries are supplied to the implementing model before it edits, together with a
+`call_graph` listing the direct callers and callees of symbols named in the goal.
+Calls are resolved by name only, not by type or import, so same-named functions in
+different files are not distinguished. Indexing is structural, not yet semantic
+embedding search.
 
 Enable semantic memory with an installed embedding model:
 
@@ -279,7 +344,10 @@ source replacements and diffs, so protect exports like the repository itself.
 | Environment variable | Default or requirement |
 | --- | --- |
 | BRAIN_API_TOKEN | Required; random string of at least 32 characters |
-| BRAIN_MODEL | Required; installed Ollama implementer model |
+| BRAIN_PROVIDER | ollama; or anthropic for Claude |
+| BRAIN_MODEL | Required for Ollama; claude-opus-5-5 for anthropic |
+| BRAIN_ANTHROPIC_EFFORT | high; low, medium, high, xhigh, or max |
+| BRAIN_ANTHROPIC_FALLBACKS | true; server-side refusal fallbacks for Claude |
 | BRAIN_FAST_MODEL | Defaults to BRAIN_MODEL; optional smaller implementer |
 | BRAIN_COORDINATOR_MODEL | Defaults to BRAIN_MODEL |
 | BRAIN_REVIEW_MODEL | Defaults to BRAIN_MODEL |
@@ -304,7 +372,7 @@ source replacements and diffs, so protect exports like the repository itself.
 
 The Docker runner uses no network, a read-only source mount, no Docker socket,
 no added capabilities, no-new-privileges, CPU/memory/process limits, a non-root
-user, and a 120-second timeout. A container is not a virtual-machine security
+user, a 120-second timeout, and removal on cancellation. A container is not a virtual-machine security
 boundary. Use only trusted repositories and prebuilt sandbox images.
 
 Snapshots exclude hidden paths, symlinks, common credential names, dependencies,
@@ -318,7 +386,7 @@ execute a fixed command. Dependency installation does not occur during a task.
 
 ## Validation
 
-The release passed 46 automated tests covering path and data restrictions,
+The release passed 55 automated tests covering path and data restrictions,
 Tree-sitter Python and TypeScript indexing, graph cycle rejection, proposal
 approval, memory gating, worker limits, repository isolation, real worktree
 commits, dependency inheritance, downstream blocking, integration conflicts,
@@ -327,23 +395,23 @@ context, sandbox flags, timeout cleanup, Ollama tool messages, vector ranking,
 verified-memory gates, embedding contracts, capability denial, model routing,
 Node profiles, metrics, learning-export filtering, durable approval pause/resume,
 at-most-once MCP execution, event cursors, nested traces, workflow dispatch, and
-adaptive model selection.
+adaptive model selection, the Claude tool loop and refusal handling, provider
+selection, supervised sandbox cancellation and timeout, call-graph extraction, and
+commit-pinning workspace cleanup.
 
 Tests use a deterministic fake model and substitute the Docker invocation.
-An actual Ollama model, PostgreSQL/pgvector service, and actual Docker test run
-must still be verified on your machine.
+Claude responses are also substituted in tests. An actual Ollama or Claude model,
+PostgreSQL/pgvector service, and actual Docker test run must still be verified on
+your machine.
 
 ## Remaining work
 
-v0.5 does not yet include code-chunk embeddings, call-graph analysis, immediate
-subprocess cancellation, automatic conflict resolution, browser tools,
-cloud-model adapters, automatic fine-tuning, GitHub pull requests, or a
-VS Code/desktop interface. The SQLite control plane is intended for a single
-trusted machine, not a multi-host or multi-tenant deployment.
-
-Generated task and orchestration worktrees are retained as audit artifacts and
-can consume disk space. Automated retention and reviewed cleanup are not
-implemented yet.
+v0.6 does not yet include code-chunk embeddings, type-resolved call graphs,
+cancellation of an in-flight model request, automatic conflict resolution, browser
+tools, automatic fine-tuning, GitHub pull requests, or a VS Code/desktop interface.
+The SQLite control plane is intended for a single trusted machine, not a
+multi-host or multi-tenant deployment. Cleanup is explicit or age-based on request;
+there is no background retention job.
 
 ## Source map
 
@@ -358,9 +426,11 @@ implemented yet.
 | brain/capabilities.py | Typed deny-by-default model capabilities |
 | brain/routing.py | Verified-performance adaptive implementer selection |
 | brain/evaluation.py | Evidence metrics and verified learning export |
-| brain/workspaces.py | Detached worktrees, commits, cherry-pick integration, cleanup |
-| brain/intelligence.py | Tree-sitter symbols, imports, and relevant structural context |
+| brain/workspaces.py | Detached worktrees, commits, cherry-pick integration, pinned refs |
+| brain/intelligence.py | Tree-sitter symbols, imports, call graph, and relevant context |
 | brain/model.py | Ollama coordinator, implementer tool loop, and reviewer |
+| brain/anthropic_model.py | Claude coordinator, implementer tool loop, and reviewer |
+| brain/factory.py | Environment configuration and provider selection |
 | brain/repository.py | Allowed source paths, snapshots, read/search tools |
 | brain/sandbox.py | Isolated Python and Node profile runner |
 | brain/store.py | Persistent tasks, indexes, and accepted memory |
@@ -368,6 +438,7 @@ implemented yet.
 | client.py | PowerShell-friendly command client |
 | tests/test_brain.py | Runtime, Git, index, memory, API, and security checks |
 | tests/test_phase5.py | Approval, event, trace, workflow, and adaptive-routing proofs |
+| tests/test_phase6.py | Claude provider, cancellation, call graph, and cleanup proofs |
 
 ## Primary references
 
@@ -378,4 +449,5 @@ implemented yet.
 - Docker resource constraints: https://docs.docker.com/engine/containers/resource_constraints/
 - FastAPI streaming responses: https://fastapi.tiangolo.com/advanced/custom-response/
 - Ollama embeddings: https://docs.ollama.com/api/embed
+- Claude Messages API and tool use: https://platform.claude.com/docs/en/api/messages
 - pgvector: https://github.com/pgvector/pgvector

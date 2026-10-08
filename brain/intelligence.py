@@ -1,4 +1,4 @@
-"""Structural repository index for Python, JavaScript, TypeScript, and TSX."""
+"""Structural repository index and call graph for Python, JavaScript, TypeScript, and TSX."""
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from tree_sitter import Language, Parser
@@ -27,6 +27,8 @@ SYMBOL_NODES = {
     "enum_declaration": "enum",
 }
 IMPORT_NODES = {"import_statement", "import_from_statement"}
+CALL_NODES = {"call", "call_expression", "new_expression"}
+MAX_CALLS = 5000
 
 
 @dataclass(frozen=True)
@@ -46,14 +48,44 @@ class Dependency:
     line: int
 
 
+@dataclass(frozen=True)
+class Call:
+    path: str
+    caller: str
+    callee: str
+    line: int
+
+
 def _walk(node):
     yield node
     for child in node.children:
         yield from _walk(child)
 
 
+def _callee(node, source: bytes) -> str | None:
+    """Return the final name of a call target: foo(), obj.foo(), new Foo()."""
+    target = node.child_by_field_name("function") or node.child_by_field_name("constructor")
+    while target is not None and target.type in {"attribute", "member_expression"}:
+        target = target.child_by_field_name("attribute") or target.child_by_field_name("property")
+    if target is None or target.type not in {"identifier", "property_identifier"}:
+        return None
+    return source[target.start_byte:target.end_byte].decode(errors="replace")
+
+
+def _caller(node, source: bytes) -> str:
+    """Return the nearest enclosing named declaration, or <module>."""
+    parent = node.parent
+    while parent is not None:
+        if parent.type in SYMBOL_NODES and parent.type not in {"class_definition", "class_declaration"}:
+            name = parent.child_by_field_name("name")
+            if name:
+                return source[name.start_byte:name.end_byte].decode(errors="replace")
+        parent = parent.parent
+    return "<module>"
+
+
 def build_index(root: Path) -> dict:
-    symbols, dependencies, errors = [], [], []
+    symbols, dependencies, calls, errors = [], [], [], []
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.is_symlink() or path.suffix not in LANGUAGES:
             continue
@@ -78,8 +110,25 @@ def build_index(root: Path) -> dict:
                 statement = source[node.start_byte:node.end_byte].decode(errors="replace")[:500]
                 dependencies.append(Dependency(relative.as_posix(), language_name, statement,
                                                node.start_point.row + 1))
+            elif node.type in CALL_NODES and len(calls) < MAX_CALLS:
+                callee = _callee(node, source)
+                if callee:
+                    calls.append(Call(relative.as_posix(), _caller(node, source), callee,
+                                      node.start_point.row + 1))
     return {"symbols": [asdict(item) for item in symbols],
-            "dependencies": [asdict(item) for item in dependencies], "parse_errors": errors}
+            "dependencies": [asdict(item) for item in dependencies],
+            "calls": [asdict(item) for item in calls], "parse_errors": errors}
+
+
+def call_graph(index: dict, names: set[str], limit: int = 40) -> dict:
+    """Return direct callers and callees of the named symbols."""
+    callers, callees = [], []
+    for call in index.get("calls", []):
+        if call["callee"] in names and len(callers) < limit:
+            callers.append(call)
+        if call["caller"] in names and len(callees) < limit:
+            callees.append(call)
+    return {"callers": callers, "callees": callees}
 
 
 def relevant_context(index: dict, query: str, limit: int = 40) -> dict:
@@ -89,5 +138,8 @@ def relevant_context(index: dict, query: str, limit: int = 40) -> dict:
         return sum(word in text for word in words)
     symbols = sorted(index.get("symbols", []), key=score, reverse=True)
     dependencies = sorted(index.get("dependencies", []), key=score, reverse=True)
+    focus = {item["name"] for item in symbols
+             if any(word in item["name"].lower() for word in words)}
     return {"symbols": symbols[:limit], "dependencies": dependencies[:limit],
+            "call_graph": call_graph(index, focus, limit),
             "parse_errors": index.get("parse_errors", [])[:20]}

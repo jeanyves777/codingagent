@@ -9,12 +9,13 @@ parser.add_argument("action", choices=["submit", "delegate", "group", "status", 
                                       "accept", "cancel", "retry", "sync-memory", "workers", "memory",
                                       "semantic-memory", "context", "evaluation", "learning", "routes",
                                       "mcp-tools", "approvals", "approve-tool", "deny-tool", "trace",
-                                      "global-events"])
+                                      "global-events", "cleanup", "prune"])
 parser.add_argument("--repository")
 parser.add_argument("--goal")
 parser.add_argument("--id")
 parser.add_argument("--digest")
 parser.add_argument("--summary")
+parser.add_argument("--days", type=float, default=7, help="prune: retention window in days")
 parser.add_argument("--kind", choices=["episodic", "semantic", "procedural"], default="episodic")
 args = parser.parse_args()
 
@@ -32,7 +33,10 @@ with httpx.Client(base_url=base, headers={"Authorization": "Bearer " + token}, t
         if not args.id:
             parser.error("group requires --id")
         response = client.get("/orchestrations/" + args.id)
-    elif args.action in {"status", "events", "execute", "accept", "cancel", "retry", "sync-memory"}:
+    elif args.action == "prune":
+        response = client.post("/maintenance/prune", params={"older_than_days": args.days})
+    elif args.action in {"status", "events", "execute", "accept", "cancel", "retry", "sync-memory",
+                         "cleanup"}:
         if not args.id:
             parser.error("This action requires --id")
         path = "/tasks/" + args.id

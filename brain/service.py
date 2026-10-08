@@ -297,7 +297,11 @@ class Brain(OrchestrationMixin):
                 self._check_cancelled(task)
                 task["status"] = "testing"
                 self.event(task, "tester", f"Isolated test attempt {attempt + 1}")
-                evidence = await asyncio.to_thread(run_tests, self.workspace(task_id), self.image)
+                evidence = await asyncio.to_thread(
+                    run_tests, self.workspace(task_id), self.image,
+                    should_cancel=lambda: self.store.get(task_id).get("cancel_requested", False))
+                if evidence.get("cancelled"):
+                    self._check_cancelled(task)
                 task["test_evidence"] = evidence
                 self.event(task, "test_finished", json.dumps(evidence))
                 if evidence["passed"]:
@@ -424,7 +428,7 @@ class Brain(OrchestrationMixin):
         if baseline.exists():
             shutil.rmtree(baseline)
         for key in ("proposal", "digest", "diff", "review", "test_evidence", "commit",
-                    "pending_approval_id", "pending_goal"):
+                    "pending_approval_id", "pending_goal", "workspace_removed", "retained_ref"):
             task.pop(key, None)
         if task.get("parent_id"):
             task["base_commit"] = self.store.get(task["parent_id"])["integration_head"]
@@ -433,6 +437,65 @@ class Brain(OrchestrationMixin):
         self.event(task, "retry", "Starting a fresh workspace from the current base")
         self.schedule(task_id, "create_task")
         return task
+
+    RETAINABLE = {"accepted", "completed", "failed", "blocked", "cancelled", "integration_conflict"}
+
+    def cleanup(self, task_id: str) -> dict:
+        """Remove a finished task's or orchestration's worktrees, pinning any commit first."""
+        task = self.store.get(task_id)
+        if task["status"] not in self.RETAINABLE:
+            raise ValueError("Only finished work can be cleaned up")
+        job = self.jobs.get(task_id)
+        if job and not job.done():
+            raise ValueError("Task still has an active worker")
+        source = self.repository(task["repository"])
+        if task.get("kind") == "orchestration":
+            if any(self.store.get(child["id"])["status"] not in self.RETAINABLE
+                   for child in task.get("children", [])):
+                raise ValueError("Orchestration still has unfinished assignments")
+            for child in task.get("children", []):
+                if not self.store.get(child["id"]).get("workspace_removed"):
+                    self.cleanup(child["id"])
+            directory = self.data / "orchestrations" / task_id
+            workspace = Path(task["integration_workspace"]) if task.get("integration_workspace") else None
+            head = task.get("integration_head")
+            if head and head != task.get("base_commit"):
+                self.manager.keep(source, f"refs/coding-brain/orchestrations/{task_id}", head)
+                task["retained_ref"] = f"refs/coding-brain/orchestrations/{task_id}"
+        else:
+            directory = self.data / "tasks" / task_id
+            workspace = directory / "workspace"
+            if task.get("commit"):
+                self.manager.keep(source, f"refs/coding-brain/tasks/{task_id}", task["commit"])
+                task["retained_ref"] = f"refs/coding-brain/tasks/{task_id}"
+        if workspace and workspace.exists():
+            self.manager.remove(source, workspace)
+        if directory.exists():
+            shutil.rmtree(directory)
+        if self.manager.is_git(source):
+            self.manager._git(source, "worktree", "prune")
+        task["workspace_removed"] = True
+        self.event(task, "workspace_removed", task.get("retained_ref") or "No commit to retain")
+        return task
+
+    def prune(self, older_than_days: float = 7) -> list[str]:
+        """Clean up every finished item whose last event is older than the retention window."""
+        cutoff = datetime.now(timezone.utc).timestamp() - older_than_days * 86400
+        removed = []
+        for task in self.store.tasks():
+            if task.get("workspace_removed") or task["status"] not in self.RETAINABLE:
+                continue
+            if task.get("parent_id"):
+                continue
+            events = task.get("events") or [{"time": "1970-01-01T00:00:00+00:00"}]
+            if datetime.fromisoformat(events[-1]["time"]).timestamp() > cutoff:
+                continue
+            try:
+                self.cleanup(task["id"])
+                removed.append(task["id"])
+            except ValueError:
+                continue
+        return removed
 
     def repository_context(self, repository: str, query: str = "") -> dict:
         self.repository(repository)

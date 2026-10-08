@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0
+
+- Added a Claude provider (`BRAIN_PROVIDER=anthropic`) for all roles, with tool use,
+  refusal handling, and server-side refusal fallbacks enabled by default.
+- Added immediate sandbox cancellation: a running test container is removed when
+  cancellation is requested.
+- Added call-graph extraction and caller/callee context for goal-relevant symbols.
+- Added workspace cleanup and age-based pruning for finished tasks and
+  orchestrations, pinning accepted commits under `refs/coding-brain/`.
+- Added Linux/macOS setup commands.
+- Expanded validation from 46 to 55 passing tests.
+
 ## 0.5.0
 
 - Added persistent approval-required MCP tool requests with safe task pause/resume.

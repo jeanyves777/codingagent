@@ -37,7 +37,7 @@ def create_app(brain=None, token=None):
         if credentials is None or not hmac.compare_digest(credentials.credentials, token):
             raise HTTPException(401, "Invalid bearer token")
 
-    app = FastAPI(title="Coding Brain", version="0.5.0", dependencies=[Depends(authorize)],
+    app = FastAPI(title="Coding Brain", version="0.6.0", dependencies=[Depends(authorize)],
                   docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.exception_handler(ValueError)
@@ -52,7 +52,8 @@ def create_app(brain=None, token=None):
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "version": "0.5.0", "semantic_memory": brain.memory is not None,
+        return {"status": "ok", "version": "0.6.0", "semantic_memory": brain.memory is not None,
+                "model": getattr(getattr(brain.model, "strong", brain.model), "name", None),
                 "durable_queue": brain.queue is not None,
                 "tool_approvals": brain.approvals is not None}
 
@@ -135,6 +136,16 @@ def create_app(brain=None, token=None):
     @app.post("/tasks/{task_id}/retry")
     def retry(task_id: str):
         return brain.retry(task_id)
+
+    @app.post("/tasks/{task_id}/cleanup")
+    def cleanup(task_id: str):
+        return brain.cleanup(task_id)
+
+    @app.post("/maintenance/prune")
+    def prune(older_than_days: float = 7):
+        if older_than_days < 0:
+            raise ValueError("older_than_days must not be negative")
+        return {"removed": brain.prune(older_than_days)}
 
     @app.post("/tasks/{task_id}/accept")
     async def accept(task_id: str, acceptance: Acceptance):
