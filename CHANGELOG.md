@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.0
+
+- Added Phase 1 subscription connectors for the signed-in Claude Code and Codex CLIs:
+  read-only, schema-constrained, API-key variables removed, API-key sign-ins refused.
+- Added Phase 2 supervision: premium planning for complex goals and orchestrations,
+  diagnosis after repeated free failures, optional takeover, per-task budgets, a
+  daily cap, a call ledger, and human-granted escalation.
+- Unreachable free models now pause a task (`awaiting_implementer`) and never escalate.
+- Added Phase 3 GitHub fallback: publish verified work as a draft PR, read CI checks
+  and reviews, and create follow-up tasks that update the same PR.
+- Fixed API retry and cancel crashing without the durable queue (since 0.5).
+- Small Ollama models: structured-output finalization when replies are prose or the
+  round budget is spent; 600-second local timeout.
+- Expanded validation from 60 to 73 passing tests.
+
 ## 0.6.0
 
 - Added multiple free brains: an OpenAI-compatible provider (LM Studio, llama.cpp,

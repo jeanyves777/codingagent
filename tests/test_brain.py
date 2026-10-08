@@ -300,7 +300,7 @@ def test_api_auth_events_and_context(brain):
     headers = {"Authorization": "Bearer " + "t" * 32}
     with TestClient(create_app(brain, "t" * 32)) as client:
         assert client.get("/health").status_code == 401
-        assert client.get("/health", headers=headers).json()["version"] == "0.6.0"
+        assert client.get("/health", headers=headers).json()["version"] == "0.7.0"
         events = client.get("/tasks/task/events", headers=headers)
         assert '"kind": "proposal"' in events.text
         context = client.get("/repositories/demo/context?query=Engine", headers=headers).json()

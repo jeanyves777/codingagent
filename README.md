@@ -1,11 +1,47 @@
-# Coding Brain v0.6 — multiple free brains, immediate cancellation, and call graphs
+# Coding Brain v0.7 — a personal coding agent in three phases
 
-Coding Brain is a local, single-user coding-agent backend that owns orchestration,
-repository context, accepted memory, isolated execution, review, testing, and Git
-integration. Models and external tool servers are replaceable. This release is an agent-runtime foundation,
-not a trained model or a production multi-tenant service.
+Coding Brain is a local, single-user coding-agent backend. Free/local models do the
+routine work; your Claude and ChatGPT subscriptions supervise strategically, only
+when needed and within limits you set. Coding Brain owns orchestration, repository
+context, accepted memory, isolated execution, review, testing, and Git integration.
+This is an agent-runtime foundation, not a trained model or a multi-tenant service.
 
-## What v0.6 adds
+    PHASE 1  INTELLIGENCE    Claude Code + OpenAI Codex (your subscriptions)
+                             architect, planner, reviewer, exception solver
+    PHASE 2  ORCHESTRATION   Coding Brain
+                             delegation, memory, goal tracking, recovery, routing,
+                             supervision budgets
+    PHASE 3  EXECUTION       free/local models (Ollama, LM Studio, llama.cpp, ...)
+                             implementation, debugging, testing, refactoring, Git
+                             GitHub PR + CI review as verification and fallback
+
+| Situation | Who acts |
+| --- | --- |
+| Normal coding, fixes, refactoring | Free/local implementer |
+| Routine review | Free reviewer, then isolated tests |
+| Complex goal or multi-part orchestration | Supervisor writes the plan; free models implement |
+| Repeated failures (default: 2) | Supervisor diagnoses; free worker applies the repair plan |
+| Supervisor budget used up | Task fails; you may grant one more consultation (`escalate`) |
+| Free models unreachable | Task pauses (`awaiting_implementer`); never escalates |
+| Final integration | Draft GitHub PR from verified work, with your approval |
+| PR checks fail or reviewers ask for changes | Follow-up task for the free worker updates the same PR |
+
+## What v0.7 adds
+
+- Subscription connectors (`claude_cli`, `codex_cli`) that run the official,
+  signed-in Claude Code and Codex CLIs read-only. They never read session
+  credentials, strip API-key variables from the child process, and refuse to run
+  when the CLI is signed in with an API key (separately billed) unless you allow it.
+- A supervision engine: premium planning for complex goals, diagnosis after
+  repeated failures turned into precise instructions for the free worker,
+  optional takeover, per-task and daily limits, a call ledger, and human-granted
+  escalation.
+- GitHub verification and fallback: publish verified work as a draft PR, read CI
+  checks and review comments, and create follow-up tasks that update the PR.
+- Fixes found by running a real local model: structured-output finalization for
+  small Ollama models, longer local timeouts, and API retry/cancel scheduling.
+
+## Added in v0.6
 
 - Multiple free "brains": Ollama stays the default, and any OpenAI-compatible
   server (LM Studio, llama.cpp, vLLM, LocalAI, Jan, or a free hosted tier) can be
@@ -214,18 +250,90 @@ Free hosted tiers change their model lists and limits often; check the provider
 before relying on one, and remember that repository source is sent to every
 configured brain.
 
-### Optional: Claude
+### Optional: Claude API
 
-Claude is a paid API. Install the extra and select it for every role, or add an
-`"anthropic"` brain to `brains.json`:
+This is the separately billed Anthropic API, not your Claude subscription; for the
+subscription use the supervisors below. Install the extra and select it for every
+role, or add an `"anthropic"` brain to `brains.json`:
 
     .\.venv\Scripts\python.exe -m pip install -e ".[claude]"
     $env:BRAIN_PROVIDER = "anthropic"
-    $env:ANTHROPIC_API_KEY = "YOUR_KEY"   # or sign in once with `ant auth login`
+    $env:ANTHROPIC_API_KEY = "YOUR_KEY"
 
-`BRAIN_MODEL` defaults to `claude-opus-5-5`. `BRAIN_ANTHROPIC_EFFORT` (default
-`high`) sets reasoning effort. Requests opt into server-side refusal fallbacks;
-set `BRAIN_ANTHROPIC_FALLBACKS=false` to disable them.
+## Premium supervisors (your Claude and ChatGPT subscriptions)
+
+Sign in to each official CLI once, in PowerShell:
+
+    claude          # then /login and choose your Claude Pro/Max account
+    codex login     # choose Sign in with ChatGPT
+
+Then enable them, in preference order:
+
+    $env:BRAIN_SUPERVISORS = "claude,codex"
+
+or add `supervisors` and `supervision` sections to `brains.json` (see
+`brains.example.json`). A supervisor entry takes `provider` (`claude_cli` or
+`codex_cli`), and optionally `model`, `command` (path to the executable),
+`timeout` in seconds, and `allow_api_billing`.
+
+How a consultation runs: Coding Brain starts the CLI in the task's worktree with
+read-only tools only (Claude Code: `Read,Grep,Glob` in `dontAsk` mode; Codex:
+`exec --sandbox read-only --ephemeral`), passes a concise, untrusted-data prompt
+on standard input, and requires a JSON answer that matches a fixed schema. Before
+the first call it checks `claude auth status` or `codex login status` and refuses
+API-key sign-ins. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and related variables are
+removed from the CLI's environment so usage stays on your subscription. Any
+supervisor that fails (signed out, error, timeout) is skipped for the next one.
+
+`supervision` settings (defaults shown):
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| order | file order | Supervisors to try, first to last |
+| escalate_after | 2 | Free failures (test, review, or invalid output) before a diagnosis |
+| diagnose_budget | 1 | Diagnoses per task |
+| plan_budget | 1 | Premium plans per task |
+| decompose_budget | 1 | Premium orchestration graphs per orchestration |
+| review_budget | 0 | Premium final reviews per task (with final_review) |
+| daily_limit | 20 | Supervisor calls across all tasks in 24 hours |
+| plan_complex_tasks | true | Premium plan when the goal scores as complex |
+| plan_orchestrations | true | Premium dependency graph for `delegate` |
+| final_review | false | Premium review after tests pass |
+| takeover | false | Let a diagnosis supply files directly for one attempt |
+
+Request a premium plan for one task with `client.py submit --premium-plan`.
+When a task fails with its budget used, it records `supervisor_budget_exhausted`.
+Grant exactly one more diagnosis, after which the task returns to `proposed` for
+your approval:
+
+    .\.venv\Scripts\python.exe client.py escalate --id TASK_ID
+    .\.venv\Scripts\python.exe client.py supervision --id TASK_ID
+
+`supervision` lists the configured supervisors, the task's remaining budget, and
+the ledger of calls. Only successful consultations count toward a task budget;
+every attempt counts toward the daily limit. Accepted tasks record which
+supervisors helped in long-term memory.
+
+If no free implementer is reachable, the task pauses as `awaiting_implementer`
+instead of escalating. Retry it when a model is running.
+
+## GitHub pull requests and CI
+
+Publish accepted work (or a completed orchestration) as a draft pull request:
+
+    $env:GITHUB_TOKEN = "TOKEN_WITH_PULL_REQUEST_WRITE"
+    .\.venv\Scripts\python.exe client.py publish --id TASK_ID
+    .\.venv\Scripts\python.exe client.py pr-feedback --id TASK_ID
+    .\.venv\Scripts\python.exe client.py follow-up --id TASK_ID
+
+`publish` pushes the verified commit to `coding-brain/<id>` on the repository's
+`origin` with your normal Git credentials and opens a draft PR against the current
+branch (`--remote`, `--base`, and `--github-repository owner/name` override this).
+`pr-feedback` reads check runs, commit statuses, reviews, and comments for the PR
+head. `follow-up` creates a free-worker task from failing checks and review
+comments, starting from the PR head; publishing that task updates the same PR.
+GitHub verifies and reports; it does not write code. Use `BRAIN_GITHUB_TOKEN_ENV`
+to read the token from another variable.
 
 ## Cancellation and recovery
 
@@ -389,6 +497,9 @@ source replacements and diffs, so protect exports like the repository itself.
 | BRAIN_BRAINS_CONFIG | Optional path to a multi-brain JSON file; overrides the provider variables |
 | BRAIN_MODEL_API_KEY_ENV | Optional name of the variable holding an openai-provider key |
 | BRAIN_EMBEDDING_URL | Ollama URL for embeddings; defaults to BRAIN_MODEL_URL for ollama |
+| BRAIN_SUPERVISORS | Optional; claude and/or codex, using the signed-in CLIs |
+| BRAIN_MAX_FREE_ATTEMPTS | 3; free attempts before failing without a supervisor |
+| GITHUB_TOKEN | Needed for publish and pr-feedback |
 | BRAIN_ANTHROPIC_EFFORT | high; low, medium, high, xhigh, or max |
 | BRAIN_ANTHROPIC_FALLBACKS | true; server-side refusal fallbacks for Claude |
 | BRAIN_FAST_MODEL | Defaults to BRAIN_MODEL; optional smaller implementer |
@@ -429,7 +540,7 @@ execute a fixed command. Dependency installation does not occur during a task.
 
 ## Validation
 
-The release passed 60 automated tests covering path and data restrictions,
+The release passed 73 automated tests covering path and data restrictions,
 Tree-sitter Python and TypeScript indexing, graph cycle rejection, proposal
 approval, memory gating, worker limits, repository isolation, real worktree
 commits, dependency inheritance, downstream blocking, integration conflicts,
@@ -439,7 +550,9 @@ verified-memory gates, embedding contracts, capability denial, model routing,
 Node profiles, metrics, learning-export filtering, durable approval pause/resume,
 at-most-once MCP execution, event cursors, nested traces, workflow dispatch, and
 adaptive model selection, the OpenAI-compatible and Claude tool loops, brain
-failover and configuration validation, provider selection, supervised sandbox cancellation and timeout, call-graph extraction, and
+failover and configuration validation, provider selection, subscription CLI
+invocation and API-key refusal, supervision budgets and escalation, takeover,
+premium planning, offline pausing, PR publishing, feedback, and follow-up, supervised sandbox cancellation and timeout, call-graph extraction, and
 commit-pinning workspace cleanup.
 
 Tests use a deterministic fake model and substitute the Docker invocation.
@@ -449,7 +562,7 @@ your machine.
 
 ## Remaining work
 
-v0.6 does not yet include code-chunk embeddings, type-resolved call graphs,
+v0.7 does not yet include automatic polling of PR checks, merging, code-chunk embeddings, type-resolved call graphs,
 cancellation of an in-flight model request, automatic conflict resolution, browser
 tools, automatic fine-tuning, GitHub pull requests, or a VS Code/desktop interface.
 The SQLite control plane is intended for a single trusted machine, not a
@@ -476,6 +589,11 @@ there is no background retention job.
 | brain/anthropic_model.py | Optional Claude coordinator, implementer tool loop, and reviewer |
 | brain/brains.py | Named brains, URL policy, and per-role failover chains |
 | brain/factory.py | Environment configuration and provider selection |
+| brain/subscriptions.py | Phase 1: Claude Code and Codex CLI supervisor connectors |
+| brain/supervision.py | Phase 2: supervision budgets, daily cap, and call ledger |
+| brain/supervised.py | Phase 2: premium planning, diagnosis, takeover, escalation |
+| brain/github.py | Phase 3: GitHub pull request, checks, and review client |
+| brain/publishing.py | Phase 3: publish, PR feedback, and follow-up tasks |
 | brain/repository.py | Allowed source paths, snapshots, read/search tools |
 | brain/sandbox.py | Isolated Python and Node profile runner |
 | brain/store.py | Persistent tasks, indexes, and accepted memory |
@@ -484,6 +602,7 @@ there is no background retention job.
 | tests/test_brain.py | Runtime, Git, index, memory, API, and security checks |
 | tests/test_phase5.py | Approval, event, trace, workflow, and adaptive-routing proofs |
 | tests/test_phase6.py | Brains, failover, providers, cancellation, call graph, and cleanup proofs |
+| tests/test_phase7.py | Subscription supervisors, supervision policy, and GitHub fallback proofs |
 
 ## Primary references
 
