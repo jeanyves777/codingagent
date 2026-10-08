@@ -44,7 +44,7 @@ def create_app(brain=None, token=None):
         if credentials is None or not hmac.compare_digest(credentials.credentials, token):
             raise HTTPException(401, "Invalid bearer token")
 
-    app = FastAPI(title="Coding Brain", version="0.7.0", dependencies=[Depends(authorize)],
+    app = FastAPI(title="Coding Brain", version="0.8.0", dependencies=[Depends(authorize)],
                   docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.exception_handler(ValueError)
@@ -59,7 +59,7 @@ def create_app(brain=None, token=None):
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "version": "0.7.0", "semantic_memory": brain.memory is not None,
+        return {"status": "ok", "version": "0.8.0", "semantic_memory": brain.memory is not None,
                 "brains": {role: getattr(model, "name", None) for role, model in {
                     "implementer": getattr(brain.model, "strong", brain.model),
                     "fast": getattr(brain.model, "fast", None),

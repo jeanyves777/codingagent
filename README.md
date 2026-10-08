@@ -1,4 +1,4 @@
-# Coding Brain v0.7 — a personal coding agent in three phases
+# Coding Brain v0.8 — a personal coding agent in three phases
 
 Coding Brain is a local, single-user coding-agent backend. Free/local models do the
 routine work; your Claude and ChatGPT subscriptions supervise strategically, only
@@ -10,7 +10,8 @@ This is an agent-runtime foundation, not a trained model or a multi-tenant servi
                              architect, planner, reviewer, exception solver
     PHASE 2  ORCHESTRATION   Coding Brain
                              delegation, memory, goal tracking, recovery, routing,
-                             supervision budgets
+                             supervision budgets, Engineering Knowledge Router,
+                             deterministic validation
     PHASE 3  EXECUTION       free/local models (Ollama, LM Studio, llama.cpp, ...)
                              implementation, debugging, testing, refactoring, Git
                              GitHub PR + CI review as verification and fallback
@@ -26,7 +27,35 @@ This is an agent-runtime foundation, not a trained model or a multi-tenant servi
 | Final integration | Draft GitHub PR from verified work, with your approval |
 | PR checks fail or reviewers ask for changes | Follow-up task for the free worker updates the same PR |
 
-## What v0.7 adds
+## What v0.8 adds
+
+v0.8 makes Coding Brain do more of the analysis, code discovery, knowledge selection
+and validation itself, so the free model solves a smaller problem.
+
+- **Deterministic validation before any model review (v0.8.1).** Proposed Python is
+  compiled in memory (never run), JSON and TOML are parsed, and JavaScript/TypeScript
+  are parsed with Tree-sitter. No-op proposals are rejected. Double-escaped line
+  breaks, the most common small-model defect, are repaired mechanically when the
+  result compiles. Failures return a short structured diagnostic with the offending
+  lines, and the free model gets a bounded number of focused corrections (default 2)
+  before the reviewer or the sandbox see the proposal. Test failures are classified
+  (syntax, collection, test failure, timeout, infrastructure) and compacted.
+- **Engineering Knowledge Router (v0.8.2).** A local library of pinned,
+  license-checked engineering references and Agent Skills (`SKILL.md`), indexed with
+  SQLite full-text search. For each proposal it builds an Engineering Task Packet:
+  the goal, explicit success criteria, ranked code symbols and call graph, small
+  relevant files inline, a few intent-selected skills, and verified fixes, within a
+  character budget. Read-only `find_symbol`, `find_references`, `search_knowledge`
+  and `read_skill` tools are available for that proposal.
+- **Tool-first code intelligence (v0.8.3).** Optional ast-grep `structural_search`;
+  the MCP gateway exposes only tools relevant to the goal; Serena can be added as a
+  read-only MCP server.
+- **Measurement (v0.8.4).** `benchmark --compare` replays identical tasks with the
+  knowledge layer off and on and reports verified success, time, tokens, model calls,
+  test runs, repairs, validation failures and supervisor calls. Every task records
+  the same metrics.
+
+## Added in v0.7
 
 - Subscription connectors (`claude_cli`, `codex_cli`) that run the official,
   signed-in Claude Code and Codex CLIs read-only. They never read session
@@ -335,6 +364,43 @@ comments, starting from the PR head; publishing that task updates the same PR.
 GitHub verifies and reports; it does not write code. Use `BRAIN_GITHUB_TOKEN_ENV`
 to read the token from another variable.
 
+## Engineering knowledge
+
+The router is on by default (`BRAIN_KNOWLEDGE=false` disables it). Without imported
+knowledge it still sends the compact packet with code context, success criteria and
+verified fixes. To add engineering skills and references, import them on the host;
+network access happens here, never inside the test sandbox:
+
+    .\.venv\Scripts\python.exe -m brain.knowledge sync knowledge.example.json
+    .\.venv\Scripts\python.exe -m brain.knowledge list
+    .\.venv\Scripts\python.exe -m brain.knowledge search "failing test root cause"
+
+`knowledge.example.json` pins Superpowers (MIT, `skills/`), Anthropic's Agent Skills
+(Apache-2.0 skills only), and three sections of Microsoft's Engineering Playbook
+(CC-BY-4.0). Each source is a Git URL pinned to a commit or a local directory. Only
+Markdown is read: scripts and other files are counted and ignored, never executed,
+and Git hooks are disabled during checkout. The nearest license file decides each
+document's license; proprietary or unlicensed documents are skipped and listed, and
+a declared license must match the detected one. Imported knowledge lives in
+`brain-data/knowledge.sqlite3`, separate from accepted task memory, and is presented
+to models as untrusted guidance.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| BRAIN_KNOWLEDGE | true | Enable the Engineering Knowledge Router |
+| BRAIN_KNOWLEDGE_BUDGET | 6000 | Packet budget in characters, excluding inline sources |
+| BRAIN_KNOWLEDGE_SKILLS | 3 | Maximum skills and references per packet |
+| BRAIN_VALIDATION_RETRIES | 2 | Focused corrections after a deterministic validation failure |
+
+For structural search install `pip install -e ".[tools]"` (ast-grep). To use
+Serena's semantic navigation, run it as a streamable-HTTP MCP server and keep only
+its read-only tools in `mcp.json` (see `mcp.example.json`); verify the tool names
+with `client.py mcp-tools`.
+
+Measure the effect on your own tasks and hardware:
+
+    .\.venv\Scripts\python.exe -m brain.benchmark benchmarks\textstats.json --compare --no-supervisors --output compare.json
+
 ## Cancellation and recovery
 
     .\.venv\Scripts\python.exe client.py cancel --id TASK_OR_ORCHESTRATION_ID
@@ -540,7 +606,7 @@ execute a fixed command. Dependency installation does not occur during a task.
 
 ## Validation
 
-The release passed 73 automated tests covering path and data restrictions,
+The release passed 88 automated tests covering path and data restrictions,
 Tree-sitter Python and TypeScript indexing, graph cycle rejection, proposal
 approval, memory gating, worker limits, repository isolation, real worktree
 commits, dependency inheritance, downstream blocking, integration conflicts,
@@ -552,7 +618,11 @@ at-most-once MCP execution, event cursors, nested traces, workflow dispatch, and
 adaptive model selection, the OpenAI-compatible and Claude tool loops, brain
 failover and configuration validation, provider selection, subscription CLI
 invocation and API-key refusal, supervision budgets and escalation, takeover,
-premium planning, offline pausing, PR publishing, feedback, and follow-up, supervised sandbox cancellation and timeout, call-graph extraction, and
+premium planning, offline pausing, PR publishing, feedback, and follow-up,
+deterministic validation and bounded correction, mechanical repair, failure
+classification, knowledge import with license checks, packet budgets, task tools,
+failing-tool handling, MCP tool selection, structural search, and the comparison
+harness, supervised sandbox cancellation and timeout, call-graph extraction, and
 commit-pinning workspace cleanup.
 
 Tests use a deterministic fake model and substitute the Docker invocation.
@@ -562,7 +632,9 @@ your machine.
 
 ## Remaining work
 
-v0.7 does not yet include automatic polling of PR checks, merging, code-chunk embeddings, type-resolved call graphs,
+v0.8 does not yet include hash-checked targeted patches (proposals still carry
+complete files, which dominates small-model output tokens), automatic polling of PR
+checks, merging, code-chunk embeddings, type-resolved call graphs,
 cancellation of an in-flight model request, automatic conflict resolution, browser
 tools, automatic fine-tuning, GitHub pull requests, or a VS Code/desktop interface.
 The SQLite control plane is intended for a single trusted machine, not a
@@ -594,6 +666,9 @@ there is no background retention job.
 | brain/supervised.py | Phase 2: premium planning, diagnosis, takeover, escalation |
 | brain/github.py | Phase 3: GitHub pull request, checks, and review client |
 | brain/publishing.py | Phase 3: publish, PR feedback, and follow-up tasks |
+| brain/validators.py | Deterministic syntax/scope gates, mechanical repair, failure classes |
+| brain/knowledge.py | Knowledge library, Engineering Knowledge Router, task tools |
+| brain/skills.py | SKILL.md and Markdown parsing |
 | brain/repository.py | Allowed source paths, snapshots, read/search tools |
 | brain/sandbox.py | Isolated Python and Node profile runner |
 | brain/store.py | Persistent tasks, indexes, and accepted memory |
@@ -603,6 +678,7 @@ there is no background retention job.
 | tests/test_phase5.py | Approval, event, trace, workflow, and adaptive-routing proofs |
 | tests/test_phase6.py | Brains, failover, providers, cancellation, call graph, and cleanup proofs |
 | tests/test_phase7.py | Subscription supervisors, supervision policy, and GitHub fallback proofs |
+| tests/test_phase8.py | Validation, knowledge, task tools, MCP selection, and comparison proofs |
 
 ## Primary references
 
