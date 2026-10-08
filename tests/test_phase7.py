@@ -107,7 +107,10 @@ class FlakyModel:
 
     async def propose(self, root, goal, memories, repository_context=None):
         self.goals.append(goal)
-        content = "x = 2\n" if "Supervisor repair plan" in goal else "x = 'still wrong'\n"
+        if "pull request feedback" in goal:
+            content = "x = 2\ny = 3\n"
+        else:
+            content = "x = 2\n" if "Supervisor repair plan" in goal else "x = 'still wrong'\n"
         return json.dumps({"plan": "attempt", "changes": [{"path": "main.py", "content": content}]})
 
     async def review(self, goal, diff):
@@ -143,7 +146,10 @@ def test_repeated_failures_escalate_once_and_free_worker_applies_fix(tmp_path, m
     assert "Use text.split()" in brain.model.goals[-1]
     assert task["proposal_author"] == "implementer"
     kinds = [event["kind"] for event in task["events"]]
-    assert kinds.count("test_finished") == 3 and "supervisor_diagnose" in kinds
+    # The repeated, unchanged repair is rejected by the scope gate instead of re-running tests.
+    assert kinds.count("test_finished") == 2 and "supervisor_diagnose" in kinds
+    assert kinds.count("validation_failed") == 3
+    assert [item["category"] for item in task["failure_log"]] == ["test_failure", "validation"]
     asyncio.run(brain.accept(task["id"], "Fixed with supervisor guidance"))
     assert brain.store.memory(task["id"])["supervision"] == [{"supervisor": "claude", "kind": "diagnose"}]
 
@@ -282,8 +288,6 @@ def test_publish_feedback_and_follow_up_update_the_same_pull_request(tmp_path, m
             await asyncio.gather(*list(brain.jobs.values()), return_exceptions=True)
         follow = brain.store.get(follow["id"])
         follow = await brain.execute(follow["id"], follow["digest"])
-        brain.model.goals.clear()
-        (brain.workspace(follow["id"]) / "extra.txt").write_text("follow-up\n")
         await brain.accept(follow["id"], "Addressed review")
         follow = await brain.publish(follow["id"])
         assert follow["pull_request"]["number"] == 7

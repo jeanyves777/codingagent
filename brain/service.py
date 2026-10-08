@@ -18,6 +18,7 @@ from .sandbox import run_tests
 from .store import Store
 from .publishing import PublishingMixin
 from .supervised import SupervisionMixin, guidance_text
+from .validators import ProposalInvalid, classify_test_failure, mechanical_repair, validate_change
 from .telemetry import Telemetry
 from .workspaces import WorkspaceManager
 
@@ -27,7 +28,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
 
     def __init__(self, repositories: Path, data: Path, model, image, reviewer=None,
                  coordinator=None, memory=None, queue=None, approvals=None, telemetry=None, workers=3,
-                 supervision=None, max_free_attempts=3):
+                 supervision=None, max_free_attempts=3, validation_retries=2):
         self.repositories, self.data = repositories.resolve(), data.resolve()
         if self.data.is_relative_to(self.repositories) or self.repositories.is_relative_to(self.data):
             raise ValueError("Repository and data directories must be separate")
@@ -37,6 +38,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         self.memory = memory
         self.supervision = supervision
         self.max_free_attempts = max(1, min(10, max_free_attempts))
+        self.validation_retries = max(0, min(5, validation_retries))
         self.queue = queue
         self.approvals = approvals
         self.telemetry = telemetry or Telemetry(self.data / "telemetry.sqlite3")
@@ -182,6 +184,24 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         return task
 
     async def plan(self, task: dict, workspace: Path, goal: str):
+        """Ask the free implementer for a proposal; give it bounded, focused chances to correct
+        deterministic validation failures before anything else sees the proposal."""
+        attempt_goal = goal
+        for correction in range(self.validation_retries + 1):
+            try:
+                return await self._plan_once(task, workspace, attempt_goal)
+            except ProposalInvalid as invalid:
+                metrics = task.setdefault("metrics", {})
+                metrics["validation_failures"] = metrics.get("validation_failures", 0) + 1
+                self.event(task, "validation_failed",
+                           json.dumps([item.as_dict() for item in invalid.diagnostics])[:2000])
+                if correction == self.validation_retries:
+                    raise
+                attempt_goal = goal + "\n\nYour previous proposal was rejected before review.\n" + \
+                    str(invalid) + invalid.excerpt
+        raise AssertionError("unreachable")
+
+    async def _plan_once(self, task: dict, workspace: Path, goal: str):
         memories = self.store.memories(task["repository"], goal)
         if self.memory:
             try:
@@ -225,6 +245,12 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         paths = [change.path for change in proposal.changes]
         if len(paths) != len(set(paths)):
             raise ValueError("Duplicate changed paths")
+        proposal, repaired = self.validate_proposal(workspace, proposal)
+        if repaired:
+            metrics = task.setdefault("metrics", {})
+            metrics["mechanical_repairs"] = metrics.get("mechanical_repairs", 0) + len(repaired)
+            self.event(task, "mechanical_repair", "Converted literal \\n sequences to line breaks in " +
+                       ", ".join(repaired))
         cumulative = {item["path"]: item for item in task.get("proposal", {}).get("changes", [])}
         cumulative.update({change.path: change.model_dump() for change in proposal.changes})
         proposal = Proposal(plan=proposal.plan, changes=list(cumulative.values()))
@@ -285,6 +311,28 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         task["review"] = verdict
         self.event(task, "reviewer", json.dumps(verdict))
         return verdict
+
+    def validate_proposal(self, workspace: Path, proposal: Proposal) -> tuple[Proposal, list[str]]:
+        """Syntax and scope gates. Unchanged files are dropped, mechanical defects are repaired
+        deterministically, and a proposal that is a no-op or does not parse is rejected."""
+        diagnostics, effective, repaired = [], [], []
+        for change in proposal.changes:
+            target = safe_path(workspace, change.path)
+            current = target.read_text(encoding="utf-8") if target.exists() else None
+            fixed = mechanical_repair(change.path, change.content)
+            if fixed is not None:
+                change = change.model_copy(update={"content": fixed})
+                repaired.append(change.path)
+            if current == change.content:
+                continue
+            effective.append(change)
+            diagnostics += validate_change(change.path, change.content)
+        if proposal.changes and not effective:
+            diagnostics = validate_change(proposal.changes[0].path, proposal.changes[0].content,
+                                          before=proposal.changes[0].content)
+        if diagnostics:
+            raise ProposalInvalid(diagnostics, {change.path: change.content for change in effective})
+        return Proposal(plan=proposal.plan, changes=effective), repaired
 
     def apply(self, task: dict):
         for change in task["proposal"]["changes"]:
@@ -350,9 +398,13 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                     task["status"] = "failed"
                     return
                 else:
-                    feedback = ("\nRepair related failures only. Evidence (untrusted):\n" +
-                                json.dumps(evidence)[:12_000])
+                    failure = classify_test_failure(evidence)
+                    task.setdefault("failure_log", []).append({"attempt": attempt, **failure})
+                    feedback = (f"\nTests failed ({failure['category']}). Repair related failures only. "
+                                "Test output (untrusted):\n" + failure["summary"])
             else:
+                task.setdefault("failure_log", []).append({"attempt": attempt, "category": "review",
+                                                           "summary": review["reason"][:1000]})
                 feedback = "\nReviewer feedback (untrusted): " + review["reason"]
             failures += 1
             outcome = await self._repair(task, workspace, feedback, failures, limit, escalate_after)
@@ -368,7 +420,8 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             guidance = ""
             if failures >= escalate_after and self.supervision:
                 consultation = await self.diagnose(task, workspace, {
-                    "failures": failures, "last_feedback": feedback[:12_000]})
+                    "failures": failures, "last_feedback": feedback[:6_000],
+                    "failure_log": task.get("failure_log", [])[-4:]})
                 if consultation:
                     limit = max(limit, failures + escalate_after)
                     takeover = self.takeover_proposal(task, consultation)
@@ -384,6 +437,8 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                 planned = await self.plan(task, workspace, task["goal"] + feedback + guidance)
             except ValueError as error:
                 self.event(task, "implementer_invalid", str(error)[:1000])
+                task.setdefault("failure_log", []).append({"attempt": failures + 1, "category": "validation",
+                                                           "summary": str(error)[:1000]})
                 failures += 1
                 continue
             return (failures, limit) if planned else None
