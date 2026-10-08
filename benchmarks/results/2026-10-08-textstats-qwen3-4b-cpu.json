@@ -1,0 +1,74 @@
+{
+  "name": "textstats-whitespace-fix",
+  "created_at": "2026-10-08T21:38:21.886206+00:00",
+  "summary": {
+    "knowledge_off": {
+      "runs": 1,
+      "success_rate": 1.0,
+      "wall_seconds": 259.8,
+      "model_seconds": 259.0,
+      "model_calls": 6.0,
+      "output_tokens": 656.0,
+      "prompt_tokens": 7339.0,
+      "test_runs": 1.0,
+      "repair_attempts": 0.0,
+      "validation_failures": 1.0,
+      "supervisor_calls": 0.0
+    },
+    "knowledge_on": {
+      "runs": 1,
+      "success_rate": 1.0,
+      "wall_seconds": 214.4,
+      "model_seconds": 213.6,
+      "model_calls": 2.0,
+      "output_tokens": 557.0,
+      "prompt_tokens": 2451.0,
+      "test_runs": 1.0,
+      "repair_attempts": 0.0,
+      "validation_failures": 0.0,
+      "supervisor_calls": 0.0
+    }
+  },
+  "runs": [
+    {
+      "variant": "knowledge_off",
+      "iteration": 0,
+      "name": "fix word_count and average_word_length",
+      "task_id": "a493ef7809574f4da4b1d528faa240c9",
+      "status": "passed",
+      "verified_success": true,
+      "wall_seconds": 259.8,
+      "model_seconds": 259.0,
+      "model_calls": 6,
+      "prompt_tokens": 7339,
+      "output_tokens": 656,
+      "test_runs": 1,
+      "repair_attempts": 0,
+      "validation_failures": 1,
+      "mechanical_repairs": 0,
+      "supervisor_calls": 0,
+      "packet_chars": 0,
+      "error": null
+    },
+    {
+      "variant": "knowledge_on",
+      "iteration": 0,
+      "name": "fix word_count and average_word_length",
+      "task_id": "f5fbbbe3a5ca4aef99e40c53eccc9b8c",
+      "status": "passed",
+      "verified_success": true,
+      "wall_seconds": 214.4,
+      "model_seconds": 213.6,
+      "model_calls": 2,
+      "prompt_tokens": 2451,
+      "output_tokens": 557,
+      "test_runs": 1,
+      "repair_attempts": 0,
+      "validation_failures": 0,
+      "mechanical_repairs": 0,
+      "supervisor_calls": 0,
+      "packet_chars": 5663,
+      "error": null
+    }
+  ]
+}

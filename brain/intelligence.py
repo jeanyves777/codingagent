@@ -187,3 +187,60 @@ def ranked_context(index: dict, query: str, max_symbols: int = 15, max_chars: in
             break
         context[longest].pop()
     return context
+
+
+def module_location(root: Path, module: str) -> str | None:
+    """Repository-relative file for a dotted module name, if it exists in the worktree."""
+    parts = module.split(".")
+    for base in (root, root / "src"):
+        candidate = base.joinpath(*parts)
+        for path in (candidate.with_suffix(".py"), candidate / "__init__.py"):
+            if path.is_file():
+                return path.relative_to(root).as_posix()
+        if candidate.is_dir():
+            return candidate.relative_to(root).as_posix() + "/"
+    return None
+
+
+def unresolved_imports(root: Path, path: str, content: str, new_files: set[str] = frozenset()) -> list[tuple[int, str]]:
+    """Python imports that cannot exist: relative imports with no target, and submodules of a
+    package that lives in this repository but has no such module. Third-party and standard
+    library imports are not judged here."""
+    import ast
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return []
+    package_parts = path.split("/")[:-1]
+    problems = []
+
+    def exists(dotted: str) -> bool:
+        relative = dotted.replace(".", "/")
+        return (module_location(root, dotted) is not None or
+                any(name in new_files for name in (relative + ".py", relative + "/__init__.py"))
+                or any(name.startswith(relative + "/") for name in new_files))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = package_parts[:len(package_parts) - (node.level - 1)] if node.level > 1 else package_parts
+                if node.level - 1 > len(package_parts):
+                    problems.append((node.lineno, "relative import goes above the repository root"))
+                    continue
+                target = ".".join(base + ([node.module] if node.module else []))
+                if node.module and not exists(target):
+                    problems.append((node.lineno, f"relative import target {target or '.'} does not exist"))
+                elif not node.module:
+                    for alias in node.names:
+                        if not exists(".".join(base + [alias.name])) and not exists(".".join(base)):
+                            problems.append((node.lineno, f"cannot import {alias.name} from package {'.'.join(base)}"))
+                continue
+            names = [node.module] if node.module else []
+        elif isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        else:
+            continue
+        for name in names:
+            top = name.split(".")[0]
+            if "." in name and (module_location(root, top) or exists(top)) and not exists(name):
+                problems.append((node.lineno, f"module {name} does not exist in this repository"))
+    return problems

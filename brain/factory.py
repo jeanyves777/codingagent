@@ -9,6 +9,7 @@ from .mcp_gateway import MCPGateway
 from .memory import OllamaEmbedder, PostgresVectorMemory, SemanticMemory, SQLiteVectorMemory
 from .routing import RoutedModel, RoutingPerformance
 from .service import Brain
+from .web_intelligence import build_web_intelligence
 from .telemetry import Telemetry
 
 
@@ -113,6 +114,7 @@ def build_brain_from_env(require_queue=False) -> Brain:
         memory=memory, queue=queue, approvals=approvals, telemetry=telemetry,
         supervision=build_supervision(config, data),
         knowledge=build_knowledge(data),
+        web=build_web_intelligence(data),
         validation_retries=int(os.environ.get("BRAIN_VALIDATION_RETRIES", "2")),
         max_free_attempts=int(os.environ.get("BRAIN_MAX_FREE_ATTEMPTS", "3")),
         workers=max(1, min(8, int(os.environ.get("BRAIN_WORKERS", "3"))))

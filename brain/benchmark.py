@@ -77,21 +77,27 @@ class BenchmarkRunner:
                 "mechanical_repairs": metrics.get("mechanical_repairs", 0),
                 "supervisor_calls": ledger.count(task["id"], ok=1) if ledger else 0,
                 "packet_chars": metrics.get("packet_chars", 0),
+                "web_requests": metrics.get("web_network_requests", 0),
+                "web_cache_hits": metrics.get("web_cache_hits", 0),
                 "error": task.get("benchmark_error")}
 
-    async def compare(self, payload: dict, repeat=1) -> dict:
-        """Replay identical cases with the knowledge layer off and on, same model and environment."""
+    async def compare(self, payload: dict, repeat=1, layer: str = "knowledge") -> dict:
+        """Replay identical cases with one layer (knowledge or web) off and on, same model and
+        environment."""
+        if layer not in {"knowledge", "web"}:
+            raise ValueError("layer must be knowledge or web")
         cases = validate_suite(payload)
-        router, runs = self.brain.knowledge, []
+        enabled, runs = getattr(self.brain, layer), []
+        names = (f"{layer}_off", f"{layer}_on")
         for definition in cases:
             for iteration in range(repeat):
-                for variant, knowledge in (("knowledge_off", None), ("knowledge_on", router)):
-                    self.brain.knowledge = knowledge
+                for variant, value in zip(names, (None, enabled)):
+                    setattr(self.brain, layer, value)
                     runs.append({"variant": variant, "iteration": iteration,
                                  **await self.replay(definition)})
-        self.brain.knowledge = router
+        setattr(self.brain, layer, enabled)
         summary = {}
-        for variant in ("knowledge_off", "knowledge_on"):
+        for variant in names:
             chosen = [run for run in runs if run["variant"] == variant]
             summary[variant] = {"runs": len(chosen),
                                 "success_rate": sum(run["verified_success"] for run in chosen) / len(chosen),
@@ -120,9 +126,10 @@ async def _main(args):
         brain.supervision = None
     runner = BenchmarkRunner(brain)
     if args.compare:
-        if brain.knowledge is None:
-            raise SystemExit("--compare needs the knowledge router enabled (BRAIN_KNOWLEDGE=true)")
-        result = await runner.compare(payload, args.repeat)
+        if getattr(brain, args.layer) is None:
+            raise SystemExit(f"--compare --layer {args.layer} needs that layer enabled "
+                             "(BRAIN_KNOWLEDGE=true or BRAIN_WEB_ALLOWLIST)")
+        result = await runner.compare(payload, args.repeat, args.layer)
     else:
         result = await runner.suite(payload, args.execute)
     output = json.dumps(result, indent=2)
@@ -139,6 +146,7 @@ def main():
     parser.add_argument("--compare", action="store_true",
                         help="replay every case with the knowledge layer off and on")
     parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--layer", choices=["knowledge", "web"], default="knowledge")
     parser.add_argument("--no-supervisors", action="store_true",
                         help="measure the free models alone")
     parser.add_argument("--output")

@@ -20,7 +20,9 @@ from .sandbox import run_tests
 from .store import Store
 from .publishing import PublishingMixin
 from .supervised import SupervisionMixin, guidance_text
-from .validators import ProposalInvalid, classify_test_failure, mechanical_repair, validate_change
+from .intelligence import unresolved_imports
+from .validators import (Diagnostic, ProposalInvalid, classify_test_failure, mechanical_repair,
+                         validate_change)
 from .telemetry import Telemetry
 from .workspaces import WorkspaceManager
 
@@ -30,7 +32,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
 
     def __init__(self, repositories: Path, data: Path, model, image, reviewer=None,
                  coordinator=None, memory=None, queue=None, approvals=None, telemetry=None, workers=3,
-                 supervision=None, max_free_attempts=3, validation_retries=2, knowledge=None):
+                 supervision=None, max_free_attempts=3, validation_retries=2, knowledge=None, web=None):
         self.repositories, self.data = repositories.resolve(), data.resolve()
         if self.data.is_relative_to(self.repositories) or self.repositories.is_relative_to(self.data):
             raise ValueError("Repository and data directories must be separate")
@@ -42,6 +44,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         self.max_free_attempts = max(1, min(10, max_free_attempts))
         self.validation_retries = max(0, min(5, validation_retries))
         self.knowledge = knowledge
+        self.web = web
         self.queue = queue
         self.approvals = approvals
         self.telemetry = telemetry or Telemetry(self.data / "telemetry.sqlite3")
@@ -214,9 +217,16 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         index = await asyncio.to_thread(build_index, workspace)
         context = relevant_context(index, goal)
         tools = ()
+        external = await self._web_preflight(task, workspace)
         if self.knowledge:
             context, tools = self._engineering_packet(task, workspace, goal, index, memories, context)
             memories = []  # verified fixes travel inside the packet
+            if external:
+                context["engineering_packet"]["verified_external"] = external
+        elif external:
+            context = {**context, "verified_external": external}
+        if self.web:
+            tools = tuple(tools) + self.web.task_capabilities(workspace)
         started, before = time.monotonic(), self.usage_counters()
         token, query_token = TASK_CAPABILITIES.set(tools), TASK_QUERY.set(goal)
         try:
@@ -318,6 +328,27 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         tools = task_capabilities(workspace, index, self.knowledge.library)
         return {"engineering_packet": packet, "complexity": complexity(goal, context)}, tools
 
+    async def _web_preflight(self, task, workspace) -> dict | None:
+        """Verify external facts once per task (URLs, API descriptions, SDK versions and usage)."""
+        if not self.web:
+            return None
+        if "web_preflight" not in task:
+            preflight = await self.web.preflight(task["goal"], workspace)
+            task["web_preflight"] = preflight
+            metrics = task.setdefault("metrics", {})
+            for key, value in preflight["requests"].items():
+                metrics["web_" + key] = metrics.get("web_" + key, 0) + value
+            outcomes = [item.get("outcome") for item in preflight["checks"] + preflight["sdk_findings"]
+                        + preflight["endpoint_usage"]]
+            self.event(task, "web_preflight", json.dumps({
+                "checks": len(preflight["checks"]), "verified": outcomes.count("verified"),
+                "failed": outcomes.count("failed"), "inconclusive": outcomes.count("inconclusive"),
+                "requests": preflight["requests"]}))
+        preflight = task["web_preflight"]
+        if not (preflight["checks"] or preflight["sdk_findings"] or preflight["endpoint_usage"]):
+            return None
+        return {key: preflight[key] for key in ("notice", "checks", "sdk_findings", "endpoint_usage")}
+
     def usage_counters(self) -> dict:
         totals = {"calls": 0, "prompt_tokens": 0, "output_tokens": 0}
         seen = set()
@@ -395,7 +426,14 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             if current == change.content:
                 continue
             effective.append(change)
-            diagnostics += validate_change(change.path, change.content)
+            found = validate_change(change.path, change.content)
+            if not found and change.path.endswith(".py"):
+                new_files = {item.path for item in proposal.changes}
+                found = [Diagnostic("Import path", change.path, line, reason,
+                                    "Import only modules that exist in the repository, or add the module "
+                                    "in this proposal.")
+                         for line, reason in unresolved_imports(workspace, change.path, change.content, new_files)]
+            diagnostics += found
         if proposal.changes and not effective:
             diagnostics = validate_change(proposal.changes[0].path, proposal.changes[0].content,
                                           before=proposal.changes[0].content)
@@ -471,6 +509,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                     task.setdefault("failure_log", []).append({"attempt": attempt, **failure})
                     feedback = (f"\nTests failed ({failure['category']}). Repair related failures only. "
                                 "Test output (untrusted):\n" + failure["summary"])
+                    feedback += await self._upstream_feedback(task, workspace, failure)
             else:
                 task.setdefault("failure_log", []).append({"attempt": attempt, "category": "review",
                                                            "summary": review["reason"][:1000]})
@@ -481,6 +520,20 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                 return
             failures, limit = outcome
             task["status"] = "running"
+
+    async def _upstream_feedback(self, task, workspace, failure) -> str:
+        """Check whether an external dependency changed before any premium consultation."""
+        if not self.web or failure["category"] not in {"test_failure", "collection"}:
+            return ""
+        results = await self.web.upstream_check(failure, workspace)
+        if not results:
+            return ""
+        task["failure_log"][-1]["upstream"] = results
+        self.event(task, "upstream_check", json.dumps(results)[:2000])
+        compact = [{key: item.get(key) for key in ("kind", "module", "url", "package", "outcome", "reason",
+                                                   "problem", "replacement", "locations", "upstream_change")
+                    if item.get(key) is not None} for item in results]
+        return "\nUpstream verification (live evidence):\n" + json.dumps(compact)[:3000]
 
     async def _repair(self, task, workspace, feedback, failures, limit, escalate_after):
         """Produce the next proposal, escalating when warranted. Returns (failures, limit), or None
