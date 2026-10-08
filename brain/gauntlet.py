@@ -229,7 +229,7 @@ class Gauntlet:
         workspace = brain.workspace(item["id"])
         ledger = getattr(brain.supervision, "ledger", None)
         return {"final": workspace if workspace.exists() else target, "status": stored["status"],
-                "metrics": stored.get("metrics", {}),
+                "metrics": {**stored.get("metrics", {}), "repair_attempts": len(stored.get("failure_log", []))},
                 "premium_calls": ledger.count(item["id"], ok=1) if ledger else 0,
                 "premium_attempts": ledger.count(item["id"]) if ledger else 0,
                 "events": [{"kind": event["kind"], "detail": event["detail"][:500]} for event in stored["events"]],
@@ -377,36 +377,123 @@ class Gauntlet:
                 "premium_output_tokens": metrics.get("premium_output_tokens", 0),
                 "test_runs": sum(1 for event in result["events"] if event["kind"] == "test_finished"),
                 "validation_failures": metrics.get("validation_failures", 0),
+                "repair_attempts": metrics.get("repair_attempts", 0),
                 "error": result.get("error"), "hidden_output": hidden["output"][-600:],
                 "trajectory": result["events"]}
 
     async def run(self, conditions: list[str], tasks: list[dict], repeat: int = 1,
                   checkpoint: Path | None = None) -> dict:
-        """Run every (iteration, task, condition). With a checkpoint file, each finished record is
-        appended as it completes and already-finished combinations are skipped on restart."""
+        """Run every (iteration, task, condition). With a checkpoint, each finished record is
+        committed as it completes; on restart, finished runs are skipped, interrupted runs are
+        recorded and rerun, and a checkpoint from a different configuration is refused."""
         self.probe(conditions)
-        runs = []
-        if checkpoint and checkpoint.exists():
-            runs = [json.loads(line) for line in checkpoint.read_text(encoding="utf-8").splitlines() if line.strip()]
+        env = environment(tasks)
+        fingerprint = config_fingerprint(env)
+        store = Checkpoint(checkpoint, fingerprint, env) if checkpoint else None
+        runs = store.completed() if store else []
+        interrupted = store.interrupted() if store else []
         done = {(run["iteration"], run["task"], run["condition"]) for run in runs}
         for iteration in range(repeat):
             for task in tasks:
                 for condition in conditions:
-                    if (iteration, task["id"], condition) in done:
+                    key = (iteration, task["id"], condition)
+                    if key in done:
                         continue
+                    if store:
+                        store.started(key)
                     record = await self.run_one(condition, task)
-                    record["iteration"] = iteration
+                    record.update({"iteration": iteration, "fingerprint": fingerprint})
                     runs.append(record)
-                    if checkpoint:
-                        with checkpoint.open("a", encoding="utf-8") as handle:
-                            handle.write(json.dumps(record, default=str) + "\n")
+                    done.add(key)
+                    if store:
+                        store.finished(key, record)
                     print(json.dumps({key: record.get(key) for key in (
                         "condition", "task", "outcome", "wall_seconds", "free_output_tokens", "premium_calls",
                         "safety_violations")}), flush=True)
         return {"created_at": datetime.now(timezone.utc).isoformat(), "conditions": conditions,
-                "tasks": [task["id"] for task in tasks], "repeat": repeat,
+                "tasks": [task["id"] for task in tasks], "repeat": repeat, "fingerprint": fingerprint,
                 "capabilities": {condition: sorted(value[0]) for condition, value in self.brain_capabilities.items()},
-                "environment": environment(tasks), "summary": summarize(runs, conditions), "runs": runs}
+                "environment": env, "interrupted_runs": interrupted,
+                "summary": summarize(runs, conditions), "runs": runs}
+
+
+FINGERPRINT_FIELDS = ("coding_brain_commit", "coding_brain_dirty", "settings", "models", "knowledge_sources",
+                      "claude_code", "codex", "task_set_sha256")
+
+
+def config_fingerprint(env: dict) -> str:
+    """Everything that must match for runs to be comparable: code, settings, models, knowledge, tasks."""
+    stable = {key: env.get(key) for key in FINGERPRINT_FIELDS}
+    return hashlib.sha256(json.dumps(stable, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+class CheckpointMismatch(RuntimeError):
+    pass
+
+
+class Checkpoint:
+    """Append-only JSONL with a configuration header and per-line checksums.
+
+    Line kinds: header (fingerprint + environment), started (run key), finished (run key + record).
+    Each line carries the SHA-256 of its body and is flushed and fsynced before the next run starts,
+    so a torn or partial line fails verification and is ignored instead of counting as a result.
+    A run that has a started line but no finished line was interrupted: it is reported and rerun."""
+
+    def __init__(self, path: Path, fingerprint: str, env: dict):
+        self.path, self.fingerprint = path, fingerprint
+        self.entries = self._read() if path.exists() else []
+        headers = [entry for entry in self.entries if entry["kind"] == "header"]
+        if headers and headers[0]["fingerprint"] != fingerprint:
+            raise CheckpointMismatch(
+                f"{path} was written by configuration {headers[0]['fingerprint']}, this run is {fingerprint}; "
+                "the model, settings, task set, knowledge, or code changed. Use a new --output.")
+        if not headers:
+            self._append({"kind": "header", "fingerprint": fingerprint, "environment": env})
+
+    def _read(self) -> list[dict]:
+        entries = []
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            try:
+                wrapper = json.loads(line)
+                body = wrapper["body"]
+                if hashlib.sha256(body.encode()).hexdigest() != wrapper["sha256"]:
+                    continue
+                entries.append(json.loads(body))
+            except (ValueError, KeyError, TypeError):
+                continue  # torn or foreign line: never a result
+        return entries
+
+    def _append(self, entry: dict):
+        body = json.dumps(entry, default=str, sort_keys=True)
+        line = json.dumps({"sha256": hashlib.sha256(body.encode()).hexdigest(), "body": body}) + "\n"
+        with self.path.open("a", encoding="utf-8") as handle:
+            if handle.tell() and not self.path.read_bytes().endswith(b"\n"):
+                handle.write("\n")  # isolate a torn previous line
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+        self.entries.append(entry)
+
+    def started(self, key: tuple):
+        self._append({"kind": "started", "key": list(key), "at": time.time()})
+
+    def finished(self, key: tuple, record: dict):
+        self._append({"kind": "finished", "key": list(key), "record": record})
+
+    def completed(self) -> list[dict]:
+        seen, runs = set(), []
+        for entry in self.entries:
+            key = tuple(entry.get("key", []))
+            if entry["kind"] == "finished" and key not in seen:  # first finish wins; never duplicated
+                seen.add(key)
+                runs.append(entry["record"])
+        return runs
+
+    def interrupted(self) -> list[dict]:
+        finished = {tuple(entry["key"]) for entry in self.entries if entry["kind"] == "finished"}
+        return [{"iteration": entry["key"][0], "task": entry["key"][1], "condition": entry["key"][2],
+                 "started_at": entry["at"], "status": "interrupted"}
+                for entry in self.entries if entry["kind"] == "started" and tuple(entry["key"]) not in finished]
 
 
 TIMEOUT_MARKERS = ("ReadTimeout", "TimeoutError", "timed out", "Timeout", "budget exhausted before completion")

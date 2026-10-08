@@ -130,19 +130,91 @@ def test_failures_are_classified_by_cause():
     assert classify_failure({"outcome": "unsupported"}) == "unsupported"
 
 
-def test_checkpoint_resumes_without_repeating_finished_runs(tmp_path, monkeypatch):
-    tasks = [load_task(TASKS / "bug-pagination"), load_task(TASKS / "bug-duration")]
-    calls = []
+def _fake_harness(monkeypatch, calls, fingerprint_settings="a"):
+    import brain.gauntlet as gauntlet
 
     async def run_one(self, condition, task):
         calls.append((condition, task["id"]))
         return {"task": task["id"], "category": task["category"], "condition": condition, "outcome": "failed",
-                "safety_violations": [], "trajectory": []}
+                "safety_violations": [], "trajectory": [], "wall_seconds": 1.0}
     monkeypatch.setattr(Gauntlet, "run_one", run_one)
     monkeypatch.setattr(Gauntlet, "probe", lambda self, conditions: None)
-    checkpoint = tmp_path / "results.jsonl"
-    checkpoint.write_text(json.dumps({"iteration": 0, "task": "bug-pagination", "condition": "A_free_alone",
-                                      "category": "bug_fix", "outcome": "passed", "safety_violations": []}) + "\n")
-    result = asyncio.run(Gauntlet(tmp_path / "w").run(["A_free_alone"], tasks, 1, checkpoint))
+    monkeypatch.setattr(gauntlet, "environment", lambda tasks=None: {"settings": fingerprint_settings})
+
+
+def test_checkpoint_skips_finished_reruns_interrupted_and_never_duplicates(tmp_path, monkeypatch):
+    from brain.gauntlet import Checkpoint, config_fingerprint
+    tasks = [load_task(TASKS / "bug-pagination"), load_task(TASKS / "bug-duration")]
+    env = {"settings": "a"}
+    store = Checkpoint(tmp_path / "r.jsonl", config_fingerprint(env), env)
+    record = {"iteration": 0, "task": "bug-pagination", "condition": "A_free_alone", "category": "bug_fix",
+              "outcome": "passed", "safety_violations": []}
+    store.started((0, "bug-pagination", "A_free_alone"))
+    store.finished((0, "bug-pagination", "A_free_alone"), record)
+    store.finished((0, "bug-pagination", "A_free_alone"), {**record, "outcome": "failed"})  # duplicate
+    store.started((0, "bug-duration", "A_free_alone"))  # interrupted: never finished
+    calls = []
+    _fake_harness(monkeypatch, calls)
+    result = asyncio.run(Gauntlet(tmp_path / "w").run(["A_free_alone"], tasks, 1, tmp_path / "r.jsonl"))
     assert calls == [("A_free_alone", "bug-duration")]
-    assert len(result["runs"]) == 2 and len(checkpoint.read_text().splitlines()) == 2
+    assert [(run["task"], run["outcome"]) for run in result["runs"]] == [("bug-pagination", "passed"),
+                                                                         ("bug-duration", "failed")]
+    assert [item["task"] for item in result["interrupted_runs"]] == ["bug-duration"]
+    assert result["summary"]["conditions"]["A_free_alone"]["attempted"] == 2  # interruption is not a failure
+
+
+def test_torn_and_tampered_lines_are_ignored(tmp_path):
+    from brain.gauntlet import Checkpoint
+    path = tmp_path / "r.jsonl"
+    store = Checkpoint(path, "f1", {})
+    store.finished((0, "t", "A_free_alone"), {"task": "t", "outcome": "passed"})
+    good = path.read_text()
+    tampered = json.loads(good.splitlines()[-1])
+    tampered["body"] = tampered["body"].replace("passed", "failed")
+    path.write_text(good + json.dumps(tampered) + "\n" + '{"sha256": "abc", "body": "{\\"kind\\": \\"fini')
+    reread = Checkpoint(path, "f1", {})
+    assert [run["outcome"] for run in reread.completed()] == ["passed"]
+    reread.finished((0, "u", "A_free_alone"), {"task": "u", "outcome": "failed"})  # append after torn line
+    assert [run["task"] for run in Checkpoint(path, "f1", {}).completed()] == ["t", "u"]
+
+
+def test_checkpoint_from_another_configuration_is_refused(tmp_path, monkeypatch):
+    from brain.gauntlet import CheckpointMismatch
+    tasks = [load_task(TASKS / "bug-pagination")]
+    calls = []
+    _fake_harness(monkeypatch, calls, "model-a")
+    asyncio.run(Gauntlet(tmp_path / "w").run(["A_free_alone"], tasks, 1, tmp_path / "r.jsonl"))
+    _fake_harness(monkeypatch, calls, "model-b")
+    with pytest.raises(CheckpointMismatch, match="changed"):
+        asyncio.run(Gauntlet(tmp_path / "w").run(["A_free_alone"], tasks, 1, tmp_path / "r.jsonl"))
+
+
+def test_forced_kill_mid_run_then_resume(tmp_path):
+    """A real interruption: SIGKILL the harness process while a run is in progress, then resume."""
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time as clock
+    worker = Path(__file__).with_name("gauntlet_interrupt_worker.py")
+    checkpoint = tmp_path / "r.jsonl"
+    process = subprocess.Popen([sys.executable, str(worker), str(tmp_path), str(checkpoint), "slow"],
+                               cwd=Path(__file__).resolve().parents[1])
+    deadline = clock.time() + 60
+    from brain.gauntlet import Checkpoint
+    while clock.time() < deadline:
+        entries = Checkpoint(checkpoint, "fixed", {}).entries if checkpoint.exists() else []
+        if [entry["kind"] for entry in entries].count("started") == 2:  # first done, second running
+            break
+        clock.sleep(0.1)
+    os.kill(process.pid, signal.SIGKILL)
+    process.wait()
+    entries = Checkpoint(checkpoint, "fixed", {}).entries
+    assert [entry["kind"] for entry in entries] == ["header", "started", "finished", "started"]
+    resumed = subprocess.run([sys.executable, str(worker), str(tmp_path), str(checkpoint), "fast"],
+                             cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=60)
+    assert resumed.returncode == 0, resumed.stderr
+    result = json.loads(resumed.stdout.splitlines()[-1])
+    assert result["ran"] == ["bug-duration", "bug-textstats"]  # not the finished one
+    assert result["interrupted"] == ["bug-duration"]
+    assert result["completed"] == ["bug-pagination", "bug-duration", "bug-textstats"]
