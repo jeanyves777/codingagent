@@ -398,6 +398,42 @@ class Gauntlet:
                 "environment": environment(tasks), "summary": summarize(runs, conditions), "runs": runs}
 
 
+TIMEOUT_MARKERS = ("ReadTimeout", "TimeoutError", "timed out", "Timeout", "budget exhausted before completion")
+INFRASTRUCTURE_MARKERS = ("ConnectError", "No sandbox image", "docker", "unavailable", "not installed",
+                          "No brain is reachable", "exit code 125", "exit code 126", "exit code 127")
+ORCHESTRATION_EVENTS = {"integration_conflict", "dependency_blocked", "queue_failed", "interrupted"}
+
+
+def classify_failure(run: dict) -> str | None:
+    """Why a run did not pass: safety, timeout, infrastructure, orchestration, or model.
+
+    Slow hardware and timeouts are kept apart from reasoning failures, and harness or sandbox
+    problems are not charged to the model."""
+    if run.get("outcome") == "passed":
+        return None
+    if run.get("outcome") in {"unsupported", "misconfigured"}:
+        return run["outcome"]
+    if run.get("safety_violations"):
+        return "safety"
+    events = run.get("trajectory") or []
+    text = " ".join([str(run.get("error") or ""), str(run.get("agent_status") or ""),
+                     str(run.get("hidden_output") or "")[-300:]] +
+                    [event.get("detail", "") for event in events if event.get("kind") in
+                     {"blocked", "test_finished", "supervisor_unavailable"}])
+    kinds = {event.get("kind") for event in events}
+    test_infrastructure = any(event.get("kind") == "test_finished" and
+                              ('"exit_code": null' in event.get("detail", "") or
+                               any(f'"exit_code": {code}' in event.get("detail", "") for code in (125, 126, 127)))
+                              for event in events)
+    if any(marker in text for marker in TIMEOUT_MARKERS) or run.get("agent_status") == "timeout":
+        return "timeout"
+    if test_infrastructure or any(marker in text for marker in INFRASTRUCTURE_MARKERS):
+        return "infrastructure"
+    if kinds & ORCHESTRATION_EVENTS or run.get("agent_status") in {"attention_required", "integration_conflict"}:
+        return "orchestration"
+    return "model"
+
+
 def summarize(runs: list[dict], conditions: list[str]) -> dict:
     summary = {}
     for condition in conditions:
@@ -424,6 +460,11 @@ def summarize(runs: list[dict], conditions: list[str]) -> dict:
             "mean_wall_seconds": round(sum(run.get("wall_seconds", 0) for run in attempted) / len(attempted), 1)
             if attempted else None,
             "safety_violations": sum(len(run.get("safety_violations", [])) for run in attempted),
+            "failure_causes": {cause: sum(classify_failure(run) == cause for run in attempted)
+                               for cause in ("model", "orchestration", "infrastructure", "timeout", "safety")},
+            "pass_rate_excluding_timeouts_and_infrastructure": (
+                round(len(passed) / max(1, sum(classify_failure(run) not in {"timeout", "infrastructure"}
+                                               for run in attempted)), 3) if attempted else None),
             "by_category": {category: f"{sum(r['outcome'] == 'passed' for r in attempted if r['category'] == category)}"
                                       f"/{sum(1 for r in attempted if r['category'] == category)}"
                             for category in sorted({r["category"] for r in attempted})}}
@@ -450,6 +491,41 @@ def _command(*arguments) -> str | None:
         return (result.stdout or result.stderr).strip()[:200] or None
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def markdown_report(saved: dict) -> str:
+    """Human-readable pilot report: per-condition results, failure causes, per-task matrix."""
+    conditions = saved["conditions"]
+    summary = saved["summary"]["conditions"]
+    lines = ["| Metric | " + " | ".join(conditions) + " |", "| --- |" + " --- |" * len(conditions)]
+    rows = [("Passed / attempted", lambda c: f"{c['passed']}/{c['attempted']}"),
+            ("Pass rate (95% CI)", lambda c: f"{c['pass_rate']} {c['pass_rate_95ci']}"),
+            ("Pass rate excl. timeouts/infra", lambda c: str(c["pass_rate_excluding_timeouts_and_infrastructure"])),
+            ("Unsupported / misconfigured", lambda c: f"{c['unsupported']} / {c['misconfigured']}"),
+            ("Failures: model", lambda c: str(c["failure_causes"]["model"])),
+            ("Failures: orchestration", lambda c: str(c["failure_causes"]["orchestration"])),
+            ("Failures: infrastructure", lambda c: str(c["failure_causes"]["infrastructure"])),
+            ("Failures: timeout", lambda c: str(c["failure_causes"]["timeout"])),
+            ("Failures: safety", lambda c: str(c["failure_causes"]["safety"])),
+            ("Premium attempts", lambda c: str(c["premium_attempts"])),
+            ("Premium dependence rate", lambda c: str(c["premium_dependence_rate"])),
+            ("Free output tokens / success", lambda c: str(c["free_output_tokens_per_success"])),
+            ("Mean wall seconds", lambda c: str(c["mean_wall_seconds"]))]
+    for label, value in rows:
+        lines.append(f"| {label} | " + " | ".join(value(summary[condition]) for condition in conditions) + " |")
+    tasks = sorted({run["task"] for run in saved["runs"]})
+    matrix = ["", "| Task | " + " | ".join(conditions) + " |", "| --- |" + " --- |" * len(conditions)]
+    for task in tasks:
+        cells = []
+        for condition in conditions:
+            found = [run for run in saved["runs"] if run["task"] == task and run["condition"] == condition]
+            cells.append(", ".join(run["outcome"] + (f" ({run['failure_cause']})" if run.get("failure_cause")
+                                                      and run["outcome"] == "failed" else "") for run in found))
+        matrix.append(f"| {task} | " + " | ".join(cells) + " |")
+    paired = ["", "| Pair | Matched tasks | Only first passed | Only second passed |", "| --- | --- | --- | --- |"]
+    paired += [f"| {name} | {value['paired_tasks']} | {value['only_first_passed']} | {value['only_second_passed']} |"
+               for name, value in saved["summary"]["paired"].items()]
+    return "\n".join(lines + matrix + paired)
 
 
 def environment(tasks: list[dict] | None = None) -> dict:
@@ -533,7 +609,8 @@ def original_branch_violations(source: Path) -> list[str]:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="python -m brain.gauntlet")
-    parser.add_argument("command", choices=["validate", "run"])
+    parser.add_argument("command", choices=["validate", "run", "report"])
+    parser.add_argument("results", nargs="?", help="report: a saved results JSON file")
     parser.add_argument("--tasks", default="gauntlet/tasks")
     parser.add_argument("--only", action="append", help="task id (repeatable)")
     parser.add_argument("--condition", action="append", choices=CONDITIONS)
@@ -541,6 +618,16 @@ def main(argv=None):
     parser.add_argument("--workdir", default="gauntlet-runs")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
+    if args.command == "report":
+        saved = json.loads(Path(args.results).read_text(encoding="utf-8"))
+        for run in saved["runs"]:
+            run["failure_cause"] = classify_failure(run)
+        saved["summary"] = summarize(saved["runs"], saved["conditions"])
+        text = json.dumps(saved, indent=2, default=str)
+        if args.output:
+            Path(args.output).write_text(text + "\n", encoding="utf-8")
+        print(markdown_report(saved))
+        return
     tasks = tasks_in(Path(args.tasks), args.only)
     if args.command == "validate":
         result = [validate(task) for task in tasks]

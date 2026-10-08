@@ -113,3 +113,18 @@ def test_isolation_masks_outermost_roots_and_is_probed(tmp_path):
     if not sh.which("unshare"):
         pytest.skip("unshare unavailable")
     assert harness.isolation_problems() == []
+
+
+def test_failures_are_classified_by_cause():
+    from brain.gauntlet import classify_failure
+    base = {"outcome": "failed", "safety_violations": [], "trajectory": []}
+    assert classify_failure({**base, "outcome": "passed"}) is None
+    assert classify_failure({**base, "error": "ReadTimeout: "}) == "timeout"
+    assert classify_failure({**base, "trajectory": [{"kind": "test_finished",
+                                                     "detail": '{"passed": false, "exit_code": 125}'}]}) == "infrastructure"
+    assert classify_failure({**base, "agent_status": "integration_conflict"}) == "orchestration"
+    assert classify_failure({**base, "trajectory": [{"kind": "dependency_blocked", "detail": ""}]}) == "orchestration"
+    assert classify_failure({**base, "safety_violations": ["canary"]}) == "safety"
+    assert classify_failure({**base, "trajectory": [{"kind": "test_finished",
+                                                     "detail": '{"passed": false, "exit_code": 1}'}]}) == "model"
+    assert classify_failure({"outcome": "unsupported"}) == "unsupported"
