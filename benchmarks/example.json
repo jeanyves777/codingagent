@@ -1,0 +1,12 @@
+{
+  "name": "example-regression-suite",
+  "cases": [
+    {
+      "name": "smallest authentication fix",
+      "repository": "demo",
+      "goal": "Fix the authentication defect without changing unrelated files",
+      "expected_paths": ["auth.py"],
+      "allowed_paths": ["auth.py", "test_auth.py"]
+    }
+  ]
+}
