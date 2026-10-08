@@ -462,6 +462,47 @@ invariants (required non-null fields, uniqueness, freshness). Coding Brain never
 sends write requests or fuzzing traffic; run tools such as Schemathesis yourself
 against mock servers or authorized staging environments.
 
+## Coding Brain Gauntlet (evaluation)
+
+The Gauntlet measures whether the architecture, not a lucky run, produces results.
+Every task has hidden acceptance tests the agent never sees, a reference solution,
+and optional safety rules (protected files, canary strings planted by misleading
+content). `validate` proves each task is sound: the original fails the hidden tests
+and the reference passes.
+
+    .\.venv\Scripts\python.exe -m brain.gauntlet validate
+    .\.venv\Scripts\python.exe -m brain.gauntlet run --condition A_free_alone --condition B_coding_brain --condition C_three_phase --repeat 3 --output gauntlet.json
+    .\.venv\Scripts\python.exe -m brain.gauntlet run --condition claude_code --output baseline.json
+
+| Condition | What runs |
+| --- | --- |
+| A_free_alone | The free model with deterministic gates, knowledge, web, and supervisors off |
+| B_coding_brain | Free model + Knowledge Router, code tools, gates, web verification; no premium |
+| C_three_phase | B + budgeted Claude/Codex supervision (`BRAIN_SUPERVISORS`) |
+| claude_code / codex | The premium CLI alone in a copy of the repository |
+
+Each run is evaluated identically: final files are copied to a clean directory, the
+hidden tests are added, and they run in the offline sandbox with the task's image.
+The report gives, per condition, the pass rate with a Wilson 95% interval, the
+premium-dependence rate (share of successes that used Claude/Codex), premium calls
+and free output tokens per success, mean time, safety violations, results by
+category, and paired win/loss counts on identical tasks. Trajectories are kept for
+review. A task that needs a capability a condition lacks (for example `failover`
+for A, or shell access) is reported as unsupported, never counted or dropped.
+
+`gauntlet/tasks` holds a 10-task pilot set: bug fixes, features and a compatible
+refactor, a live API migration (httpx 0.28), debugging, a two-part orchestration,
+prompt injection through misleading repository notes, and recovery with the
+preferred free model offline. Add tasks in the same format to grow it toward the
+100-task gauntlet; keep hidden tests out of `repo/`.
+
+External suites (Terminal-Bench, SWE-bench variants, SkillsBench, MCPMark) are not
+bundled. They need their own harnesses, and terminal-centric suites assume shell
+access that Coding Brain's free models deliberately do not have; such tasks must be
+run through an adapter and reported as unsupported where a capability is missing.
+On CPU-only hardware, long tasks also measure hardware speed, so report model
+capability, orchestration quality and hardware separately.
+
 ## Cancellation and recovery
 
     .\.venv\Scripts\python.exe client.py cancel --id TASK_OR_ORCHESTRATION_ID
@@ -667,7 +708,7 @@ execute a fixed command. Dependency installation does not occur during a task.
 
 ## Validation
 
-The release passed 88 automated tests covering path and data restrictions,
+The release passed 106 automated tests covering path and data restrictions,
 Tree-sitter Python and TypeScript indexing, graph cycle rejection, proposal
 approval, memory gating, worker limits, repository isolation, real worktree
 commits, dependency inheritance, downstream blocking, integration conflicts,
@@ -745,6 +786,9 @@ there is no background retention job.
 | tests/test_phase7.py | Subscription supervisors, supervision policy, and GitHub fallback proofs |
 | tests/test_phase8.py | Validation, knowledge, task tools, MCP selection, and comparison proofs |
 | tests/test_phase9.py | Web policy, evidence, cache, API intelligence, browser, and preflight proofs |
+| brain/gauntlet.py | Paired evaluation harness with hidden tests and safety checks |
+| gauntlet/tasks | Pilot evaluation tasks (repo, hidden tests, reference solution) |
+| tests/test_gauntlet.py | Harness, safety, statistics, and unsupported-capability proofs |
 
 ## Primary references
 
