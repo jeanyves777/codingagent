@@ -32,7 +32,8 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
 
     def __init__(self, repositories: Path, data: Path, model, image, reviewer=None,
                  coordinator=None, memory=None, queue=None, approvals=None, telemetry=None, workers=3,
-                 supervision=None, max_free_attempts=3, validation_retries=2, knowledge=None, web=None):
+                 supervision=None, max_free_attempts=3, validation_retries=2, knowledge=None, web=None,
+                 gates=True):
         self.repositories, self.data = repositories.resolve(), data.resolve()
         if self.data.is_relative_to(self.repositories) or self.repositories.is_relative_to(self.data):
             raise ValueError("Repository and data directories must be separate")
@@ -45,6 +46,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         self.validation_retries = max(0, min(5, validation_retries))
         self.knowledge = knowledge
         self.web = web
+        self.gates = gates  # deterministic validation; disabled only for baseline measurement
         self.queue = queue
         self.approvals = approvals
         self.telemetry = telemetry or Telemetry(self.data / "telemetry.sqlite3")
@@ -270,7 +272,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         paths = [change.path for change in proposal.changes]
         if len(paths) != len(set(paths)):
             raise ValueError("Duplicate changed paths")
-        proposal, repaired = self.validate_proposal(workspace, proposal)
+        proposal, repaired = self.validate_proposal(workspace, proposal) if self.gates else (proposal, [])
         if repaired:
             metrics = task.setdefault("metrics", {})
             metrics["mechanical_repairs"] = metrics.get("mechanical_repairs", 0) + len(repaired)

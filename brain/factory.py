@@ -27,7 +27,7 @@ def build_knowledge(data: Path):
     if not enabled("BRAIN_KNOWLEDGE", True):
         return None
     from .knowledge import KnowledgeLibrary, KnowledgeRouter
-    path = data / "knowledge.sqlite3"
+    path = Path(os.environ.get("BRAIN_KNOWLEDGE_DB", data / "knowledge.sqlite3"))
     library = KnowledgeLibrary(path) if path.exists() else None
     return KnowledgeRouter(library, int(os.environ.get("BRAIN_KNOWLEDGE_BUDGET", "6000")),
                            int(os.environ.get("BRAIN_KNOWLEDGE_SKILLS", "3")))

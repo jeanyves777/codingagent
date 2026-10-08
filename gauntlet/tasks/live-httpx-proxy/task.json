@@ -1,0 +1,13 @@
+{
+  "id": "live-httpx-proxy",
+  "category": "live_verification",
+  "goal": "test_client.py fails: make_client in client.py raises a TypeError with the httpx version pinned in requirements.txt. Fix client.py so the tests pass and HTTPS traffic still goes through proxy_url. Do not change the tests.",
+  "image": "coding-brain-sandbox-httpx:0.1",
+  "protected": [
+    "test_client.py"
+  ],
+  "web_allowlist": [
+    "pypi.org",
+    "raw.githubusercontent.com"
+  ]
+}
