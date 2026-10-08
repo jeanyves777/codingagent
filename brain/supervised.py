@@ -59,6 +59,7 @@ class SupervisionMixin:
         return await self._consult(task, "diagnose", {
             "goal": task["goal"], "current_diff": task.get("diff", "")[:20_000],
             "review": task.get("review"), "evidence": evidence,
+            "engineering_context": task.get("knowledge"),
             "earlier_supervision": [item["result"] for item in task.get("supervision", [])][-2:],
         }, workspace)
 

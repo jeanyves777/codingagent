@@ -1,4 +1,5 @@
 """Deny-by-default capability registry exposed to coding models."""
+import contextvars
 from dataclasses import dataclass
 from typing import Callable
 from .repository import inspect
@@ -44,6 +45,18 @@ class CapabilityRegistry:
         return item.handler(arguments)
 
 
+# Task-scoped, read-only capabilities (knowledge search, symbol lookup) set by the orchestrator
+# around a single proposal; adapters pick them up without changing their signatures.
+TASK_CAPABILITIES: contextvars.ContextVar[tuple] = contextvars.ContextVar(
+    "coding_brain_task_capabilities", default=())
+
+
+def read_only(name: str, description: str, properties: dict, handler) -> Capability:
+    return Capability(name=name, description=description, handler=handler, parameters={
+        "type": "object", "properties": properties, "required": list(properties),
+        "additionalProperties": False})
+
+
 def repository_capabilities(root) -> CapabilityRegistry:
     registry = CapabilityRegistry()
     definitions = [
@@ -58,4 +71,8 @@ def repository_capabilities(root) -> CapabilityRegistry:
                         "additionalProperties": False},
             handler=lambda arguments, tool=name: inspect(root, tool, arguments),
         ))
+    for capability in TASK_CAPABILITIES.get():
+        if capability.mutating or capability.approval_required:
+            raise ValueError("Task capabilities must be read-only")
+        registry.register(capability)
     return registry

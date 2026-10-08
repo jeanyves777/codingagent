@@ -7,6 +7,8 @@ from pathlib import Path
 
 def complexity(goal: str, context: dict | None) -> int:
     """Deterministic 0-12 complexity score from goal length and repository context size."""
+    if context and isinstance(context.get("complexity"), int):
+        return context["complexity"]
     symbols = len((context or {}).get("symbols", []))
     dependencies = len((context or {}).get("dependencies", []))
     return min(4, len(goal) // 1000) + min(4, symbols // 10) + min(4, dependencies // 10)

@@ -30,6 +30,10 @@ class OpenAICompatibleModel:
                            "prompt_tokens": usage.get("prompt_tokens"),
                            "output_tokens": usage.get("completion_tokens")})
         del self.usage[:-200]
+        totals = self.__dict__.setdefault("totals", {"calls": 0, "prompt_tokens": 0, "output_tokens": 0})
+        totals["calls"] += 1
+        totals["prompt_tokens"] += usage.get("prompt_tokens") or 0
+        totals["output_tokens"] += usage.get("completion_tokens") or 0
         choice = payload["choices"][0]
         if choice.get("finish_reason") == "length":
             raise ValueError("Model output budget exhausted before completion")

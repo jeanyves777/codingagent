@@ -143,3 +143,47 @@ def relevant_context(index: dict, query: str, limit: int = 40) -> dict:
     return {"symbols": symbols[:limit], "dependencies": dependencies[:limit],
             "call_graph": call_graph(index, focus, limit),
             "parse_errors": index.get("parse_errors", [])[:20]}
+
+
+def _terms(text: str) -> set[str]:
+    """Lowercase terms, splitting snake_case and camelCase so `wordCount` matches `word count`."""
+    import re
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text).replace("_", " ").replace(".", " ")
+    return {word.lower() for word in re.findall(r"[A-Za-z][A-Za-z0-9]+", spaced) if len(word) > 2}
+
+
+def ranked_context(index: dict, query: str, max_symbols: int = 15, max_chars: int = 3000) -> dict:
+    """Scored, bounded code context: only symbols that match the goal, the files that hold them,
+    their imports, and their direct callers and callees, compacted to fit a character budget."""
+    words = _terms(query)
+
+    def score(symbol):
+        name_terms = _terms(symbol["name"])
+        exact = 5 if symbol["name"].lower() in query.lower() else 0
+        return exact + 3 * len(words & name_terms) + len(words & _terms(symbol["path"]))
+    ranked = sorted(((score(item), item) for item in index.get("symbols", [])),
+                    key=lambda pair: -pair[0])
+    chosen = [item for points, item in ranked if points > 0][:max_symbols]
+    if not chosen:
+        chosen = [item for _, item in ranked[:min(8, max_symbols)]]
+    files = list(dict.fromkeys(item["path"] for item in chosen))[:6]
+    names = {item["name"] for item in chosen}
+    graph = call_graph(index, names, 10)
+    context = {
+        "files": files,
+        "symbols": [f"{item['path']}:{item['line']} {item['kind']} {item['name']}" for item in chosen],
+        "imports": [f"{item['path']}:{item['line']} {item['statement'][:120]}"
+                    for item in index.get("dependencies", []) if item["path"] in files][:10],
+        "callers": [f"{call['path']}:{call['line']} {call['caller']} -> {call['callee']}"
+                    for call in graph["callers"]],
+        "callees": [f"{call['path']}:{call['line']} {call['caller']} -> {call['callee']}"
+                    for call in graph["callees"]],
+        "parse_errors": index.get("parse_errors", [])[:5],
+    }
+    import json
+    while len(json.dumps(context)) > max_chars:
+        longest = max(("symbols", "imports", "callers", "callees"), key=lambda key: len(context[key]))
+        if not context[longest]:
+            break
+        context[longest].pop()
+    return context

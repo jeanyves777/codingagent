@@ -21,6 +21,17 @@ def enabled(name: str, default=False) -> bool:
     return value.lower() in {"true", "1"}
 
 
+def build_knowledge(data: Path):
+    """The Engineering Knowledge Router is on by default; BRAIN_KNOWLEDGE=false disables it."""
+    if not enabled("BRAIN_KNOWLEDGE", True):
+        return None
+    from .knowledge import KnowledgeLibrary, KnowledgeRouter
+    path = data / "knowledge.sqlite3"
+    library = KnowledgeLibrary(path) if path.exists() else None
+    return KnowledgeRouter(library, int(os.environ.get("BRAIN_KNOWLEDGE_BUDGET", "6000")),
+                           int(os.environ.get("BRAIN_KNOWLEDGE_SKILLS", "3")))
+
+
 def single_provider_config() -> dict:
     """Express the BRAIN_PROVIDER/BRAIN_*_MODEL variables as a brains configuration."""
     provider = os.environ.get("BRAIN_PROVIDER", "ollama").lower()
@@ -101,6 +112,8 @@ def build_brain_from_env(require_queue=False) -> Brain:
         reviewer=roles["reviewer"], coordinator=roles["coordinator"],
         memory=memory, queue=queue, approvals=approvals, telemetry=telemetry,
         supervision=build_supervision(config, data),
+        knowledge=build_knowledge(data),
+        validation_retries=int(os.environ.get("BRAIN_VALIDATION_RETRIES", "2")),
         max_free_attempts=int(os.environ.get("BRAIN_MAX_FREE_ATTEMPTS", "3")),
         workers=max(1, min(8, int(os.environ.get("BRAIN_WORKERS", "3"))))
     )

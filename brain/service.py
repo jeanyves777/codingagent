@@ -5,10 +5,12 @@ import hashlib
 import inspect
 import json
 import shutil
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from .approvals import ApprovalRequired
+from .capabilities import TASK_CAPABILITIES
 from .brains import is_unavailable
 from .contracts import Assignment, Delegation, Proposal, validate_graph
 from .intelligence import build_index, relevant_context
@@ -28,7 +30,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
 
     def __init__(self, repositories: Path, data: Path, model, image, reviewer=None,
                  coordinator=None, memory=None, queue=None, approvals=None, telemetry=None, workers=3,
-                 supervision=None, max_free_attempts=3, validation_retries=2):
+                 supervision=None, max_free_attempts=3, validation_retries=2, knowledge=None):
         self.repositories, self.data = repositories.resolve(), data.resolve()
         if self.data.is_relative_to(self.repositories) or self.repositories.is_relative_to(self.data):
             raise ValueError("Repository and data directories must be separate")
@@ -39,6 +41,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         self.supervision = supervision
         self.max_free_attempts = max(1, min(10, max_free_attempts))
         self.validation_retries = max(0, min(5, validation_retries))
+        self.knowledge = knowledge
         self.queue = queue
         self.approvals = approvals
         self.telemetry = telemetry or Telemetry(self.data / "telemetry.sqlite3")
@@ -210,6 +213,12 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                 self.event(task, "memory_fallback", str(error)[:500])
         index = await asyncio.to_thread(build_index, workspace)
         context = relevant_context(index, goal)
+        tools = ()
+        if self.knowledge:
+            context, tools = self._engineering_packet(task, workspace, goal, index, memories, context)
+            memories = []  # verified fixes travel inside the packet
+        started, before = time.monotonic(), self.usage_counters()
+        token = TASK_CAPABILITIES.set(tools)
         try:
             with self.telemetry.span(task["trace_id"], "model.propose", task["id"]):
                 parameters = inspect.signature(self.model.propose).parameters.values()
@@ -219,6 +228,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                 kwargs = {"task_id": task["id"]} if supports_task else {}
                 raw = await self.model.propose(workspace, goal, memories, context, **kwargs)
         except ApprovalRequired as pending:
+            self.record_usage(task, started, before)
             task["status"] = "awaiting_tool_approval"
             task["pending_approval_id"] = pending.request["id"]
             task["pending_goal"] = goal
@@ -226,6 +236,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                        f"{pending.request['capability']} request {pending.request['id']}")
             return False
         except Exception as error:
+            self.record_usage(task, started, before)
             if not is_unavailable(error):
                 raise
             # A free model being offline is never a reason to spend premium usage.
@@ -235,6 +246,9 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                        f"No free implementer reachable ({type(error).__name__}); paused. Retry when one "
                        "is running, or publish the work for GitHub CI and PR feedback.")
             return False
+        finally:
+            TASK_CAPABILITIES.reset(token)
+        self.record_usage(task, started, before)
         try:
             proposal = Proposal.model_validate_json(raw)
         except ValueError as error:
@@ -277,6 +291,56 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                    else "Proposal supplied by " + author)
         return True
 
+    def _engineering_packet(self, task, workspace, goal, index, memories, context):
+        """Phase 2 knowledge routing: compress what the free model needs into one packet."""
+        from .knowledge import task_capabilities
+        from .routing import complexity
+        from .sandbox import profile
+        try:
+            command = profile(workspace)["command"]
+        except (ValueError, OSError):
+            command = None
+        packet = self.knowledge.packet(
+            goal, index, memories, command, task.get("failure_log"),
+            read_file=lambda path: safe_path(workspace, path).read_text(encoding="utf-8"))
+        size = len(json.dumps(packet))
+        task["knowledge"] = {"files": packet["code"]["files"], "symbols": packet["code"]["symbols"][:8],
+                             "rules": [f"{rule['source']}/{rule['name']}" for rule in packet["engineering_rules"]],
+                             "success_criteria": packet["success_criteria"]}
+        metrics = task.setdefault("metrics", {})
+        metrics["packet_chars"] = size
+        self.event(task, "knowledge_packet", json.dumps({
+            "chars": size, "files": packet["code"]["files"],
+            "sources_included": list(packet["code"].get("sources", {})),
+            "rules": [f"{rule['source']}/{rule['name']}" for rule in packet["engineering_rules"]],
+            "verified_fixes": len(packet["verified_fixes"])}))
+        tools = task_capabilities(workspace, index, self.knowledge.library)
+        return {"engineering_packet": packet, "complexity": complexity(goal, context)}, tools
+
+    def usage_counters(self) -> dict:
+        totals = {"calls": 0, "prompt_tokens": 0, "output_tokens": 0}
+        seen = set()
+
+        def visit(model):
+            if model is None or id(model) in seen:
+                return
+            seen.add(id(model))
+            for child in [getattr(model, name, None) for name in ("fast", "strong")] + \
+                    list(getattr(model, "models", []) or []):
+                visit(child)
+            for key, value in getattr(model, "totals", {}).items():
+                totals[key] += value
+        for model in (self.model, self.reviewer, self.coordinator):
+            visit(model)
+        return totals
+
+    def record_usage(self, task, started, before):
+        after = self.usage_counters()
+        metrics = task.setdefault("metrics", {})
+        for key in after:
+            metrics[key] = metrics.get(key, 0) + after[key] - before[key]
+        metrics["model_seconds"] = round(metrics.get("model_seconds", 0) + time.monotonic() - started, 1)
+
     async def resume(self, task_id: str):
         task = self.store.get(task_id)
         if task["status"] != "queued" or not task.get("pending_goal"):
@@ -303,7 +367,11 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         return task
 
     async def review(self, task):
-        verdict = await self.reviewer.review(task["goal"], task["diff"])
+        started, before = time.monotonic(), self.usage_counters()
+        try:
+            verdict = await self.reviewer.review(task["goal"], task["diff"])
+        finally:
+            self.record_usage(task, started, before)
         if not isinstance(verdict, dict) or type(verdict.get("approved")) is not bool:
             raise ValueError("Invalid reviewer verdict")
         if not isinstance(verdict.get("reason"), str) or len(verdict["reason"]) > 4000:

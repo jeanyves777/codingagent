@@ -1,0 +1,11 @@
+{
+  "sources": [
+    {"name": "superpowers", "origin": "https://github.com/obra/superpowers",
+     "revision": "8ca22dba9a94f28898bbce59f2537ff4d87c747d", "license": "MIT", "include": ["skills/"]},
+    {"name": "agent-skills", "origin": "https://github.com/anthropics/skills",
+     "revision": "683bc88e56f3e09ba94f7055977f3d3aa499f202", "include": ["skills/"]},
+    {"name": "engineering-playbook", "origin": "https://github.com/microsoft/code-with-engineering-playbook",
+     "revision": "016770e43d8a75be87b98c000c049f07c4a6e6f8", "license": "CC-BY-4.0",
+     "include": ["docs/automated-testing/", "docs/code-reviews/", "docs/design/"]}
+  ]
+}
