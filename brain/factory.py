@@ -2,7 +2,8 @@
 import os
 from pathlib import Path
 from .approvals import ToolApprovalStore
-from .brains import DEFAULT_URLS, PROVIDERS, build_roles, load_brains, validate_url
+from .brains import (DEFAULT_URLS, PROVIDERS, build_roles, build_supervision, load_brains,
+                     load_supervisors, validate_url)
 from .durable_queue import DurableQueue
 from .mcp_gateway import MCPGateway
 from .memory import OllamaEmbedder, PostgresVectorMemory, SemanticMemory, SQLiteVectorMemory
@@ -53,6 +54,15 @@ def single_provider_config() -> dict:
 def build_brain_from_env(require_queue=False) -> Brain:
     brains_file = os.environ.get("BRAIN_BRAINS_CONFIG")
     config = load_brains(Path(brains_file)) if brains_file else single_provider_config()
+    if os.environ.get("BRAIN_SUPERVISORS"):
+        # Quick setup: a comma-separated list of claude and/or codex, using the signed-in CLIs.
+        names = [name.strip() for name in os.environ["BRAIN_SUPERVISORS"].split(",") if name.strip()]
+        providers = {"claude": "claude_cli", "codex": "codex_cli"}
+        if not names or any(name not in providers for name in names):
+            raise RuntimeError("BRAIN_SUPERVISORS must list claude and/or codex")
+        config.update(load_supervisors({"supervisors": {name: {"provider": providers[name]}
+                                                        for name in names},
+                                        "supervision": config.get("supervision", {})}))
     ollama_url = (os.environ.get("BRAIN_MODEL_URL") if not brains_file and
                   os.environ.get("BRAIN_PROVIDER", "ollama").lower() == "ollama" else None)
     embedding_url = os.environ.get("BRAIN_EMBEDDING_URL", ollama_url or DEFAULT_URLS["ollama"])
@@ -90,5 +100,7 @@ def build_brain_from_env(require_queue=False) -> Brain:
          "node": os.environ.get("BRAIN_NODE_SANDBOX_IMAGE", "coding-brain-node-sandbox:0.1")},
         reviewer=roles["reviewer"], coordinator=roles["coordinator"],
         memory=memory, queue=queue, approvals=approvals, telemetry=telemetry,
+        supervision=build_supervision(config, data),
+        max_free_attempts=int(os.environ.get("BRAIN_MAX_FREE_ATTEMPTS", "3")),
         workers=max(1, min(8, int(os.environ.get("BRAIN_WORKERS", "3"))))
     )

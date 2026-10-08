@@ -5,6 +5,13 @@ import inspect
 from pathlib import Path
 
 
+def complexity(goal: str, context: dict | None) -> int:
+    """Deterministic 0-12 complexity score from goal length and repository context size."""
+    symbols = len((context or {}).get("symbols", []))
+    dependencies = len((context or {}).get("dependencies", []))
+    return min(4, len(goal) // 1000) + min(4, symbols // 10) + min(4, dependencies // 10)
+
+
 class RoutingPerformance:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -58,9 +65,7 @@ class RoutedModel:
         return route
 
     def _implementer(self, goal, context, task_id=None):
-        symbols = len((context or {}).get("symbols", []))
-        dependencies = len((context or {}).get("dependencies", []))
-        score = min(4, len(goal) // 1000) + min(4, symbols // 10) + min(4, dependencies // 10)
+        score = complexity(goal, context)
         complex_task = score >= self.threshold
         if self.performance:
             model, strategy = self.performance.choose(self.fast, self.strong, complex_task)

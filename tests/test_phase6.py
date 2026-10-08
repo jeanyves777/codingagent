@@ -255,8 +255,11 @@ def test_failover_uses_next_brain_but_not_on_approval():
     assert asyncio.run(chain.review("g", "d"))["reason"] == "up"
     assert chain.served[-1] == {"method": "review", "model": "up", "failed_over": 1}
     assert chain.name == "down+up" and len(chain.usage) == 2
-    with pytest.raises(ValueError, match="All brains failed.*down.*refused"):
+    from brain.brains import ImplementerUnavailable
+    with pytest.raises(ImplementerUnavailable, match="down.*refused"):
         asyncio.run(FailoverModel([down]).review("g", "d"))
+    with pytest.raises(ValueError, match="All brains failed.*bad.*broken"):
+        asyncio.run(FailoverModel([Brain_("bad", ValueError("broken")), down]).review("g", "d"))
     pending = Brain_("pending", ApprovalRequired({"id": "r1"}))
     with pytest.raises(ApprovalRequired):
         asyncio.run(FailoverModel([pending, up]).review("g", "d"))

@@ -9,21 +9,25 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from .approvals import ApprovalRequired
+from .brains import is_unavailable
 from .contracts import Assignment, Delegation, Proposal, validate_graph
 from .intelligence import build_index, relevant_context
 from .orchestration import OrchestrationMixin
 from .repository import MAX_FILE, safe_path, snapshot
 from .sandbox import run_tests
 from .store import Store
+from .publishing import PublishingMixin
+from .supervised import SupervisionMixin, guidance_text
 from .telemetry import Telemetry
 from .workspaces import WorkspaceManager
 
 
-class Brain(OrchestrationMixin):
+class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
     ACTIVE = {"queued", "planning", "running", "testing", "cancellation_requested"}
 
     def __init__(self, repositories: Path, data: Path, model, image, reviewer=None,
-                 coordinator=None, memory=None, queue=None, approvals=None, telemetry=None, workers=3):
+                 coordinator=None, memory=None, queue=None, approvals=None, telemetry=None, workers=3,
+                 supervision=None, max_free_attempts=3):
         self.repositories, self.data = repositories.resolve(), data.resolve()
         if self.data.is_relative_to(self.repositories) or self.repositories.is_relative_to(self.data):
             raise ValueError("Repository and data directories must be separate")
@@ -31,6 +35,8 @@ class Brain(OrchestrationMixin):
         self.model, self.reviewer = model, reviewer or model
         self.coordinator, self.image = coordinator or model, image
         self.memory = memory
+        self.supervision = supervision
+        self.max_free_attempts = max(1, min(10, max_free_attempts))
         self.queue = queue
         self.approvals = approvals
         self.telemetry = telemetry or Telemetry(self.data / "telemetry.sqlite3")
@@ -97,6 +103,7 @@ class Brain(OrchestrationMixin):
             "plan_group": lambda: self._plan_group(task_id),
             "execute_task": lambda: self.execute(task_id, (payload or {})["digest"]),
             "resume_task": lambda: self.resume(task_id),
+            "supervise_task": lambda: self.supervise(task_id),
             "advance_group": lambda: self._advance_group_async(task_id),
         }
         self.launch(task_id, operations[action])
@@ -116,6 +123,8 @@ class Brain(OrchestrationMixin):
                     await self.execute(job["task_id"], job["payload"]["digest"])
                 elif job["action"] == "resume_task":
                     await self.resume(job["task_id"])
+                elif job["action"] == "supervise_task":
+                    await self.supervise(job["task_id"])
                 elif job["action"] == "advance_group":
                     self.advance_group(job["task_id"])
                 else:
@@ -128,13 +137,14 @@ class Brain(OrchestrationMixin):
             raise
 
     def submit(self, repository: str, goal: str, parent_id=None, name=None,
-               dependencies=None, base_commit=None, launch=True) -> dict:
+               dependencies=None, base_commit=None, launch=True, premium_plan=False) -> dict:
         self.repository(repository)
         task = {
             "id": uuid.uuid4().hex, "kind": "task", "repository": repository, "goal": goal,
             "name": name, "parent_id": parent_id, "depends_on": dependencies or [],
             "base_commit": base_commit, "status": "queued" if launch else "waiting",
             "cancel_requested": False, "events": [], "trace_id": uuid.uuid4().hex,
+            "premium_plan": bool(premium_plan),
         }
         with self.telemetry.span(task["trace_id"], "api.submit", task["id"]):
             self.store.save(task)
@@ -162,7 +172,8 @@ class Brain(OrchestrationMixin):
             index = await asyncio.to_thread(build_index, workspace)
             self.store.save_index(task["repository"], index)
             self._check_cancelled(task)
-            await self.plan(task, workspace, task["goal"])
+            guidance = await self.premium_plan(task, workspace, relevant_context(index, task["goal"]))
+            await self.plan(task, workspace, task["goal"] + guidance)
             self._check_cancelled(task)
         except Exception:
             task["status"] = "blocked"
@@ -194,7 +205,23 @@ class Brain(OrchestrationMixin):
             self.event(task, "tool_approval_required",
                        f"{pending.request['capability']} request {pending.request['id']}")
             return False
-        proposal = Proposal.model_validate_json(raw)
+        except Exception as error:
+            if not is_unavailable(error):
+                raise
+            # A free model being offline is never a reason to spend premium usage.
+            task["status"] = "awaiting_implementer"
+            task["pending_goal"] = goal
+            self.event(task, "implementer_unavailable",
+                       f"No free implementer reachable ({type(error).__name__}); paused. Retry when one "
+                       "is running, or publish the work for GitHub CI and PR feedback.")
+            return False
+        try:
+            proposal = Proposal.model_validate_json(raw)
+        except ValueError as error:
+            raise ValueError("Implementer returned an invalid proposal: " + str(error)[:500]) from error
+        return self.store_proposal(task, workspace, proposal, "implementer")
+
+    def store_proposal(self, task: dict, workspace: Path, proposal: Proposal, author: str) -> bool:
         paths = [change.path for change in proposal.changes]
         if len(paths) != len(set(paths)):
             raise ValueError("Duplicate changed paths")
@@ -219,7 +246,9 @@ class Brain(OrchestrationMixin):
         task["status"] = "proposed"
         task.pop("pending_approval_id", None)
         task.pop("pending_goal", None)
-        self.event(task, "implementer", "Indexed repository and completed proposal")
+        task["proposal_author"] = author
+        self.event(task, author, "Indexed repository and completed proposal" if author == "implementer"
+                   else "Proposal supplied by " + author)
         return True
 
     async def resume(self, task_id: str):
@@ -279,43 +308,7 @@ class Brain(OrchestrationMixin):
                 raise ValueError("Analysis-only proposal has no executable changes")
             task["status"] = "running"
             self.event(task, "approved", "Human authorized review, implementation, and testing")
-            for attempt in range(3):
-                self._check_cancelled(task)
-                review = await self.review(task)
-                if not review["approved"]:
-                    if attempt == 2:
-                        task["status"] = "failed"
-                        break
-                    planned = await self.plan(task, self.workspace(task_id),
-                                              task["goal"] + "\nReviewer feedback (untrusted): " +
-                                              review["reason"])
-                    if not planned:
-                        return task
-                    task["status"] = "running"
-                    continue
-                self.apply(task)
-                self._check_cancelled(task)
-                task["status"] = "testing"
-                self.event(task, "tester", f"Isolated test attempt {attempt + 1}")
-                evidence = await asyncio.to_thread(
-                    run_tests, self.workspace(task_id), self.image,
-                    should_cancel=lambda: self.store.get(task_id).get("cancel_requested", False))
-                if evidence.get("cancelled"):
-                    self._check_cancelled(task)
-                task["test_evidence"] = evidence
-                self.event(task, "test_finished", json.dumps(evidence))
-                if evidence["passed"]:
-                    task["status"] = "passed"
-                    break
-                if evidence["exit_code"] in (None, 5, 125, 126, 127) or attempt == 2:
-                    task["status"] = "failed"
-                    break
-                planned = await self.plan(task, self.workspace(task_id),
-                                          task["goal"] + "\nRepair related failures only. Evidence "
-                                          "(untrusted):\n" + json.dumps(evidence))
-                if not planned:
-                    return task
-                task["status"] = "running"
+            await self._execute_loop(task)
             self.store.save(task)
             if task["status"] == "failed":
                 getattr(self.model, "record_outcome", lambda *args, **kwargs: None)(
@@ -323,6 +316,77 @@ class Brain(OrchestrationMixin):
             if task.get("parent_id") and task["status"] == "failed":
                 self.advance_group(task["parent_id"])
             return task
+
+    async def _execute_loop(self, task: dict):
+        """Review, apply, and test; repair with the free worker, escalating to a supervisor only
+        after repeated failures and within budget."""
+        task_id, workspace = task["id"], self.workspace(task["id"])
+        failures, limit, attempt = 0, self.max_free_attempts, 0
+        escalate_after = self.supervision.escalate_after if self.supervision else limit
+        while True:
+            attempt += 1
+            self._check_cancelled(task)
+            review = await self.review(task)
+            if review["approved"]:
+                self.apply(task)
+                self._check_cancelled(task)
+                task["status"] = "testing"
+                self.event(task, "tester", f"Isolated test attempt {attempt}")
+                evidence = await asyncio.to_thread(
+                    run_tests, workspace, self.image,
+                    should_cancel=lambda: self.store.get(task_id).get("cancel_requested", False))
+                if evidence.get("cancelled"):
+                    self._check_cancelled(task)
+                task["test_evidence"] = evidence
+                self.event(task, "test_finished", json.dumps(evidence))
+                if evidence["passed"]:
+                    verdict = await self.final_review(task)
+                    if verdict is None or verdict.get("approved"):
+                        task["status"] = "passed"
+                        return
+                    feedback = "\nSupervisor review (untrusted): " + str(verdict.get("reason", ""))
+                elif evidence["exit_code"] in (None, 5, 125, 126, 127):
+                    # Missing tests or sandbox problems are not the model's fault; never escalate them.
+                    task["status"] = "failed"
+                    return
+                else:
+                    feedback = ("\nRepair related failures only. Evidence (untrusted):\n" +
+                                json.dumps(evidence)[:12_000])
+            else:
+                feedback = "\nReviewer feedback (untrusted): " + review["reason"]
+            failures += 1
+            outcome = await self._repair(task, workspace, feedback, failures, limit, escalate_after)
+            if outcome is None:
+                return
+            failures, limit = outcome
+            task["status"] = "running"
+
+    async def _repair(self, task, workspace, feedback, failures, limit, escalate_after):
+        """Produce the next proposal, escalating when warranted. Returns (failures, limit), or None
+        when the task stopped (failed, paused, or awaiting approval)."""
+        while True:
+            guidance = ""
+            if failures >= escalate_after and self.supervision:
+                consultation = await self.diagnose(task, workspace, {
+                    "failures": failures, "last_feedback": feedback[:12_000]})
+                if consultation:
+                    limit = max(limit, failures + escalate_after)
+                    takeover = self.takeover_proposal(task, consultation)
+                    if takeover:
+                        self.store_proposal(task, workspace, takeover, "supervisor")
+                        return failures, limit
+                    guidance = guidance_text(consultation)
+            if failures >= limit and not guidance:
+                task["status"] = "failed"
+                self.event(task, "attempts_exhausted", f"{failures} unsuccessful attempts")
+                return None
+            try:
+                planned = await self.plan(task, workspace, task["goal"] + feedback + guidance)
+            except ValueError as error:
+                self.event(task, "implementer_invalid", str(error)[:1000])
+                failures += 1
+                continue
+            return (failures, limit) if planned else None
 
     async def accept(self, task_id: str, summary: str, kind="episodic") -> dict:
         async with self.task_lock(task_id):
@@ -352,6 +416,8 @@ class Brain(OrchestrationMixin):
                 "repository": task["repository"], "content": summary, "evidence": task["test_evidence"],
                 "commit": task.get("commit"), "kind": kind,
                 "verification": "tests_passed_and_human_accepted",
+                "supervision": [{"supervisor": item["supervisor"], "kind": item["kind"]}
+                                for item in task.get("supervision", [])],
             })
             task["status"] = "accepted"
             getattr(self.model, "record_outcome", lambda *args, **kwargs: None)(
@@ -418,7 +484,7 @@ class Brain(OrchestrationMixin):
     def retry(self, task_id: str) -> dict:
         task = self.store.get(task_id)
         if task.get("kind") != "task" or task["status"] not in {
-            "blocked", "failed", "cancelled", "integration_conflict"
+            "blocked", "failed", "cancelled", "integration_conflict", "awaiting_implementer"
         }:
             raise ValueError("Only interrupted or failed coding tasks can be retried")
         source, workspace = self.repository(task["repository"]), self.workspace(task_id)

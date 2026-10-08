@@ -9,12 +9,18 @@ parser.add_argument("action", choices=["submit", "delegate", "group", "status", 
                                       "accept", "cancel", "retry", "sync-memory", "workers", "memory",
                                       "semantic-memory", "context", "evaluation", "learning", "routes",
                                       "mcp-tools", "approvals", "approve-tool", "deny-tool", "trace",
-                                      "global-events", "cleanup", "prune"])
+                                      "global-events", "cleanup", "prune", "escalate", "supervision",
+                                      "publish", "pr-feedback", "follow-up"])
 parser.add_argument("--repository")
 parser.add_argument("--goal")
 parser.add_argument("--id")
 parser.add_argument("--digest")
 parser.add_argument("--summary")
+parser.add_argument("--premium-plan", action="store_true",
+                    help="submit: have a Claude/Codex supervisor write the plan the free model follows")
+parser.add_argument("--remote", default="origin", help="publish: Git remote to push to")
+parser.add_argument("--base", help="publish: pull request base branch")
+parser.add_argument("--github-repository", help="publish: owner/name when the remote is not on GitHub")
 parser.add_argument("--days", type=float, default=7, help="prune: retention window in days")
 parser.add_argument("--kind", choices=["episodic", "semantic", "procedural"], default="episodic")
 args = parser.parse_args()
@@ -27,12 +33,26 @@ with httpx.Client(base_url=base, headers={"Authorization": "Bearer " + token}, t
     if args.action in {"submit", "delegate"}:
         if not args.repository or not args.goal:
             parser.error("submit requires --repository and --goal")
-        response = client.post("/orchestrations" if args.action == "delegate" else "/tasks",
-                               json={"repository": args.repository, "goal": args.goal})
+        body = {"repository": args.repository, "goal": args.goal}
+        if args.action == "submit":
+            body["premium_plan"] = args.premium_plan
+        response = client.post("/orchestrations" if args.action == "delegate" else "/tasks", json=body)
     elif args.action == "group":
         if not args.id:
             parser.error("group requires --id")
         response = client.get("/orchestrations/" + args.id)
+    elif args.action == "supervision":
+        response = client.get("/supervision", params={"task_id": args.id} if args.id else {})
+    elif args.action == "publish":
+        if not args.id:
+            parser.error("publish requires --id")
+        response = client.post(f"/tasks/{args.id}/publish", json={
+            key: value for key, value in {"remote": args.remote, "base": args.base,
+                                          "github_repository": args.github_repository}.items() if value})
+    elif args.action in {"escalate", "pr-feedback", "follow-up"}:
+        if not args.id:
+            parser.error(f"{args.action} requires --id")
+        response = client.post(f"/tasks/{args.id}/{args.action}")
     elif args.action == "prune":
         response = client.post("/maintenance/prune", params={"older_than_days": args.days})
     elif args.action in {"status", "events", "execute", "accept", "cancel", "retry", "sync-memory",

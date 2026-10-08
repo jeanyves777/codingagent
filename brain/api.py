@@ -14,6 +14,13 @@ from .factory import build_brain_from_env
 class TaskRequest(BaseModel):
     repository: str = Field(min_length=1, max_length=100)
     goal: str = Field(min_length=1, max_length=8000)
+    premium_plan: bool = False
+
+
+class PublishRequest(BaseModel):
+    remote: str = Field(default="origin", pattern=r"^[A-Za-z0-9_.-]{1,100}$")
+    base: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_./-]{1,200}$")
+    github_repository: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
 class Approval(BaseModel):
@@ -58,11 +65,13 @@ def create_app(brain=None, token=None):
                     "fast": getattr(brain.model, "fast", None),
                     "reviewer": brain.reviewer, "coordinator": brain.coordinator}.items()},
                 "durable_queue": brain.queue is not None,
-                "tool_approvals": brain.approvals is not None}
+                "tool_approvals": brain.approvals is not None,
+                "supervisors": [item.name for item in brain.supervision.supervisors]
+                               if brain.supervision else []}
 
     @app.post("/tasks")
     async def create(request: TaskRequest):
-        return brain.submit(request.repository, request.goal)
+        return brain.submit(request.repository, request.goal, premium_plan=request.premium_plan)
 
     @app.post("/orchestrations")
     async def delegate(request: TaskRequest):
@@ -139,6 +148,29 @@ def create_app(brain=None, token=None):
     @app.post("/tasks/{task_id}/retry")
     async def retry(task_id: str):
         return brain.retry(task_id)
+
+    @app.post("/tasks/{task_id}/escalate")
+    async def escalate(task_id: str):
+        return brain.escalate(task_id)
+
+    @app.get("/supervision")
+    def supervision(task_id: str | None = None):
+        if not brain.supervision:
+            return {"supervisors": [], "calls": []}
+        task = brain.store.get(task_id) if task_id else None
+        return {**brain.supervision.report(task), "calls": brain.supervision.ledger.calls(task_id)}
+
+    @app.post("/tasks/{task_id}/publish")
+    async def publish(task_id: str, request: PublishRequest):
+        return await brain.publish(task_id, request.remote, request.base, request.github_repository)
+
+    @app.post("/tasks/{task_id}/pr-feedback")
+    async def pr_feedback(task_id: str):
+        return await brain.pr_feedback(task_id)
+
+    @app.post("/tasks/{task_id}/follow-up")
+    async def follow_up(task_id: str):
+        return brain.follow_up(task_id)
 
     @app.post("/tasks/{task_id}/cleanup")
     def cleanup(task_id: str):

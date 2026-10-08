@@ -23,7 +23,13 @@ class OrchestrationMixin:
         group = self.store.get(group_id)
         group["status"] = "planning"
         self.event(group, "coordinator", "Creating dependency graph")
-        delegation = Delegation.model_validate(await self.coordinator.decompose(group["goal"]))
+        graph = None
+        if self.supervision and self.supervision.plan_orchestrations:
+            consultation = await self._consult(group, "decompose", {"goal": group["goal"]})
+            graph = consultation["result"] if consultation else None
+        if graph is None:
+            graph = await self.coordinator.decompose(group["goal"])
+        delegation = Delegation.model_validate(graph)
         validate_graph(delegation)
         group = self.store.get(group_id)
         if group.get("cancel_requested"):

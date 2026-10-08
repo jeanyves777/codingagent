@@ -44,6 +44,19 @@ def validate_url(url: str, has_key: bool) -> str:
     return url
 
 
+class ImplementerUnavailable(RuntimeError):
+    """No free implementer could be reached. This pauses work; it never triggers escalation."""
+
+
+def is_unavailable(error: BaseException) -> bool:
+    """True when an error means the model endpoint could not be reached at all."""
+    import httpx
+    if isinstance(error, (ImplementerUnavailable, httpx.ConnectError, httpx.ConnectTimeout,
+                          ConnectionError)):
+        return True
+    return type(error).__name__ == "APIConnectionError"
+
+
 class FailoverModel:
     """Try each brain in order; move to the next one when a brain is unreachable or misbehaves.
 
@@ -67,19 +80,22 @@ class FailoverModel:
         return getattr(self.models[0], "mcp_gateway", None)
 
     async def _call(self, method, *args, **kwargs):
-        errors = []
+        errors, unreachable = [], 0
         for model in self.models:
             try:
                 result = await getattr(model, method)(*args, **kwargs)
             except ApprovalRequired:
                 raise
             except Exception as error:
+                unreachable += is_unavailable(error)
                 errors.append(f"{getattr(model, 'name', 'unknown')}: {type(error).__name__}: {error}"[:300])
                 continue
             self.served.append({"method": method, "model": getattr(model, "name", "unknown"),
                                 "failed_over": len(errors)})
             del self.served[:-200]
             return result
+        if unreachable == len(self.models):
+            raise ImplementerUnavailable("No brain is reachable: " + " | ".join(errors))
         raise ValueError("All brains failed: " + " | ".join(errors))
 
     async def propose(self, root, goal, memories, repository_context=None, task_id=None):
@@ -112,8 +128,10 @@ def build_brain_model(spec: dict, options: dict, gateway=None):
 def load_brains(path: Path) -> dict:
     """Validate a brains file and return {"brains": {name: spec}, "roles": {role: [names]}}."""
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if set(payload) - {"brains", "roles"} or not isinstance(payload.get("brains"), dict):
-        raise ValueError("Brains configuration must contain a brains object and optional roles")
+    if set(payload) - {"brains", "roles", "supervisors", "supervision"} or not isinstance(
+            payload.get("brains"), dict):
+        raise ValueError("Brains configuration must contain a brains object and optional roles, "
+                         "supervisors, and supervision")
     brains = {}
     for name, spec in payload["brains"].items():
         if not NAME.fullmatch(name) or not isinstance(spec, dict):
@@ -144,7 +162,46 @@ def load_brains(path: Path) -> dict:
         if not isinstance(names, list) or any(name not in brains for name in names):
             raise ValueError(f"Role {role} names an unknown brain")
         resolved[role] = list(dict.fromkeys(names))
-    return {"brains": brains, "roles": resolved}
+    return {"brains": brains, "roles": resolved, **load_supervisors(payload)}
+
+
+def load_supervisors(payload: dict) -> dict:
+    """Validate the optional premium supervisors and their policy."""
+    from .supervision import SupervisionPolicy
+    supervisors = payload.get("supervisors", {})
+    if not isinstance(supervisors, dict):
+        raise ValueError("supervisors must be an object")
+    checked = {}
+    for name, spec in supervisors.items():
+        if not NAME.fullmatch(name) or not isinstance(spec, dict):
+            raise ValueError("Invalid supervisor name or configuration")
+        if set(spec) - {"provider", "model", "command", "timeout", "allow_api_billing"}:
+            raise ValueError(f"Unknown key in supervisor {name}")
+        if spec.get("provider") not in {"claude_cli", "codex_cli"}:
+            raise ValueError(f"Supervisor {name} provider must be claude_cli or codex_cli")
+        checked[name] = spec
+    policy = dict(payload.get("supervision", {}))
+    order = policy.pop("order", list(checked))
+    if not isinstance(order, list) or any(name not in checked for name in order):
+        raise ValueError("supervision.order names an unknown supervisor")
+    unknown = set(policy) - set(SupervisionPolicy.DEFAULTS)
+    if unknown:
+        raise ValueError("Unknown supervision setting: " + ", ".join(sorted(unknown)))
+    return {"supervisors": {name: checked[name] for name in order}, "supervision": policy}
+
+
+def build_supervision(config: dict, data: Path):
+    """Return a SupervisionPolicy, or None when no supervisor is configured."""
+    from .subscriptions import SUPERVISORS
+    from .supervision import SupervisionPolicy, SupervisorLedger
+    if not config.get("supervisors"):
+        return None
+    supervisors = [SUPERVISORS[spec["provider"]](
+        name, model=spec.get("model"), command=spec.get("command"),
+        timeout=int(spec.get("timeout", 900)), allow_api_billing=bool(spec.get("allow_api_billing")))
+        for name, spec in config["supervisors"].items()]
+    return SupervisionPolicy(supervisors, SupervisorLedger(data / "supervision.sqlite3"),
+                             **config.get("supervision", {}))
 
 
 def build_roles(config: dict, options: dict, gateway=None) -> dict:
