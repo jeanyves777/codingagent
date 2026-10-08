@@ -24,6 +24,7 @@ import hashlib
 import json
 import math
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -34,13 +35,14 @@ from pathlib import Path
 CATEGORIES = {"bug_fix", "feature", "live_verification", "debugging", "orchestration", "git_pr_ci",
               "security_recovery", "repository_creation"}
 CONDITIONS = ("A_free_alone", "B_coding_brain", "C_three_phase", "claude_code", "codex")
-CAPABILITIES = {  # what each condition can do; tasks list what they require
+DESIGNED = {  # the most each condition can offer; runtime_capabilities() checks what is configured
     "A_free_alone": {"edit"},
-    "B_coding_brain": {"edit", "web", "orchestration", "failover"},
-    "C_three_phase": {"edit", "web", "orchestration", "failover", "premium"},
+    "B_coding_brain": {"edit", "web", "knowledge", "orchestration", "failover"},
+    "C_three_phase": {"edit", "web", "knowledge", "orchestration", "failover", "premium"},
     "claude_code": {"edit", "shell", "web", "premium"},
     "codex": {"edit", "shell", "web", "premium"},
 }
+COMPLETED = {"passed", "completed", "finished"}
 IGNORED = shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc")
 
 
@@ -119,6 +121,29 @@ def validate(task: dict) -> dict:
             "detail": None if reference["passed"] else reference["output"][-800:]}
 
 
+def runtime_capabilities(condition: str, brain=None) -> tuple[set[str], list[str]]:
+    """Capabilities actually available now, and problems that make a condition misconfigured."""
+    available, problems = set(DESIGNED[condition]), []
+    if brain is not None:
+        if brain.web is None:
+            available.discard("web")
+        if brain.knowledge is None:
+            available.discard("knowledge")
+        if condition == "C_three_phase" and brain.supervision is None:
+            available.discard("premium")
+            problems.append("C_three_phase needs BRAIN_SUPERVISORS")
+    elif condition in ("claude_code", "codex"):
+        executable = "claude" if condition == "claude_code" else "codex"
+        if not shutil.which(executable):
+            return set(), [f"{executable} is not installed"]
+        status = subprocess.run([executable, "auth", "status"] if executable == "claude"
+                                else [executable, "login", "status"], capture_output=True, text=True, timeout=30)
+        text = (status.stdout + status.stderr).lower()
+        if status.returncode or "not logged in" in text or '"loggedin": false' in text:
+            problems.append(f"{executable} is not signed in")
+    return available, problems
+
+
 def wilson(successes: int, total: int, z: float = 1.96) -> list[float]:
     if not total:
         return [0.0, 0.0]
@@ -129,9 +154,36 @@ def wilson(successes: int, total: int, z: float = 1.96) -> list[float]:
 
 
 class Gauntlet:
-    def __init__(self, workdir: Path):
+    def __init__(self, workdir: Path, task_roots: list[Path] | None = None):
         self.workdir = workdir
+        self.task_roots = [path.resolve() for path in (task_roots or [])]
+        self.brain_capabilities = {}
         workdir.mkdir(parents=True, exist_ok=True)
+
+    def probe(self, conditions: list[str]):
+        """Build each Coding Brain condition once from the real environment to learn what it can do."""
+        from .factory import build_brain_from_env
+        for condition in conditions:
+            if condition in ("claude_code", "codex"):
+                continue
+            saved = {key: os.environ.get(key) for key in ("BRAIN_REPOSITORIES", "BRAIN_DATA")}
+            probe_root = self.workdir / "probe"
+            (probe_root / "repositories").mkdir(parents=True, exist_ok=True)
+            os.environ["BRAIN_REPOSITORIES"] = str(probe_root / "repositories")
+            os.environ["BRAIN_DATA"] = str(probe_root / "data")
+            try:
+                brain = build_brain_from_env()
+                if condition == "A_free_alone":
+                    brain.knowledge, brain.web, brain.supervision = None, None, None
+                elif condition == "B_coding_brain":
+                    brain.supervision = None
+                self.brain_capabilities[condition] = runtime_capabilities(condition, brain)
+            finally:
+                for key, value in saved.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
 
     def _stage(self, task: dict, run_id: str) -> tuple[Path, str]:
         repositories = self.workdir / run_id / "repositories"
@@ -154,6 +206,8 @@ class Gauntlet:
             brain.knowledge, brain.web, brain.supervision, brain.gates = None, None, None, False
         elif condition == "B_coding_brain":
             brain.supervision = None
+        if task["mode"] == "orchestration" and condition == "A_free_alone":
+            task = {**task, "mode": "task"}  # the free model alone has no orchestration engine
         if condition != "A_free_alone" and task.get("web_allowlist") and brain.web:
             brain.web.broker.policy.allow = list(task["web_allowlist"])
         if task.get("chaos", {}).get("preferred_brain_offline"):
@@ -177,6 +231,7 @@ class Gauntlet:
         return {"final": workspace if workspace.exists() else target, "status": stored["status"],
                 "metrics": stored.get("metrics", {}),
                 "premium_calls": ledger.count(item["id"], ok=1) if ledger else 0,
+                "premium_attempts": ledger.count(item["id"]) if ledger else 0,
                 "events": [{"kind": event["kind"], "detail": event["detail"][:500]} for event in stored["events"]],
                 "error": stored.get("error")}
 
@@ -221,15 +276,28 @@ class Gauntlet:
                   for item in [group, *children] for event in item.get("events", [])]
         return {"final": final if final and final.exists() else brain.repository(name), "status": group["status"],
                 "metrics": metrics, "events": events, "error": error,
-                "premium_calls": sum(ledger.count(item["id"], ok=1) for item in [group, *children]) if ledger else 0}
+                "premium_calls": sum(ledger.count(item["id"], ok=1) for item in [group, *children]) if ledger else 0,
+                "premium_attempts": sum(ledger.count(item["id"]) for item in [group, *children]) if ledger else 0}
+
+    def _hidden_roots(self) -> list[Path]:
+        """Directories an external agent must not see: Coding Brain's repository (task sources,
+        hidden tests and Git history), the task directory, and every Gauntlet run."""
+        roots = {Path(__file__).resolve().parents[1], self.workdir.resolve(), *self.task_roots}
+        return sorted(roots, key=lambda path: len(path.parts))
 
     def _external(self, condition: str, task: dict, target: Path) -> dict:
+        """Run a premium CLI agent in its own mount namespace: the hidden roots are replaced by
+        empty tmpfs mounts, so hidden tests are unreachable even by absolute path or Git history.
+        The agent works on a copy outside those roots, which is copied back for evaluation."""
         prompt = (task["goal"] + "\n\nWork only inside the current directory. Do not modify existing tests. "
                   "Run the tests to check your work, then stop.")
         env = {key: value for key, value in os.environ.items()
-               if key not in {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN"}}
+               if key not in {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CODEX_API_KEY"}}
+        isolated = Path("/var/tmp") / f"gauntlet-agent-{uuid.uuid4().hex}"
+        shutil.copytree(target, isolated)
         if condition == "claude_code":
-            command = ["claude", "-p", "--output-format", "json", "--permission-mode", "acceptEdits",
+            command = ["claude", "-p", "--output-format", "stream-json", "--verbose",
+                       "--permission-mode", "acceptEdits",
                        "--allowedTools", "Read,Edit,Write,Glob,Grep,Bash(python -m pytest:*),Bash(pytest:*)",
                        "--no-session-persistence"]
             if os.environ.get("GAUNTLET_CLAUDE_MODEL"):
@@ -237,33 +305,33 @@ class Gauntlet:
         else:
             command = ["codex", "exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral",
                        "--json", "-"]
+        masks = " && ".join(f"mount -t tmpfs -o size=1m,mode=000 none {shlex.quote(str(root))}"
+                            for root in self._hidden_roots())
+        wrapper = ["unshare", "--mount", "--propagation", "private", "sh", "-c",
+                   f"{masks} && cd {shlex.quote(str(isolated))} && exec \"$@\"", "agent", *command]
         try:
-            result = subprocess.run(command, input=prompt, cwd=target, env=env, capture_output=True,
-                                    text=True, timeout=1800)
+            result = subprocess.run(wrapper, input=prompt, env=env, capture_output=True, text=True, timeout=1800)
             output, code = result.stdout, result.returncode
-        except FileNotFoundError:
-            return {"final": target, "status": "unavailable", "metrics": {}, "premium_calls": 0, "events": [],
-                    "error": f"{command[0]} is not installed"}
+            error = None if code == 0 else (result.stderr or output)[-500:]
         except subprocess.TimeoutExpired:
-            return {"final": target, "status": "timeout", "metrics": {}, "premium_calls": 1, "events": [],
-                    "error": "agent timed out"}
-        metrics = {}
-        if condition == "claude_code":
-            try:
-                data = json.loads(output)
-                usage = data.get("usage") or {}
-                metrics = {"premium_input_tokens": usage.get("input_tokens", 0) +
-                           usage.get("cache_read_input_tokens", 0) + usage.get("cache_creation_input_tokens", 0),
-                           "premium_output_tokens": usage.get("output_tokens", 0),
-                           "turns": data.get("num_turns"), "cost_usd_equivalent": data.get("total_cost_usd")}
-            except ValueError:
-                pass
-        return {"final": target, "status": "finished" if code == 0 else f"exit {code}", "metrics": metrics,
-                "premium_calls": 1, "events": [], "error": None if code == 0 else output[-500:]}
+            output, code, error = "", None, "agent timed out"
+        shutil.rmtree(target)
+        shutil.copytree(isolated, target)
+        shutil.rmtree(isolated, ignore_errors=True)
+        events, metrics, outside = parse_trajectory(condition, output, isolated)
+        return {"final": target, "status": "finished" if code == 0 else (f"exit {code}" if code is not None else "timeout"),
+                "metrics": metrics, "premium_calls": 1, "premium_attempts": 1, "events": events,
+                "outside_access": outside, "error": error}
 
     async def run_one(self, condition: str, task: dict) -> dict:
-        missing = set(task["requires"]) - CAPABILITIES[condition]
         base = {"task": task["id"], "category": task["category"], "condition": condition}
+        if condition in ("claude_code", "codex"):
+            available, problems = runtime_capabilities(condition)
+        else:
+            available, problems = self.brain_capabilities.get(condition) or (DESIGNED[condition], [])
+        if problems:
+            return {**base, "outcome": "misconfigured", "problems": problems}
+        missing = set(task["requires"]) - available
         if missing:
             return {**base, "outcome": "unsupported", "missing_capabilities": sorted(missing)}
         run_id = f"{condition}-{task['id']}-{uuid.uuid4().hex[:8]}"
@@ -276,14 +344,22 @@ class Gauntlet:
         wall = round(time.monotonic() - started, 1)
         hidden = await asyncio.to_thread(run_hidden, task, result["final"])
         violations = safety(task, task["path"] / "repo", result["final"])
+        violations += [f"access outside the workspace: {item}" for item in result.get("outside_access", [])]
+        if condition not in ("claude_code", "codex"):
+            violations += original_branch_violations(target)
         metrics = result["metrics"]
-        return {**base, "outcome": "passed" if hidden["passed"] and not violations else "failed",
+        completed = result["status"] in COMPLETED
+        # A pass needs all three: the agent finished its own way, hidden tests pass, no violations.
+        outcome = "passed" if completed and hidden["passed"] and not violations else "failed"
+        return {**base, "outcome": outcome, "agent_completed": completed,
                 "hidden_tests_passed": hidden["passed"], "safety_violations": violations,
                 "agent_status": result["status"], "wall_seconds": wall,
                 "free_output_tokens": metrics.get("output_tokens", 0),
                 "free_prompt_tokens": metrics.get("prompt_tokens", 0),
                 "free_model_calls": metrics.get("calls", 0),
                 "premium_calls": result["premium_calls"],
+                "premium_attempts": result.get("premium_attempts", result["premium_calls"]),
+                "policy_blocks": metrics.get("web_refused", 0),
                 "premium_output_tokens": metrics.get("premium_output_tokens", 0),
                 "test_runs": sum(1 for event in result["events"] if event["kind"] == "test_finished"),
                 "validation_failures": metrics.get("validation_failures", 0),
@@ -291,6 +367,7 @@ class Gauntlet:
                 "trajectory": result["events"]}
 
     async def run(self, conditions: list[str], tasks: list[dict], repeat: int = 1) -> dict:
+        self.probe(conditions)
         runs = []
         for iteration in range(repeat):
             for task in tasks:
@@ -303,23 +380,31 @@ class Gauntlet:
                         "safety_violations")}), flush=True)
         return {"created_at": datetime.now(timezone.utc).isoformat(), "conditions": conditions,
                 "tasks": [task["id"] for task in tasks], "repeat": repeat,
-                "environment": environment(), "summary": summarize(runs, conditions), "runs": runs}
+                "capabilities": {condition: sorted(value[0]) for condition, value in self.brain_capabilities.items()},
+                "environment": environment(tasks), "summary": summarize(runs, conditions), "runs": runs}
 
 
 def summarize(runs: list[dict], conditions: list[str]) -> dict:
     summary = {}
     for condition in conditions:
         chosen = [run for run in runs if run["condition"] == condition]
-        attempted = [run for run in chosen if run["outcome"] != "unsupported"]
+        attempted = [run for run in chosen if run["outcome"] not in {"unsupported", "misconfigured"}]
         passed = [run for run in attempted if run["outcome"] == "passed"]
         premium_passes = [run for run in passed if run.get("premium_calls")]
         summary[condition] = {
-            "attempted": len(attempted), "unsupported": len(chosen) - len(attempted),
+            "attempted": len(attempted),
+            "unsupported": sum(run["outcome"] == "unsupported" for run in chosen),
+            "misconfigured": sum(run["outcome"] == "misconfigured" for run in chosen),
             "passed": len(passed), "pass_rate": round(len(passed) / len(attempted), 3) if attempted else None,
             "pass_rate_95ci": wilson(len(passed), len(attempted)),
             "premium_dependence_rate": round(len(premium_passes) / len(passed), 3) if passed else None,
             "premium_calls_per_success": round(sum(run.get("premium_calls", 0) for run in attempted)
                                                / len(passed), 2) if passed else None,
+            "premium_attempts": sum(run.get("premium_attempts", 0) for run in attempted),
+            "completed_but_hidden_failed": sum(bool(run.get("agent_completed") and not run.get("hidden_tests_passed"))
+                                               for run in attempted),
+            "hidden_passed_but_not_completed": sum(bool(run.get("hidden_tests_passed") and not run.get("agent_completed"))
+                                                   for run in attempted),
             "free_output_tokens_per_success": round(sum(run.get("free_output_tokens", 0) for run in attempted)
                                                     / len(passed)) if passed else None,
             "mean_wall_seconds": round(sum(run.get("wall_seconds", 0) for run in attempted) / len(attempted), 1)
@@ -345,11 +430,91 @@ def summarize(runs: list[dict], conditions: list[str]) -> dict:
     return {"conditions": summary, "paired": pairs}
 
 
-def environment() -> dict:
+def _command(*arguments) -> str | None:
+    try:
+        result = subprocess.run(list(arguments), capture_output=True, text=True, timeout=30)
+        return (result.stdout or result.stderr).strip()[:200] or None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def environment(tasks: list[dict] | None = None) -> dict:
+    """Everything needed to reproduce or audit a run."""
     import platform
+    root = Path(__file__).resolve().parents[1]
+    settings = {key: value for key, value in os.environ.items()
+                if key.startswith(("BRAIN_", "GAUNTLET_")) and "TOKEN" not in key and "KEY" not in key}
+    models = {}
+    url = os.environ.get("BRAIN_MODEL_URL", "http://localhost:11434")
+    for name in {os.environ.get("BRAIN_MODEL"), os.environ.get("BRAIN_FAST_MODEL")} - {None}:
+        try:
+            import httpx
+            shown = httpx.post(url.rstrip("/") + "/api/show", json={"model": name}, timeout=10, trust_env=False).json()
+            models[name] = {"digest_of_details": hashlib.sha256(json.dumps(shown.get("details", {}),
+                                                                           sort_keys=True).encode()).hexdigest()[:16],
+                            "details": shown.get("details"), "parameters": shown.get("parameters")}
+        except Exception as error:
+            models[name] = {"error": str(error)[:100]}
+    knowledge = []
+    database = Path(os.environ.get("BRAIN_KNOWLEDGE_DB", Path(os.environ.get("BRAIN_DATA", "brain-data")) / "knowledge.sqlite3"))
+    if database.exists():
+        from .knowledge import KnowledgeLibrary
+        knowledge = [{key: source[key] for key in ("name", "revision", "license", "documents")}
+                     for source in KnowledgeLibrary(database).sources()]
+    task_hash = hashlib.sha256()
+    for task in tasks or []:
+        for path in sorted(task["path"].rglob("*")):
+            if path.is_file():
+                task_hash.update(path.relative_to(task["path"].parent).as_posix().encode() + path.read_bytes())
     return {"python": platform.python_version(), "machine": platform.machine(), "cpus": os.cpu_count(),
-            "model": os.environ.get("BRAIN_MODEL"), "provider": os.environ.get("BRAIN_PROVIDER", "ollama"),
-            "supervisors": os.environ.get("BRAIN_SUPERVISORS"), "coding_brain": "0.8.0"}
+            "coding_brain_commit": _command("git", "-C", str(root), "rev-parse", "HEAD"),
+            "coding_brain_dirty": bool(_command("git", "-C", str(root), "status", "--porcelain")),
+            "settings": settings, "models": models, "knowledge_sources": knowledge,
+            "claude_code": _command("claude", "--version"), "codex": _command("codex", "--version"),
+            "docker": _command("docker", "version", "--format", "{{.Server.Version}}"),
+            "task_set_sha256": task_hash.hexdigest()}
+
+
+def parse_trajectory(condition: str, output: str, workspace: Path) -> tuple[list, dict, list]:
+    """Tool calls, token usage, and any file access outside the agent's workspace."""
+    events, metrics, outside = [], {}, []
+    for line in output.splitlines():
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if condition == "claude_code":
+            if item.get("type") == "assistant":
+                for block in item.get("message", {}).get("content", []):
+                    if block.get("type") == "tool_use":
+                        events.append({"kind": "tool_use", "detail": json.dumps(
+                            {"name": block["name"], "input": block.get("input")})[:500]})
+                        for key in ("file_path", "path", "notebook_path"):
+                            value = (block.get("input") or {}).get(key)
+                            if isinstance(value, str) and value.startswith("/") and \
+                                    not Path(value).resolve().is_relative_to(workspace):
+                                outside.append(f"{block['name']} {value}")
+            elif item.get("type") == "result":
+                usage = item.get("usage") or {}
+                metrics = {"premium_input_tokens": usage.get("input_tokens", 0) +
+                           usage.get("cache_read_input_tokens", 0) + usage.get("cache_creation_input_tokens", 0),
+                           "premium_output_tokens": usage.get("output_tokens", 0),
+                           "turns": item.get("num_turns"), "cost_usd_equivalent": item.get("total_cost_usd")}
+        else:
+            events.append({"kind": item.get("type", "event"), "detail": json.dumps(item)[:500]})
+    return events, metrics, outside
+
+
+def original_branch_violations(source: Path) -> list[str]:
+    """Coding Brain must never edit the repository it was given; its work lives in worktrees."""
+    status = _command("git", "-C", str(source), "status", "--porcelain", "--untracked-files=no")
+    commits = _command("git", "-C", str(source), "rev-list", "--count", "HEAD")
+    problems = []
+    if status:
+        problems.append("original repository working tree was modified")
+    if commits and commits != "1":
+        problems.append("original branch gained commits")
+    return problems
 
 
 def main(argv=None):
@@ -367,7 +532,8 @@ def main(argv=None):
         result = [validate(task) for task in tasks]
     else:
         conditions = args.condition or ["A_free_alone", "B_coding_brain"]
-        result = asyncio.run(Gauntlet(Path(args.workdir).resolve()).run(conditions, tasks, args.repeat))
+        result = asyncio.run(Gauntlet(Path(args.workdir).resolve(), [Path(args.tasks)]).run(
+            conditions, tasks, args.repeat))
     text = json.dumps(result, indent=2, default=str)
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")

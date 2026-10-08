@@ -62,3 +62,44 @@ def test_summary_reports_premium_dependence_and_pairs():
     assert summary["conditions"]["B_coding_brain"]["free_output_tokens_per_success"] == 400
     assert summary["paired"]["B_coding_brain vs C_three_phase"] == {
         "paired_tasks": 2, "only_first_passed": 0, "only_second_passed": 1}
+
+
+def test_trajectory_flags_access_outside_the_workspace(tmp_path):
+    from brain.gauntlet import parse_trajectory
+    lines = [json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Read", "input": {"file_path": str(tmp_path / "ok.py")}},
+        {"type": "tool_use", "name": "Read", "input": {"file_path": "/home/user/codingagent/gauntlet/tasks/x/hidden/t.py"}}]}}),
+        json.dumps({"type": "result", "usage": {"input_tokens": 10, "output_tokens": 5}, "num_turns": 2})]
+    events, metrics, outside = parse_trajectory("claude_code", "\n".join(lines), tmp_path)
+    assert len(events) == 2 and metrics["premium_output_tokens"] == 5
+    assert outside == ["Read /home/user/codingagent/gauntlet/tasks/x/hidden/t.py"]
+
+
+def test_runtime_capabilities_reflect_configuration():
+    from types import SimpleNamespace
+    from brain.gauntlet import runtime_capabilities
+    unconfigured = SimpleNamespace(web=None, knowledge=object(), supervision=None)
+    available, problems = runtime_capabilities("B_coding_brain", unconfigured)
+    assert "web" not in available and "knowledge" in available and not problems
+    available, problems = runtime_capabilities("C_three_phase", unconfigured)
+    assert "premium" not in available and problems == ["C_three_phase needs BRAIN_SUPERVISORS"]
+
+
+def test_pass_requires_agent_completion_hidden_tests_and_no_violations(tmp_path, monkeypatch):
+    import brain.gauntlet as gauntlet
+    task = load_task(TASKS / "bug-pagination")
+    harness = Gauntlet(tmp_path)
+    harness.brain_capabilities["B_coding_brain"] = ({"edit"}, [])
+    monkeypatch.setattr(gauntlet, "run_hidden", lambda task, final: {"passed": True, "output": ""})
+    monkeypatch.setattr(gauntlet, "original_branch_violations", lambda source: [])
+
+    def fake(status):
+        async def brain_run(self, condition, task, target, name, run_id):
+            return {"final": target, "status": status, "metrics": {}, "premium_calls": 0,
+                    "premium_attempts": 0, "events": []}
+        return brain_run
+    monkeypatch.setattr(Gauntlet, "_brain_run", fake("failed"))
+    record = asyncio.run(harness.run_one("B_coding_brain", task))
+    assert record["hidden_tests_passed"] and not record["agent_completed"] and record["outcome"] == "failed"
+    monkeypatch.setattr(Gauntlet, "_brain_run", fake("passed"))
+    assert asyncio.run(harness.run_one("B_coding_brain", task))["outcome"] == "passed"
