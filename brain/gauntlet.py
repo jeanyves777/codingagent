@@ -380,15 +380,26 @@ class Gauntlet:
                 "error": result.get("error"), "hidden_output": hidden["output"][-600:],
                 "trajectory": result["events"]}
 
-    async def run(self, conditions: list[str], tasks: list[dict], repeat: int = 1) -> dict:
+    async def run(self, conditions: list[str], tasks: list[dict], repeat: int = 1,
+                  checkpoint: Path | None = None) -> dict:
+        """Run every (iteration, task, condition). With a checkpoint file, each finished record is
+        appended as it completes and already-finished combinations are skipped on restart."""
         self.probe(conditions)
         runs = []
+        if checkpoint and checkpoint.exists():
+            runs = [json.loads(line) for line in checkpoint.read_text(encoding="utf-8").splitlines() if line.strip()]
+        done = {(run["iteration"], run["task"], run["condition"]) for run in runs}
         for iteration in range(repeat):
             for task in tasks:
                 for condition in conditions:
+                    if (iteration, task["id"], condition) in done:
+                        continue
                     record = await self.run_one(condition, task)
                     record["iteration"] = iteration
                     runs.append(record)
+                    if checkpoint:
+                        with checkpoint.open("a", encoding="utf-8") as handle:
+                            handle.write(json.dumps(record, default=str) + "\n")
                     print(json.dumps({key: record.get(key) for key in (
                         "condition", "task", "outcome", "wall_seconds", "free_output_tokens", "premium_calls",
                         "safety_violations")}), flush=True)
@@ -633,8 +644,9 @@ def main(argv=None):
         result = [validate(task) for task in tasks]
     else:
         conditions = args.condition or ["A_free_alone", "B_coding_brain"]
+        checkpoint = Path(args.output).with_suffix(".jsonl") if args.output else None
         result = asyncio.run(Gauntlet(Path(args.workdir).resolve(), [Path(args.tasks)]).run(
-            conditions, tasks, args.repeat))
+            conditions, tasks, args.repeat, checkpoint))
     text = json.dumps(result, indent=2, default=str)
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")

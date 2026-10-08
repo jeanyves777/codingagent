@@ -128,3 +128,21 @@ def test_failures_are_classified_by_cause():
     assert classify_failure({**base, "trajectory": [{"kind": "test_finished",
                                                      "detail": '{"passed": false, "exit_code": 1}'}]}) == "model"
     assert classify_failure({"outcome": "unsupported"}) == "unsupported"
+
+
+def test_checkpoint_resumes_without_repeating_finished_runs(tmp_path, monkeypatch):
+    tasks = [load_task(TASKS / "bug-pagination"), load_task(TASKS / "bug-duration")]
+    calls = []
+
+    async def run_one(self, condition, task):
+        calls.append((condition, task["id"]))
+        return {"task": task["id"], "category": task["category"], "condition": condition, "outcome": "failed",
+                "safety_violations": [], "trajectory": []}
+    monkeypatch.setattr(Gauntlet, "run_one", run_one)
+    monkeypatch.setattr(Gauntlet, "probe", lambda self, conditions: None)
+    checkpoint = tmp_path / "results.jsonl"
+    checkpoint.write_text(json.dumps({"iteration": 0, "task": "bug-pagination", "condition": "A_free_alone",
+                                      "category": "bug_fix", "outcome": "passed", "safety_violations": []}) + "\n")
+    result = asyncio.run(Gauntlet(tmp_path / "w").run(["A_free_alone"], tasks, 1, checkpoint))
+    assert calls == [("A_free_alone", "bug-duration")]
+    assert len(result["runs"]) == 2 and len(checkpoint.read_text().splitlines()) == 2
