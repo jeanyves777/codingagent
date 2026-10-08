@@ -2,5 +2,8 @@
   "id": "orchestration-money",
   "category": "orchestration",
   "goal": "Add a Money class in a new file money.py: Money(cents, currency) with integer cents and a currency code, an add(other) method returning a new Money that raises ValueError when currencies differ, equality by value, and str() like 'USD 12.34'. Then change Invoice.total() in invoice.py to return a Money in the invoice currency built from the line items.",
-  "mode": "orchestration"
+  "mode": "orchestration",
+  "protected": [
+    "test_money.py"
+  ]
 }

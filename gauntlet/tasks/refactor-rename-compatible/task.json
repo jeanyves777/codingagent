@@ -1,5 +1,8 @@
 {
   "id": "refactor-rename-compatible",
   "category": "feature",
-  "goal": "Rename calculate_total to total_price in pricing.py. Keep calculate_total as a deprecated alias that emits a DeprecationWarning and returns the same result, and update checkout.py to call total_price."
+  "goal": "Rename calculate_total to total_price in pricing.py. Keep calculate_total as a deprecated alias that emits a DeprecationWarning and returns the same result, and update checkout.py to call total_price.",
+  "protected": [
+    "test_pricing.py"
+  ]
 }

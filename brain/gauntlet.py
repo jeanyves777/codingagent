@@ -116,8 +116,11 @@ def validate(task: dict) -> dict:
     shutil.copytree(task["path"] / "reference", staged, dirs_exist_ok=True)
     reference = run_hidden(task, staged)
     shutil.rmtree(staged, ignore_errors=True)
+    visible = sorted(path.name for path in (task["path"] / "repo").rglob("test_*.py"))
+    # Coding Brain fails closed when no tests run, so every task must give the agent visible tests.
     return {"task": task["id"], "original_fails": not original["passed"], "reference_passes": reference["passed"],
-            "valid": not original["passed"] and reference["passed"],
+            "visible_tests": visible,
+            "valid": not original["passed"] and reference["passed"] and bool(visible),
             "detail": None if reference["passed"] else reference["output"][-800:]}
 
 
@@ -523,6 +526,9 @@ def classify_failure(run: dict) -> str | None:
                               ('"exit_code": null' in event.get("detail", "") or
                                any(f'"exit_code": {code}' in event.get("detail", "") for code in (125, 126, 127)))
                               for event in events)
+    if any(event.get("kind") == "test_finished" and '"exit_code": 5' in event.get("detail", "")
+           for event in events):
+        return "task_design"  # no tests ran: Coding Brain fails closed; not a model failure
     if any(marker in text for marker in TIMEOUT_MARKERS) or run.get("agent_status") == "timeout":
         return "timeout"
     if test_infrastructure or any(marker in text for marker in INFRASTRUCTURE_MARKERS):
@@ -559,9 +565,11 @@ def summarize(runs: list[dict], conditions: list[str]) -> dict:
             if attempted else None,
             "safety_violations": sum(len(run.get("safety_violations", [])) for run in attempted),
             "failure_causes": {cause: sum(classify_failure(run) == cause for run in attempted)
-                               for cause in ("model", "orchestration", "infrastructure", "timeout", "safety")},
+                               for cause in ("model", "orchestration", "infrastructure", "timeout", "safety",
+                                             "task_design")},
             "pass_rate_excluding_timeouts_and_infrastructure": (
-                round(len(passed) / max(1, sum(classify_failure(run) not in {"timeout", "infrastructure"}
+                round(len(passed) / max(1, sum(classify_failure(run) not in {"timeout", "infrastructure",
+                                                                              "task_design"}
                                                for run in attempted)), 3) if attempted else None),
             "by_category": {category: f"{sum(r['outcome'] == 'passed' for r in attempted if r['category'] == category)}"
                                       f"/{sum(1 for r in attempted if r['category'] == category)}"
@@ -605,6 +613,7 @@ def markdown_report(saved: dict) -> str:
             ("Failures: infrastructure", lambda c: str(c["failure_causes"]["infrastructure"])),
             ("Failures: timeout", lambda c: str(c["failure_causes"]["timeout"])),
             ("Failures: safety", lambda c: str(c["failure_causes"]["safety"])),
+            ("Failures: task design", lambda c: str(c["failure_causes"].get("task_design", 0))),
             ("Premium attempts", lambda c: str(c["premium_attempts"])),
             ("Premium dependence rate", lambda c: str(c["premium_dependence_rate"])),
             ("Free output tokens / success", lambda c: str(c["free_output_tokens_per_success"])),

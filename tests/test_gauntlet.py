@@ -128,6 +128,15 @@ def test_failures_are_classified_by_cause():
     assert classify_failure({**base, "trajectory": [{"kind": "test_finished",
                                                      "detail": '{"passed": false, "exit_code": 1}'}]}) == "model"
     assert classify_failure({"outcome": "unsupported"}) == "unsupported"
+    assert classify_failure({**base, "trajectory": [{"kind": "test_finished",
+                                                     "detail": '{"passed": false, "exit_code": 5}'}]}) == "task_design"
+
+
+def test_every_pilot_task_gives_the_agent_protected_visible_tests():
+    for task in tasks_in(TASKS):
+        visible = sorted(path.name for path in (task["path"] / "repo").glob("test_*.py"))
+        assert visible, task["id"]
+        assert set(visible) <= set(task["protected"]), task["id"]
 
 
 def _fake_harness(monkeypatch, calls, fingerprint_settings="a"):
