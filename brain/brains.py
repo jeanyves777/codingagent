@@ -208,7 +208,9 @@ def build_supervision(config: dict, data: Path):
         name, model=spec.get("model"), command=spec.get("command"),
         timeout=int(spec.get("timeout", 900)), allow_api_billing=bool(spec.get("allow_api_billing")))
         for name, spec in config["supervisors"].items()]
-    return SupervisionPolicy(supervisors, SupervisorLedger(data / "supervision.sqlite3"),
+    # A local installation shares one ledger across projects so daily limits hold machine-wide.
+    ledger = Path(os.environ.get("BRAIN_SUPERVISION_LEDGER") or data / "supervision.sqlite3")
+    return SupervisionPolicy(supervisors, SupervisorLedger(ledger),
                              **config.get("supervision", {}))
 
 
