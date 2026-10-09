@@ -146,15 +146,16 @@ function Show-Preflight {
   }
 }
 
-function Invoke-Provisioning([string]$VenvPython) {
+function Get-ProvisioningArguments {
+  # The Python installer is then run at script level (not inside a function), so its output and
+  # prompts stay attached to this console and its exit code is the script's exit code.
   $arguments = @('-I', '-m', 'brain.local', 'install')
   if ($Full) { $arguments += '--full' } elseif ($Local) { $arguments += @('--profile', 'local') }
   if ($Resume) { $arguments += '--resume' }
   if ($PlanOnly) { $arguments += '--plan' }
   if ($Yes) { $arguments += '--yes' }
   Write-Step 'Preparing the environment (each change is listed and asked first)'
-  & $VenvPython @arguments
-  return $LASTEXITCODE
+  return , $arguments
 }
 
 $provision = $Full -or $Local -or $Resume -or $PlanOnly
@@ -180,7 +181,9 @@ if ((Test-Path $current) -and -not $Force) {
   if ($provision) {
     # The application is already here; only the environment is prepared (or resumed).
     $env:CODINGBRAIN_HOME = $InstallDir
-    exit (Invoke-Provisioning (Join-Path $InstallDir "app\versions\$installed\venv\Scripts\python.exe"))
+    $provisionArguments = Get-ProvisioningArguments
+    & (Join-Path $InstallDir "app\versions\$installed\venv\Scripts\python.exe") @provisionArguments
+    exit $LASTEXITCODE
   }
   Write-Host "Coding Brain $installed is already installed. Use 'codingbrain update' to update it, -Full or -Local to prepare its environment, or -Force to repair."
   exit 0
@@ -252,7 +255,9 @@ if (-not $NoPath) {
 Write-Host ''
 Write-Host "Coding Brain $($release.Version) is installed." -ForegroundColor Green
 if ($provision) {
-  $code = Invoke-Provisioning (Join-Path $versionDir 'venv\Scripts\python.exe')
+  $provisionArguments = Get-ProvisioningArguments
+  & (Join-Path $versionDir 'venv\Scripts\python.exe') @provisionArguments
+  $code = $LASTEXITCODE
   Write-Host ''
   Write-Host 'Open a new terminal, then: codingbrain doctor --full   (readiness level), cd C:\path\to\project; codingbrain'
   exit $code
