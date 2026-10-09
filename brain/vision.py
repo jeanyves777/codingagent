@@ -155,22 +155,40 @@ class VisionProvider:
         return result
 
     async def _run(self, role, prompt, images, schema, loc) -> dict:
+        """One request, and at most one corrective retry when the reply is not the requested
+        structure (small models sometimes answer with a different object or a cut-off reply).
+        Both attempts are recorded; a second bad reply is an error, never filled in."""
         usable, reason = await self.capability()
         if not usable:
             raise VisionUnavailable(reason)
-        started = time.monotonic()
-        raw, usage = await self._infer(prompt, images, schema)
-        seconds = round(time.monotonic() - started, 1)
-        accounting.record("inference", role=role, provider=self.provider, model=usage.get("model") or self.model,
-                          requested=self.model, prompt_tokens=usage.get("prompt_tokens"),
-                          output_tokens=usage.get("output_tokens"), seconds=seconds, images=len(images))
-        entry = {"role": role, "provider": self.provider, "model": usage.get("model") or self.model,
-                 "seconds": seconds, "prompt_tokens": usage.get("prompt_tokens"),
-                 "output_tokens": usage.get("output_tokens"), "images": len(images)}
-        self.usage.append(entry)
-        del self.usage[:-200]
-        return {"loc": loc, **entry, "premium": self.premium, "findings": normalize(raw, schema),
-                "kind": "model_judgment"}
+        for attempt in (1, 2):
+            started = time.monotonic()
+            try:
+                raw, usage = await self._infer(prompt, images, schema)
+                error = None
+            except ValueError as invalid:  # no JSON object at all
+                raw, usage, error = None, {}, VisionOutputInvalid(f"vision reply was not JSON: {str(invalid)[:120]}")
+            seconds = round(time.monotonic() - started, 1)
+            accounting.record("inference", role=role, provider=self.provider, model=usage.get("model") or self.model,
+                              requested=self.model, prompt_tokens=usage.get("prompt_tokens"),
+                              output_tokens=usage.get("output_tokens"), seconds=seconds, images=len(images))
+            entry = {"role": role, "provider": self.provider, "model": usage.get("model") or self.model,
+                     "seconds": seconds, "prompt_tokens": usage.get("prompt_tokens"),
+                     "output_tokens": usage.get("output_tokens"), "images": len(images), "attempt": attempt}
+            self.usage.append(entry)
+            del self.usage[:-200]
+            try:
+                if error:
+                    raise error
+                findings = normalize(raw, schema)
+            except VisionOutputInvalid as invalid:
+                if attempt == 2:
+                    raise
+                accounting.record("fallback", method=role, to=self.model, reason=f"{invalid}; one corrective retry")
+                prompt = (prompt + f"\n\nYour previous answer was not usable ({invalid}). Answer again with one JSON "
+                          "object containing exactly these keys: " + ", ".join(schema["properties"]) + ".")
+                continue
+            return {"loc": loc, **entry, "premium": self.premium, "findings": findings, "kind": "model_judgment"}
 
 
 class OllamaVision(VisionProvider):
