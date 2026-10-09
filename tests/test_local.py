@@ -457,3 +457,177 @@ def test_restore_checks_the_whole_backup_before_changing_anything(installed):
     with pytest.raises(updater.UpdateError, match="damaged; nothing was restored"):
         updater.restore_state(layout, backup)
     assert settings.load(layout)["models"]["model"] == "newer"
+
+
+
+# Projects next to (not inside) Coding Brain's data, e.g. C:\\Users\\me\\app with data in
+# C:\\Users\\me\\AppData\\Local\\CodingBrain ----------------------------------------------------------
+
+def home_layout(tmp_path, monkeypatch, **config):
+    monkeypatch.setattr(os, "environ", dict(os.environ))  # Context.brain exports settings; keep them local
+    user = tmp_path / "Users" / "me"
+    layout = Layout(user / "AppData" / "Local" / "CodingBrain").ensure()
+    settings.save(layout, {**settings.load(layout), "models": {**settings.DEFAULTS["models"], "model": "m"},
+                           "autonomy": {"execution": "propose", "requirement_checks": False}, **config})
+    return user, layout
+
+
+def test_project_directly_in_the_home_folder_that_holds_coding_brain_data(tmp_path, monkeypatch):
+    from brain.local import cli
+    user, layout = home_layout(tmp_path, monkeypatch)
+    repo = make_repo(user / "codingbrain-test", {"calculator.py": "def add(a, b):\n    return a - b\n"})
+    context = cli.Context(layout, repo)
+    brain = context.brain  # v0.9.0: "Repository and data directories must be separate"
+    assert brain.repository("codingbrain-test") == user / "codingbrain-test"
+    task = brain.submit("codingbrain-test", "Fix add", launch=False)
+    assert task["repository"] == "codingbrain-test" and brain.store.get(task["id"])["status"] == "waiting"
+
+
+def test_nested_project_directories(tmp_path, monkeypatch):
+    from brain.local import cli
+    user, layout = home_layout(tmp_path, monkeypatch)
+    repo = make_repo(user / "Projects" / "client" / "app", {"main.py": "x = 1\n"})
+    context = cli.Context(layout, repo / "src" if (repo / "src").exists() else repo)
+    assert context.brain.repository("app") == repo
+    inner = repo / "packages" / "lib"
+    inner.mkdir(parents=True)
+    assert cli.Context(layout, inner).root == repo  # a subfolder opens its repository, not a new project
+
+
+def test_projects_that_overlap_the_data_directory_are_refused(tmp_path, monkeypatch):
+    from brain.local import cli
+    from brain.service import Brain
+    user, layout = home_layout(tmp_path, monkeypatch)
+    repo = make_repo(user / "app", {"main.py": "x = 1\n"})
+    brain = cli.Context(layout, repo).brain
+    with pytest.raises(ValueError, match="overlaps Coding Brain's data"):
+        brain.repository("AppData")  # the folder holding the data is never served as a project
+    # The data directory inside the project itself:
+    outer = make_repo(tmp_path / "outer", {"main.py": "x = 1\n"})
+    inside = Layout(outer / ".codingbrain-home").ensure()
+    settings.save(inside, settings.load(layout))
+    with pytest.raises(SystemExit, match="overlaps Coding Brain's own data folder"):
+        cli.Context(inside, outer).check()
+    with pytest.raises(ValueError, match="overlaps Coding Brain's data"):
+        Brain(tmp_path, outer / ".codingbrain-home" / "data", None, "img").repository("outer")
+    # Repositories inside, or equal to, the data directory:
+    for root in (layout.data, layout.data / "projects"):
+        with pytest.raises(ValueError, match="must be separate"):
+            Brain(root, layout.data, None, "img")
+
+
+def test_repository_names_and_links_cannot_escape(tmp_path, monkeypatch):
+    from brain.local import cli
+    user, layout = home_layout(tmp_path, monkeypatch)
+    repo = make_repo(user / "app", {"main.py": "x = 1\n"})
+    brain = cli.Context(layout, repo).brain
+    for name in ("..", "../app", "app/..", ".git", "AppData/Local", "", "app\\.."):
+        with pytest.raises(ValueError):
+            brain.repository(name)
+    try:
+        (user / "data-link").symlink_to(layout.data, target_is_directory=True)
+        (user / "app-link").symlink_to(repo, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are not available to this user")
+    for name in ("data-link", "app-link"):
+        with pytest.raises(ValueError, match="unavailable"):
+            brain.repository(name)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows junctions and path aliases")
+def test_windows_junctions_case_and_short_names_cannot_reach_the_data(tmp_path, monkeypatch):
+    import ctypes
+    from brain.local import cli
+    from brain.service import Brain, is_within
+    user, layout = home_layout(tmp_path, monkeypatch)
+    repo = make_repo(user / "app", {"main.py": "x = 1\n"})
+    brain = cli.Context(layout, repo).brain
+    junction = user / "data-junction"
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(layout.data)], check=True, capture_output=True)
+    with pytest.raises(ValueError, match="unavailable"):
+        brain.repository("data-junction")
+    # Different case and 8.3 short names denote the same folders on Windows.
+    assert is_within(Path(str(layout.data).upper()), Path(str(user).lower()))
+    buffer = ctypes.create_unicode_buffer(1024)
+    ctypes.windll.kernel32.GetShortPathNameW(str(layout.home), buffer, 1024)
+    short = Path(buffer.value)
+    with pytest.raises(ValueError, match="overlaps Coding Brain's data"):
+        Brain(user, short / "data", None, "img").repository("AppData")
+    with pytest.raises(ValueError, match="must be separate"):
+        Brain(Path(str(layout.data).upper()), layout.data, None, "img")
+
+
+def test_repository_without_commits_gets_clear_instructions(tmp_path, monkeypatch):
+    from brain.local import cli
+    user, layout = home_layout(tmp_path, monkeypatch)
+    repo = user / "fresh"
+    repo.mkdir(parents=True)
+    git(repo, "init")
+    (repo / "calculator.py").write_text("def add(a, b):\n    return a - b\n")
+    context = cli.Context(layout, repo)
+    assert context.project["git"] and context.project["head"] is None
+    with pytest.raises(SystemExit, match="no commits yet") as refused:
+        context.check()
+    assert "git commit" in str(refused.value)
+    assert git(repo, "status", "--porcelain").strip() == "?? calculator.py"  # nothing was committed for the user
+
+
+class CalculatorModel:
+    async def propose(self, root, goal, memories, repository_context=None, **kwargs):
+        return json.dumps({"plan": "fix add and test it", "changes": [
+            {"path": "calculator.py", "content": "def add(a, b):\n    return a + b\n"},
+            {"path": "test_calculator.py", "content": "from calculator import add\n\n\ndef test_add():\n"
+                                                      "    assert add(2, 3) == 5\n    assert add(-1, 1) == 0\n"}]})
+
+    async def review(self, goal, diff):
+        return {"approved": True, "reason": "ok"}
+
+
+@pytest.mark.skipif(not os.environ.get("CODINGBRAIN_TEST_DOCKER"), reason="set CODINGBRAIN_TEST_DOCKER=1 with the "
+                    "sandbox images built to run the real Docker sandbox")
+def test_home_folder_project_end_to_end_in_the_real_sandbox(tmp_path, monkeypatch):
+    """Init, first commit, submission, isolated worktree, real Docker test run, acceptance."""
+    import asyncio
+    from brain.local import cli
+    user, layout = home_layout(tmp_path, monkeypatch)
+    repo = make_repo(user / "codingbrain-test", {"calculator.py": "def add(a, b):\n    return a - b\n"})
+    before = snapshot(repo)
+    context = cli.Context(layout, repo)
+    context.check()
+    brain = context.brain
+    brain.model = brain.reviewer = brain.coordinator = CalculatorModel()
+    task = cli.run_goal(context, "Fix the bug in calculator.py, add unit tests for addition, and verify the tests "
+                        "pass.", auto=True)
+    evidence = task.get("test_evidence", {})
+    assert task["status"] == "passed", (task["status"], evidence)
+    assert evidence["exit_code"] == 0 and "1 passed" in evidence["output"]
+    accepted = asyncio.run(cli.accept(context, task))
+    assert git(repo, "show", f"{accepted['branch']}:calculator.py") == "def add(a, b):\n    return a + b\n"
+    assert snapshot(repo) == before  # the user's files and branch are unchanged
+
+
+def test_inspecting_tasks_from_another_terminal_never_interrupts_a_running_task(tmp_path, monkeypatch):
+    from brain.local import cli
+    from brain.service import Brain
+    user, layout = home_layout(tmp_path, monkeypatch)
+    repo = make_repo(user / "app", {"main.py": "x = 1\n"})
+    context = cli.Context(layout, repo)
+    running = context.brain.submit("app", "Long task", launch=False)
+    running["status"] = "running"
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])  # the terminal running it
+    try:
+        running["owner"] = {"pid": other.pid, "host": context.brain.owner["host"]}
+        context.brain.store.save(running)
+        # `codingbrain status` / `tasks` in a second terminal: read-only, no service start.
+        viewer = cli.Context(layout, repo)
+        assert [task["status"] for task in viewer.tasks()] == ["running"] and viewer._brain is None
+        # Even a second service instance leaves a task owned by a live process alone.
+        Brain(repo.parent, context.data, None, "img")
+        assert context.brain.store.get(running["id"])["status"] == "running"
+    finally:
+        other.kill()
+        other.wait()
+    # Once that process is gone, a restart marks the task interrupted, as before.
+    restarted = Brain(repo.parent, context.data, None, "img")
+    task = restarted.store.get(running["id"])
+    assert task["status"] == "blocked" and task["events"][-1]["kind"] == "interrupted"
