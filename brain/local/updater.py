@@ -306,7 +306,9 @@ def install_release(layout: Layout, source, installed: str | None, version: str 
         if installed and not force and Version(release.version) <= Version(installed):
             return {"status": "up_to_date", "installed": installed, "available": release.version}
         log(f"Downloading {release.tag} and verifying checksums")
-        with tempfile.TemporaryDirectory(dir=layout.home, prefix="download-") as scratch:
+        # On Windows a virus scanner may still hold a fresh download open; a leftover temporary
+        # folder must not fail an otherwise complete update.
+        with tempfile.TemporaryDirectory(dir=layout.home, prefix="download-", ignore_cleanup_errors=True) as scratch:
             fetched = fetch_verified(source, release, Path(scratch))
             info = fetched["info"]
             base_python = read_current(layout).get("base_python") or getattr(sys, "_base_executable", sys.executable)

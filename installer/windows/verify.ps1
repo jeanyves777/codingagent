@@ -34,7 +34,9 @@ function CB {
   # The launcher on PATH, run as a user would: a .cmd found through PATH.
   $ErrorActionPreference = 'Continue'  # native stderr is output here, not a script error
   $output = & cmd.exe /d /c codingbrain @args 2>&1 | Out-String
-  return [pscustomobject]@{ Code = $LASTEXITCODE; Text = $output }
+  $code = $LASTEXITCODE
+  Write-Host ("--- codingbrain {0} (exit {1})`n{2}" -f ($args -join ' '), $code, $output.TrimEnd())
+  return [pscustomobject]@{ Code = $code; Text = $output }
 }
 $shellExe = (Get-Process -Id $PID).Path  # run the installer under the PowerShell being verified
 $pythonExe = (Get-Command python).Source
