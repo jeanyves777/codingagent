@@ -262,7 +262,8 @@ SOURCE_GLOBS = ("*.html", "*.htm", "*.css", "*.scss", "*.less", "*.js", "*.jsx",
 
 
 def likely_components(workspace: Path, elements: list[dict], limit: int = 6) -> list[dict]:
-    """Source files that define the elements involved: class names, ids and visible text."""
+    """Source files that define the elements involved: class names, ids and visible text, with
+    the lines that mention them (so a small model sees the rule to change)."""
     terms = []
     for element in elements:
         selector = element.get("selector", "")
@@ -281,9 +282,19 @@ def likely_components(workspace: Path, elements: list[dict], limit: int = 6) -> 
             continue
         hits = [term for term in dict.fromkeys(terms) if term in content]
         if hits:
-            scores[str(path.relative_to(workspace)).replace("\\", "/")] = hits
-    ranked = sorted(scores.items(), key=lambda item: -len(item[1]))
-    return [{"path": path, "matches": hits[:6]} for path, hits in ranked[:limit]]
+            lines = []
+            for number, line in enumerate(content.splitlines(), 1):
+                for term in hits:
+                    index = line.find(term)
+                    if index >= 0:
+                        start = max(0, index - 80)
+                        lines.append(f"{number}: {line[start:index + 160].strip()}")
+                        break
+                if len(lines) >= 4:
+                    break
+            scores[str(path.relative_to(workspace)).replace("\\", "/")] = (hits, lines)
+    ranked = sorted(scores.items(), key=lambda item: -len(item[1][0]))
+    return [{"path": path, "matches": hits[:6], "lines": lines} for path, (hits, lines) in ranked[:limit]]
 
 
 # The verifier ------------------------------------------------------------------------------------
@@ -400,4 +411,7 @@ def feedback(result: dict) -> str:
     if result.get("components"):
         lines.append("Likely responsible files: " + ", ".join(
             f"{item['path']} ({', '.join(item['matches'][:3])})" for item in result["components"]))
+        for item in result["components"][:3]:
+            for line in item.get("lines", [])[:3]:
+                lines.append(f"  {item['path']} line {line}")
     return "\n".join(lines)

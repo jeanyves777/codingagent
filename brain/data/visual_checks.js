@@ -61,7 +61,8 @@
       if (!parentBox || parentBox.right <= viewport.width + 1) {
         overflowing++;
         issues.push({ kind: "element_outside_viewport", severity: "major", element: describe(el),
-          detail: `extends to x=${Math.round(box.right)} beyond the ${viewport.width}px viewport` });
+          detail: `extends to x=${Math.round(box.right)} beyond the ${viewport.width}px viewport ` +
+            `(computed width ${getComputedStyle(el).width}, min-width ${getComputedStyle(el).minWidth})` });
       }
     }
     const style = getComputedStyle(el);

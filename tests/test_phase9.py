@@ -313,7 +313,8 @@ def test_browser_inspects_javascript_rendered_page_and_blocks_internal_requests(
                 "https://docs.example.com/api/endpoints.json": (200, "application/json",
                                                                 json.dumps([{"method": "GET", "path": "/v2/items"}]))}
     inspector = BrowserInspector(WebPolicy(["docs.example.com"], resolver=lambda host: ["93.184.215.14"]),
-                                 executable="/opt/pw-browsers/chromium", fixtures=fixtures)
+                                 executable=shutil.which("chromium") or "/opt/pw-browsers/chromium",
+                                 fixtures=fixtures)
     result = asyncio.run(inspector.inspect("https://docs.example.com/reference", settle_ms=800))
     assert result["evidence"]["outcome"] == "verified" and result["title"] == "API Reference"
     assert "GET /v2/items" in result["text"]

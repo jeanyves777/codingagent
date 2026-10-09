@@ -23,8 +23,8 @@ from brain.attachments import AttachmentError, evidence, ingest, requirements_fr
 from brain.multimodal import Analyzer, is_visual_goal
 from brain.ocr import TesseractOCR
 from brain.service import Brain
-from brain.vision import OllamaVision, OpenAICompatibleVision, PremiumCLIVision, VisionUnavailable
-from brain.visual import (StaticServer, VisualVerifier, compare_pixels, feedback, likely_components,
+from brain.vision import OllamaVision, OpenAICompatibleVision, PremiumCLIVision
+from brain.visual import (StaticServer, VisualVerifier, compare_pixels, feedback,
                           prepare_preview, PreviewUnavailable)
 from tests import multimodal_fixtures as fx
 from tests.test_brain import create_direct, make_repository
@@ -131,8 +131,9 @@ def test_real_vision_model_notices_a_design_difference(tmp_path, files):
     actual = fx.ui_image(files / "actual.png", button_color="#d32f2f", label="Submit", banner=True)
     vision = OllamaVision(OLLAMA, REAL_VISION)
     result = asyncio.run(vision.compare(reference, actual, "Match the design", "desktop"))
-    print("REAL VISION COMPARE", json.dumps(result)[:2000])
-    assert result["findings"]["overall"] != "matches" or result["findings"]["differences"]
+    print("REAL VISION COMPARE", json.dumps(result)[:3000])
+    assert result["findings"]["overall"] != "matches"
+    assert result["findings"]["differences"], "a verdict without the differences behind it is not evidence"
 
 
 # 3. PDF ----------------------------------------------------------------------------------------
@@ -244,6 +245,18 @@ def test_images_go_to_a_vision_capable_model_and_never_to_a_text_only_one(tmp_pa
     asyncio.run(Analyzer(vision=OllamaVision("http://ollama", "qwen2.5vl:7b", client_factory=capable.factory()))
                 .analyze([image2], "fix the UI"))
     assert len(capable.chats) == 1 and image2.vision
+
+
+def test_incomplete_vision_output_is_rejected_not_completed_with_defaults(tmp_path, files):
+    truncated = FakeOllama(reply={"area": "button", "expected": "green"})  # e.g. a cut-off reply's inner object
+    vision = OllamaVision("http://ollama", "qwen2.5vl:7b", client_factory=truncated.factory())
+    with pytest.raises(ValueError, match="incomplete"):
+        asyncio.run(vision.compare(fx.ui_image(files / "a.png"), fx.ui_image(files / "b.png"), "match"))
+    assert truncated.chats[0]["options"]["num_ctx"] >= 8192
+    image = ingest(str(fx.ui_image(files / "ui.png")), tmp_path / "work")
+    analyzer = Analyzer(vision=OllamaVision("http://ollama", "qwen2.5vl:7b", client_factory=truncated.factory()))
+    asyncio.run(analyzer.analyze([image], "fix the UI"))
+    assert image.vision == [] and "incomplete" in image.metadata["vision_unavailable"]
 
 
 def test_openai_compatible_vision_requires_an_explicit_declaration():
@@ -736,6 +749,7 @@ def test_controlled_ui_defect_is_found_repaired_and_verified_in_a_real_browser(t
     assert task["status"] == "passed" and task["visual_repairs"] == 1
     feedback_goal = model.goals[-1]
     assert "[mobile] horizontal_overflow" in feedback_goal and "Likely responsible files: index.html" in feedback_goal
+    assert ".plans{display:flex;width:1100px}" in feedback_goal  # the rule to change is quoted
     workspace = brain.workspace(task["id"])
     assert "max-width:100%" in (workspace / "index.html").read_text()
     shots = task["visual_verification"]["screenshots"]
@@ -762,6 +776,8 @@ def test_real_coding_model_repairs_a_ui_defect_within_the_visual_budget(tmp_path
         return await brain.execute(task["id"], task["digest"])
     task = asyncio.run(flow())
     print("REAL REPAIR", REAL_CODER, json.dumps(task.get("visual_log")), task["status"])
+    print("REAL REPAIR plan:", (task.get("proposal") or {}).get("plan", "")[:1000])
+    print("REAL REPAIR diff:", task.get("diff", "")[:3000])
     assert task["status"] == "passed"
     assert task["visual_log"][-1]["status"] == "passed", task["visual_log"]
     assert task["visual_repairs"] <= 2

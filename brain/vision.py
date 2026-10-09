@@ -82,8 +82,16 @@ def _b64(path: Path) -> str:
     return base64.b64encode(Path(path).read_bytes()).decode("ascii")
 
 
+class VisionOutputInvalid(ValueError):
+    """The model's reply was cut off or not the requested structure; nothing is inferred from it."""
+
+
 def normalize(findings: dict, schema: dict) -> dict:
-    """Keep the expected keys with the expected shapes; drop anything else."""
+    """Keep the expected keys with the expected shapes; drop anything else. A reply missing a
+    required key, or with an invalid verdict, is rejected rather than completed with defaults."""
+    missing = [key for key in schema["required"] if key not in findings]
+    if missing:
+        raise VisionOutputInvalid(f"vision reply is incomplete (missing {', '.join(missing)})")
     clean = {}
     for key, spec in schema["properties"].items():
         value = findings.get(key)
@@ -97,7 +105,9 @@ def normalize(findings: dict, schema: dict) -> dict:
         else:
             value = str(value)[:3000] if value is not None else ""
             if spec.get("enum") and value not in spec["enum"]:
-                value = spec["enum"][-1] if key != "overall" else "major_differences"
+                if key in schema["required"]:
+                    raise VisionOutputInvalid(f"vision reply has an invalid {key}: {value[:60]!r}")
+                value = spec["enum"][-1]
         clean[key] = value
     return clean
 
@@ -180,7 +190,9 @@ class OllamaVision(VisionProvider):
         return self._capability
 
     async def _infer(self, prompt, images, schema):
-        body = {"model": self.model, "stream": False, "format": schema, "options": {"temperature": 0},
+        # Images take ~1000+ tokens each; Ollama's default context would silently truncate them.
+        body = {"model": self.model, "stream": False, "format": schema,
+                "options": {"temperature": 0, "num_ctx": 8192, "num_predict": 2048},
                 "messages": [{"role": "system", "content": SYSTEM},
                              {"role": "user", "content": prompt, "images": [_b64(image) for image in images]}]}
         async with self.client_factory() as client:
