@@ -21,6 +21,12 @@ MUTATIONS = {
         "        if True:",
         ["test_requirement_checks_catch_a_false_success_and_drive_a_repair",
          "test_unmet_requirement_checks_never_leave_the_task_worse"]),
+    "1a generated checks validated before repairs": (
+        "brain/service.py", "            if not assessment[\"invalid\"]:", "            if True:",
+        ["test_invalid_checks_are_rejected_without_using_the_repair_budget"]),
+    "1b no repeated repairs against an unchanged failing check": (
+        "brain/service.py", "        if set(signatures) <= set(seen):", "        if False:",
+        ["test_no_repeated_repairs_against_an_unchanged_failing_check"]),
     "2 escalation on proposal failures": (
         "brain/service.py", "            if not self.supervision or proposals < self.supervision.escalate_after:",
         "            if True:",

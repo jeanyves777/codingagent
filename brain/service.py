@@ -13,7 +13,8 @@ from . import accounting
 from .approvals import ApprovalRequired
 from .capabilities import TASK_CAPABILITIES, TASK_QUERY
 from .brains import is_unavailable
-from .completion import accept_requirement_tests, requirement_goal, run_requirement_checks
+from .completion import (accept_requirement_tests, assess_failures, requirement_goal, run_requirement_checks,
+                         without_tests)
 from .contracts import Assignment, Delegation, Proposal, validate_graph
 from .intelligence import build_index, relevant_context
 from .orchestration import OrchestrationMixin
@@ -217,6 +218,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             self.event(task, "requirement_checks_skipped", f"{type(error).__name__}: {str(error)[:300]}")
             return
         self.record_usage(task, started, before)
+        self._count(task, "requirement_generation_seconds", round(time.monotonic() - started, 1))
         checks = accept_requirement_tests(task, raw)
         if checks and (workspace / checks["path"]).exists():
             checks = None  # never shadow an existing file
@@ -227,44 +229,85 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         task["requirement_tests"] = checks
         self.event(task, "requirement_checks_written", f"{checks['tests']} check(s) in {checks['path']}")
 
+    @staticmethod
+    def _count(task: dict, key: str, amount=1):
+        metrics = task.setdefault("metrics", {})
+        metrics[key] = round(metrics.get(key, 0) + amount, 1)
+
+    def _completion(self, task: dict, status: str, detail: str):
+        """verified, unverified (valid checks still fail), inconclusive (no usable checks left), or
+        unchecked (none were written). Only verified counts as verified completion."""
+        task["completion"] = {"status": status, "detail": detail[:500]}
+        task["completion_verified"] = {"verified": True, "unchecked": None}.get(status, False)
+
     async def _verify_completion(self, task: dict, workspace: Path) -> dict | None:
         """Run the requirement checks once the visible tests pass. Returns a failure for the repair
-        loop, or None when the work is verified or the checks cannot be used."""
+        loop; None when the work is verified, or when the checks are inconclusive; or
+        {"stop": True} when only failures that were already repaired against remain.
+
+        A failing check drives a repair only after validation: checks that fail on their own defect
+        or on an interface the goal does not state are removed without using the repair budget."""
         checks = task.get("requirement_tests")
         if not checks:
+            if self.requirement_checks and "completion" not in task:
+                self._completion(task, "unchecked", "No requirement checks were written")
             return None
-        evidence = await asyncio.to_thread(
-            run_requirement_checks, workspace, checks, run_tests, self.image,
-            lambda: self.store.get(task["id"]).get("cancel_requested", False))
-        if evidence.get("cancelled"):
-            self._check_cancelled(task)
-        if evidence["passed"]:
-            task["completion_verified"] = True
-            self.event(task, "completion_verified", f"{checks['tests']} requirement check(s) passed")
+        for _ in range(3):
+            evidence = await asyncio.to_thread(
+                run_requirement_checks, workspace, checks, run_tests, self.image,
+                lambda: self.store.get(task["id"]).get("cancel_requested", False))
+            self._count(task, "requirement_check_runs")
+            if evidence.get("cancelled"):
+                self._check_cancelled(task)
+            if evidence["passed"]:
+                self._completion(task, "verified", f"{checks['tests']} requirement check(s) passed")
+                self.event(task, "completion_verified", task["completion"]["detail"])
+                return None
+            failure = classify_test_failure(evidence)
+            if failure["category"] != "test_failure":
+                # Broken generated checks (collection errors) or sandbox problems: never block.
+                task["requirement_tests"] = {}
+                self._completion(task, "inconclusive", f"checks discarded ({failure['category']})")
+                self.event(task, "requirement_checks_discarded", f"{failure['category']}: {failure['summary'][:500]}")
+                return None
+            assessment = assess_failures(evidence["output"], checks, task["goal"])
+            if not assessment["invalid"]:
+                break
+            checks = without_tests(checks, set(assessment["invalid"]))
+            task["requirement_tests"] = checks if checks["tests"] else {}
+            self._count(task, "requirement_tests_rejected", len(assessment["invalid"]))
+            self.event(task, "requirement_checks_rejected", json.dumps(assessment["invalid"])[:1500])
+            if not checks["tests"]:
+                self._completion(task, "inconclusive", "every requirement check was invalid")
+                return None
+        else:
+            self._completion(task, "inconclusive", "requirement checks could not be validated")
             return None
-        failure = classify_test_failure(evidence)
-        if failure["category"] != "test_failure":
-            # Broken generated checks (collection errors) or sandbox problems: discard, never block.
-            task["requirement_tests"] = {}
-            task["completion_verified"] = None
-            self.event(task, "requirement_checks_discarded", f"{failure['category']}: {failure['summary'][:500]}")
-            return None
-        self.event(task, "requirement_checks_failed", failure["summary"][:1000])
-        return {**failure, "category": "requirement"}
+        failures = assessment["failures"] or {"unparsed": failure["summary"][:300]}
+        signatures = [f"{name}: {detail}" for name, detail in failures.items()]
+        seen = task.setdefault("requirement_repairs", [])
+        self.event(task, "requirement_checks_failed", (assessment["summary"] or failure["summary"])[:1000])
+        if set(signatures) <= set(seen):
+            return {"stop": True, "failing": len(signatures)}
+        seen.extend(item for item in signatures if item not in seen)
+        self._count(task, "requirement_repairs")
+        return {**failure, "category": "requirement", "failing": len(signatures),
+                "summary": assessment["summary"] or failure["summary"]}
 
-    def _keep_visible_pass(self, task: dict, workspace: Path):
-        """Remember the files that passed the visible tests, so a requirement repair can never leave
-        the task worse than it was."""
-        if task.get("visible_pass"):
+    def _keep_visible_pass(self, task: dict, workspace: Path, failing: int):
+        """Remember the version that passed the visible tests with the fewest failing requirement
+        checks, so a requirement repair can never leave the task worse than it was."""
+        saved = task.get("visible_pass")
+        if saved and saved.get("failing", 0) <= failing:
             return
         files = {}
         for path in task.get("applied_paths", []):
             target = safe_path(workspace, path)
             files[path] = target.read_text(encoding="utf-8") if target.is_file() else None
         task["visible_pass"] = {"files": files, "proposal": task["proposal"], "digest": task.get("digest"),
-                                "test_evidence": task["test_evidence"]}
+                                "test_evidence": task["test_evidence"], "failing": failing}
 
-    def _restore_visible_pass(self, task: dict) -> bool:
+    def _restore_visible_pass(self, task: dict, reason: str) -> bool:
         saved = task.pop("visible_pass", None)
         if not saved:
             return False
@@ -279,9 +322,10 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         task["applied_paths"] = [path for path, content in saved["files"].items() if content is not None]
         task["proposal"], task["digest"] = saved["proposal"], saved["digest"]
         task["test_evidence"] = saved["test_evidence"]
-        task["status"], task["completion_verified"] = "passed", False
-        self.event(task, "completion_unverified", "Requirement checks still fail after the repair budget; "
-                   "restored the version that passed the visible tests and reported it as unverified")
+        task["status"] = "passed"
+        self._completion(task, "unverified", reason)
+        self.event(task, "completion_unverified", reason + "; kept the version that passed the visible "
+                   "tests with the fewest failing requirement checks, reported as unverified")
         return True
 
     async def _initial_proposal(self, task: dict, workspace: Path, goal: str):
@@ -657,8 +701,13 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                 requirement = None
                 if evidence["passed"]:
                     requirement = await self._verify_completion(task, workspace)
+                if requirement and requirement.get("stop"):
+                    # Only failures already repaired against remain: no repeated repairs.
+                    self._keep_visible_pass(task, workspace, requirement["failing"])
+                    self._restore_visible_pass(task, "The same requirement checks still fail after a repair")
+                    return
                 if requirement:
-                    self._keep_visible_pass(task, workspace)
+                    self._keep_visible_pass(task, workspace, requirement["failing"])
                     task.setdefault("failure_log", []).append({"attempt": attempt, **requirement})
                     feedback = ("\nThe visible tests pass, but checks written from the goal's stated "
                                 "requirements fail. Fix the implementation so it does what the goal says; "
@@ -730,7 +779,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                         return failures, limit
                     guidance = guidance_text(consultation)
             if failures >= limit and not guidance:
-                if self._restore_visible_pass(task):
+                if self._restore_visible_pass(task, "Requirement checks still fail after the repair budget"):
                     return None
                 task["status"] = "failed"
                 self.event(task, "attempts_exhausted", f"{failures} unsuccessful attempts")

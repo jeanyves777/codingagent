@@ -237,6 +237,7 @@ class Gauntlet:
         return {"final": workspace if workspace.exists() else target, "status": stored["status"],
                 "models": summarize_models(stored.get("inference_log", [])),
                 "completion_verified": stored.get("completion_verified"),
+                "completion": (stored.get("completion") or {}).get("status"),
                 "metrics": {**stored.get("metrics", {}), "repair_attempts": len(stored.get("failure_log", []))},
                 "premium_calls": ledger.count(item["id"], ok=1) if ledger else 0,
                 "premium_attempts": ledger.count(item["id"]) if ledger else 0,
@@ -289,6 +290,7 @@ class Gauntlet:
                 "completion_verified": (None if any(child.get("completion_verified") is None for child in children)
                                         else all(child["completion_verified"] for child in children))
                 if children else None,
+                "completion": completion_of([(child.get("completion") or {}).get("status") for child in children]),
                 "metrics": metrics, "events": events, "error": error,
                 "premium_calls": sum(ledger.count(item["id"], ok=1) for item in [group, *children]) if ledger else 0,
                 "premium_attempts": sum(ledger.count(item["id"]) for item in [group, *children]) if ledger else 0}
@@ -396,6 +398,9 @@ class Gauntlet:
                 "error": result.get("error"), "hidden_output": hidden["output"][-600:],
                 "models": result.get("models"),
                 "completion_verified": result.get("completion_verified"),
+                "completion": result.get("completion"),
+                "requirement_metrics": {key: metrics.get(key, 0) for key in REQUIREMENT_METRICS},
+                "model_seconds": metrics.get("model_seconds", 0),
                 "trajectory": result["events"]}
 
     async def run(self, conditions: list[str], tasks: list[dict], repeat: int = 1,
@@ -527,6 +532,17 @@ PROPOSAL_REJECTIONS = {"validation_failed", "implementer_invalid"}
 NEUTRAL_EVENTS = {"knowledge_packet", "web_preflight", "memory_fallback", "upstream_check"}
 
 
+REQUIREMENT_METRICS = ("requirement_generation_seconds", "requirement_check_runs", "requirement_tests_rejected",
+                       "requirement_repairs")
+COMPLETION_ORDER = ("unverified", "inconclusive", "unchecked", "verified")
+
+
+def completion_of(statuses: list) -> str | None:
+    """An orchestration's completion is its weakest assignment's."""
+    found = [status for status in statuses if status]
+    return next((status for status in COMPLETION_ORDER if status in found), None)
+
+
 def model_failure_evidence(events: list[dict]) -> list[str]:
     """Model failures that ended a task: an explicit proposal or attempt failure, or a task that
     blocked right after its proposals were rejected (records made before proposal_failed existed)."""
@@ -617,6 +633,9 @@ def summarize(runs: list[dict], conditions: list[str]) -> dict:
             "agent_completed": f"{sum(bool(run.get('agent_completed')) for run in attempted)}/{len(attempted)}",
             "engineering_success": f"{len(passed)}/{len(attempted)}",
             "downstream_orchestration_effects": sum(bool(downstream_effects(run)) for run in attempted),
+            # Agent-side completion verification; hidden tests remain the authoritative score.
+            "completion": {status: sum(run.get("completion") == status for run in attempted)
+                           for status in COMPLETION_ORDER if any(run.get("completion") == status for run in attempted)},
             "completed_but_hidden_failed": sum(bool(run.get("agent_completed") and not run.get("hidden_tests_passed"))
                                                for run in attempted),
             "hidden_passed_but_not_completed": sum(bool(run.get("hidden_tests_passed") and not run.get("agent_completed"))

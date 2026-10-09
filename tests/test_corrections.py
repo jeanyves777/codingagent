@@ -98,7 +98,71 @@ def test_broken_generated_checks_are_discarded_not_blocking(tmp_path, monkeypatc
     task = run(brain_for(tmp_path / "second", model))
     kinds = [event["kind"] for event in task["events"]]
     assert task["status"] == "passed" and "requirement_checks_discarded" in kinds
-    assert task["completion_verified"] is None and task["requirement_tests"] == {}
+    # Inconclusive checks never count as verified completion.
+    assert task["completion_verified"] is False and task["completion"]["status"] == "inconclusive"
+    assert task["requirement_tests"] == {}
+
+
+def local_pytest(workspace, image, **kwargs):
+    """The real pytest output format, run locally instead of in Docker."""
+    import subprocess
+    import sys
+    result = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], cwd=workspace,
+                            capture_output=True, text=True, timeout=120)
+    return {"passed": result.returncode == 0, "exit_code": result.returncode,
+            "output": (result.stdout + result.stderr)[:16_000]}
+
+
+MONEY_GOAL = "Set x to 2 and add a Money class with integer cents and a currency code"
+MONEY = "x = 2\n\n\nclass Money:\n    def __init__(self, cents, currency):\n        self.cents, self.currency = cents, currency\n"
+# Seen live: a check that invents an interface the goal never states, and one that forgets an import.
+INVALID = ("def test_invented_keyword():\n    import main\n    main.Money(amount=1, currency='EUR')\n\n\n"
+           "def test_invented_attribute():\n    import main\n    assert main.Money(1, 'EUR').amount == 1\n\n\n"
+           "def test_forgot_import():\n    import main\n    assert helper(main) == 1\n\n\n")
+VALID = "def test_cents():\n    import main\n    assert main.Money(250, 'USD').cents == 250\n"
+
+
+def test_invalid_checks_are_rejected_without_using_the_repair_budget(tmp_path, monkeypatch):
+    from brain import completion
+    monkeypatch.setattr("brain.service.run_tests", local_pytest)
+    # helper() is undefined: the generation-time gate would drop the file, so admit it here to
+    # exercise the runtime safeguard as well.
+    monkeypatch.setattr(completion, "accept_requirement_tests", lambda task, raw: {
+        "path": completion.requirement_file_name(task["id"]),
+        "content": json.loads(raw)["changes"][0]["content"], "tests": 4})
+    monkeypatch.setattr("brain.service.accept_requirement_tests", completion.accept_requirement_tests)
+    model = ScriptedModel([MONEY], checks=INVALID + VALID)
+    task = run(brain_for(tmp_path, model), MONEY_GOAL)
+    rejected = json.loads(next(event["detail"] for event in task["events"]
+                               if event["kind"] == "requirement_checks_rejected"))
+    assert sorted(rejected) == ["test_forgot_import", "test_invented_attribute", "test_invented_keyword"]
+    assert "amount" in rejected["test_invented_keyword"]
+    assert task["status"] == "passed" and task["completion"]["status"] == "verified"
+    assert task.get("failure_log", []) == [] and len(model.goals) == 2  # checks + one implementation
+    assert task["metrics"]["requirement_tests_rejected"] == 3
+
+
+def test_a_check_named_in_the_goal_is_a_real_requirement(tmp_path, monkeypatch):
+    monkeypatch.setattr("brain.service.run_tests", local_pytest)
+    checks = "def test_amount():\n    import main\n    assert main.Money(1, 'EUR').amount == 1\n"
+    model = ScriptedModel([MONEY], checks=checks)
+    task = run(brain_for(tmp_path, model), MONEY_GOAL + "; expose the value as amount")
+    assert "requirement_checks_rejected" not in [event["kind"] for event in task["events"]]
+    assert task["failure_log"][0]["category"] == "requirement"
+
+
+def test_no_repeated_repairs_against_an_unchanged_failing_check(tmp_path, monkeypatch):
+    monkeypatch.setattr("brain.service.run_tests", local_pytest)
+    checks = "def test_cents():\n    import main\n    assert main.Money(250, 'USD').cents == 250\n"
+    wrong = MONEY.replace("self.cents, self.currency = cents, currency", "self.cents, self.currency = 0, currency")
+    model = ScriptedModel([wrong, wrong.replace("x = 2", "x = 2  # tried")], checks=checks)
+    task = run(brain_for(tmp_path, model, max_free_attempts=5), MONEY_GOAL)
+    kinds = [event["kind"] for event in task["events"]]
+    assert task["metrics"]["requirement_repairs"] == 1 and kinds.count("requirement_checks_failed") == 2
+    assert task["status"] == "passed" and task["completion"]["status"] == "unverified"
+    assert task["completion_verified"] is False and len(model.goals) == 3  # checks + 2 implementations
+    workspace = tmp_path / "data" / "tasks" / task["id"] / "workspace"
+    assert (workspace / "main.py").read_text() == wrong  # the first version, no worse than the second
 
 
 def test_requirement_file_is_accepted_only_in_the_expected_shape():
