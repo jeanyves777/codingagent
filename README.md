@@ -34,6 +34,18 @@ Install once and use `codingbrain` in any project; update with `codingbrain upda
 instructions: [docs/windows-install.md](docs/windows-install.md). Release process:
 [RELEASING.md](RELEASING.md).
 
+## Complete installation and readiness
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -Full   # or -Local; -PlanOnly changes nothing
+codingbrain doctor --full                                     # Core / Sandbox / Hybrid / Full ready, Degraded or Blocked
+```
+
+The installer prepares Git, WSL 2, Docker Desktop, Ollama and a model sized for your computer, the
+test sandbox, and, optionally, Claude Code and Codex (your subscriptions), the knowledge library
+and the multimodal extras. It asks before every change, resumes after restarts and verifies with
+real checks. See [docs/installation.md](docs/installation.md).
+
 ## Images, screenshots and documents (v0.11)
 
 `codingbrain run "Recreate this interface" --attach C:\Designs\dashboard.png` reads screenshots,

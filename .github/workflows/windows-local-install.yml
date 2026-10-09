@@ -12,6 +12,8 @@ on:
       - "tests/test_multimodal.py"
       - "tests/multimodal_fixtures.py"
       - "tests/test_activity.py"
+      - "tests/test_installer.py"
+      - "tests/installer_fakes.py"
       - ".github/workflows/windows-local-install.yml"
   workflow_dispatch:
   push:
@@ -50,8 +52,23 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check -e ".[dev]"
           $env:CODINGBRAIN_TRANSCRIPTS = "$PWD\transcripts\${{ matrix.os }}-${{ matrix.python }}-${{ matrix.shell }}"
-          python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_memory.py tests/test_multimodal.py tests/test_activity.py
+          python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_memory.py tests/test_multimodal.py tests/test_activity.py tests/test_installer.py
           Get-ChildItem transcripts -Recurse -Filter run-*.txt | ForEach-Object { python scripts/render_transcript.py $_.FullName ($_.FullName -replace '\.txt$', '.png') "Windows, Python ${{ matrix.python }}, ${{ matrix.shell }}" }
+      - name: Installer on a real Windows runner (preflight, plan, readiness, winget package ids)
+        shell: pwsh
+        run: |
+          # Real probes on this VM. GitHub's Windows runners have no nested virtualization, WSL 2 or
+          # Linux containers, so WSL/Docker readiness here shows the not-ready path, never a success.
+          if (Get-Command winget -ErrorAction SilentlyContinue) { $env:CODINGBRAIN_TEST_WINGET = '1' } else { Write-Host 'winget is not on this runner image: the package-id check is skipped' }
+          python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py -k real
+          $env:CODINGBRAIN_HOME = Join-Path $env:RUNNER_TEMP 'cb-plan'
+          python -m brain.local install --plan --full --plain 2>&1 | Tee-Object -FilePath install-plan.txt
+          if ($LASTEXITCODE -ne 0) { throw "install --plan exited $LASTEXITCODE" }
+          python -m brain.local doctor --json > doctor-readiness.json
+          $report = Get-Content -Raw doctor-readiness.json | ConvertFrom-Json
+          Write-Host ("readiness: {0} (reached {1})" -f $report.readiness.level, $report.readiness.reached)
+          if (-not $report.readiness.level) { throw 'doctor --json has no readiness level' }
+          if ((Get-Content -Raw install-plan.txt) -match 'definitely') { throw 'virtualization must never be reported as definitely disabled' }
       - name: Build an older and a newer release
         shell: pwsh
         run: |
@@ -60,6 +77,14 @@ jobs:
           python scripts/build_release.py --out dist/new --version "$version.post1" --constraints dist/old/constraints.txt
       - name: Install, recognize, update, refuse bad updates, roll back, uninstall
         run: ./installer/windows/verify.ps1 -Old dist/old -New dist/new
+      - name: install.ps1 hands over to provisioning before the CLI is on PATH
+        run: |
+          $boot = Join-Path $env:RUNNER_TEMP 'cb-boot'
+          $output = & ./installer/windows/install.ps1 -From dist/new -InstallDir $boot -Python (Get-Command python).Source -Yes -NoPath -Full -PlanOnly *>&1 | Out-String
+          Write-Host $output
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 -Full -PlanOnly exited $LASTEXITCODE" }
+          if ($output -notmatch 'Plan:' -or $output -notmatch 'Docker Desktop' -or $output -notmatch 'Readiness:') { throw 'the provisioning plan was not shown' }
+          if (Get-Command codingbrain -ErrorAction SilentlyContinue) { Write-Host '(a codingbrain from an earlier step is on PATH; the plan above ran from the new venv)' }
       - name: Download the published v0.9.0 release
         shell: pwsh
         env:
@@ -74,6 +99,8 @@ jobs:
           path: |
             verify-report.json
             upgrade-report.json
+            install-plan.txt
+            doctor-readiness.json
             transcripts/
 
   engines:
@@ -150,9 +177,73 @@ jobs:
           python -m pip install --disable-pip-version-check -e ".[dev]"
           python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_brain.py
 
+  installer-e2e:
+    # Real, unmocked: `codingbrain install --profile local` on a Linux runner with a real Ollama and
+    # model (the generation test proves it runs), `doctor --full` with real sandbox images, and the
+    # disposable end-to-end task (real model fixes a real bug, tests run in the real sandbox).
+    name: real installer readiness and end-to-end task (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CODINGBRAIN_TEST_CODING_MODEL: qwen2.5-coder:7b
+      CODINGBRAIN_TEST_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Sandbox images, Ollama and the coding model
+        run: |
+          for base in $(grep -h '^FROM' brain/local/assets/Dockerfile.sandbox brain/local/assets/Dockerfile.sandbox.node | awk '{print $2}' | sort -u); do
+            for attempt in 1 2 3 4; do
+              if docker pull "mirror.gcr.io/library/$base" && docker tag "mirror.gcr.io/library/$base" "$base"; then break; fi
+              if docker pull "$base"; then break; fi
+              [ "$attempt" = 4 ] && exit 1
+              sleep $((2 ** attempt))
+            done
+          done
+          python -m pip install --disable-pip-version-check -e ".[dev]"
+          curl -fsSL https://ollama.com/install.sh | sh
+          (ollama serve > ollama.log 2>&1 &)
+          sleep 5
+      - name: codingbrain install --profile local (real; downloads the model through Ollama)
+        shell: bash
+        run: |
+          export CODINGBRAIN_HOME="$RUNNER_TEMP/cb-real"
+          python -m brain.local setup --non-interactive --model "$CODINGBRAIN_TEST_CODING_MODEL"
+          python -m brain.local install --profile local --yes --plain 2>&1 | tee install-local.txt
+          grep -q "Readiness: Core ready" install-local.txt
+      - name: doctor --full (real generation, real sandbox start)
+        shell: bash
+        run: |
+          export CODINGBRAIN_HOME="$RUNNER_TEMP/cb-real"
+          python -m brain.local install --only sandbox --profile full --yes --plain 2>&1 | tee install-sandbox.txt
+          python -m brain.local doctor --full --json > doctor-full.json
+          python - <<'PY'
+          import json
+          report = json.load(open("doctor-full.json"))["readiness"]
+          print("level:", report["level"], "reached:", report["reached"])
+          assert report["levels"]["core"]["ready"] and report["levels"]["sandbox"]["ready"], report
+          assert report["components"]["model"]["verified"], report["components"]["model"]
+          assert report["components"]["sandbox"]["verified"], report["components"]["sandbox"]
+          PY
+      - name: Real model and end-to-end tests
+        shell: bash
+        run: python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py -k real 2>&1 | tee installer-real.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installer-real
+          path: |
+            install-local.txt
+            install-sandbox.txt
+            doctor-full.json
+            installer-real.log
+            ollama.log
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [verify, engines, sandbox]
+    needs: [verify, engines, sandbox, installer-e2e]
     runs-on: windows-latest
     permissions:
       contents: write

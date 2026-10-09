@@ -1,5 +1,58 @@
 # Changelog
 
+## Unreleased: complete installation and readiness
+
+See docs/installation.md. This is a separate installer improvement on top of 0.12.0, waiting for
+verification and approval.
+
+- **`codingbrain install`** with Local and Full profiles. It runs a preflight, shows a plan, and
+  asks permission before each change:
+  - Python and Git;
+  - WSL 2;
+  - Docker Desktop;
+  - Ollama;
+  - a model chosen for this computer's memory;
+  - Claude Code and Codex;
+  - the sandbox images;
+  - the knowledge library;
+  - OCR, a vision model and a browser.
+
+  Components come from winget or the vendor's official channel. Administrator rights are asked
+  through UAC, signatures are recorded and tampered binaries are refused. No remote scripts are
+  run and no security warnings are suppressed.
+- **Restart-safe checkpoints:**
+  - `--resume`;
+  - an optional one-time resume after a WSL restart;
+  - idempotent reruns;
+  - one installation at a time.
+- **`install.ps1 -Local` / `-Full` / `-Resume` / `-PlanOnly`:** prepares the environment before the
+  `codingbrain` command is on PATH.
+- **Readiness levels** replace "Healthy": Core, Sandbox, Hybrid and Full ready, Degraded, Blocked.
+  - Levels count only verified evidence: a model that generated text, sandbox images that started
+    offline, and a subscription sign-in.
+  - `doctor --full` runs the real checks, and `doctor --json` includes `readiness`.
+- **Virtualization** is judged from several signals. It is never reported as definitely disabled
+  from Windows' firmware flag, and firmware settings are never changed.
+- **Docker:** the installer separates the CLI from the engine and detects Windows-containers mode.
+  It starts Docker Desktop and waits for it, and runs a sandbox smoke test with `--network none`.
+- **Claude Code and Codex** have explicit sign-in states:
+  - not installed;
+  - not authenticated;
+  - authenticated;
+  - API-key billing (refused);
+  - expired;
+  - temporarily unavailable;
+  - disabled.
+
+  The official sign-in flows run without API-key variables, and no credentials are read or stored.
+- **`codingbrain selftest`:** a disposable end-to-end task (a throwaway project, the real model and
+  the sandbox).
+- **`codingbrain setup --repair`** and **`codingbrain watch --install`**. Installer progress goes
+  to the activity journal: tool-reported bytes and output, elapsed time and heartbeats. Percentages
+  are never estimated.
+- **Update, rollback and uninstall** never touch WSL, Docker, Ollama, models, Claude Code, Codex,
+  Git or Python.
+
 ## 0.12.0
 
 Live activity, execution traces and snapshots (see docs/live-activity.md).

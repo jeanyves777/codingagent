@@ -84,6 +84,13 @@ def describe(event: dict, mode: str = "live") -> str | None:
         return f"{who(event)} {event.get('summary')}" if kind != "approval" else str(event.get("summary"))
     if kind == "tool":
         return None if mode == "quiet" else f"  {who(event)} used {event.get('summary')}"
+    if kind == "operation":
+        if status == "RUNNING":
+            return f"{who(event)} — {event.get('summary')}"
+        duration = f" ({event['duration']:.1f} s)" if event.get("duration") is not None else ""
+        return None if mode == "quiet" and status == "COMPLETED" else f"{event.get('summary')}{duration}"
+    if kind == "progress":
+        return None if mode == "quiet" else f"  {event.get('summary')}"
     if kind in {"route", "snapshot"}:
         return f"  {event.get('summary')}" if mode == "verbose" else None
     if kind == "task_event":
@@ -154,11 +161,12 @@ class LiveView:
     def emit(self, event: dict):
         self.seen += 1
         key = (event.get("agent"), event.get("model"), (event.get("data") or {}).get("role"))
-        if event["event_type"] == "model_request":
+        kind = event["event_type"]
+        if kind == "model_request" or (kind == "operation" and event.get("status") == "RUNNING"):
             self.active[key] = {"since": event["at"], "beat": event["at"], "phase": event.get("phase")}
-        elif event["event_type"] == "heartbeat" and key in self.active:
+        elif kind in {"heartbeat", "progress"} and key in self.active:
             self.active[key]["beat"] = event["at"]
-        elif event["event_type"] == "model_response":
+        elif kind in {"model_response", "operation"}:
             self.active.pop(key, None)
         if event["event_type"] == "stage" and event.get("status") == "RUNNING":
             self.phase = event.get("phase")
@@ -185,7 +193,9 @@ class LiveView:
         line = (f"   … {who({'agent': agent, 'model': model})} working on {phase.lower() or role} — "
                 f"{clock(now - item['since'])} elapsed, last heartbeat {int(quiet_for)} s ago")
         if quiet_for > 3 * self.interval + 5:
-            line += " — no heartbeat: the request may be stalled (Ctrl+C pauses; `codingbrain resume` continues)"
+            line += (" — no heartbeat: the step may be stalled (Ctrl+C stops; `codingbrain install --resume` "
+                     "continues)" if str(item.get("phase") or "").startswith("install") else
+                     " — no heartbeat: the request may be stalled (Ctrl+C pauses; `codingbrain resume` continues)")
         return line
 
     def poll(self, locked=False):

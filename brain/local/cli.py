@@ -480,6 +480,8 @@ def cmd_watch(args, layout):
     import time as clock_time
     from ..store import Store
     from .live import LiveView
+    if args.install:
+        return watch_install(args, layout)
     context = Context(layout, Path.cwd())
     task = task_by_prefix(context, args.task, active_only=not args.task)
     telemetry = telemetry_for(context)
@@ -494,6 +496,28 @@ def cmd_watch(args, layout):
         except KeyboardInterrupt:
             pass
     print(f"Task {task['id'][:8]} is {store.get(task['id'])['status']}.")
+    return 0
+
+
+def watch_install(args, layout):
+    """Follow the latest installation (or show its history once it has finished)."""
+    import time as clock_time
+    from ..telemetry import Telemetry
+    from .installer import InstallState
+    from .live import LiveView
+    state = InstallState(layout)
+    runs = state.data.get("runs") or []
+    if not runs:
+        raise SystemExit("No installation has run yet: `codingbrain install`.")
+    run = runs[-1]["id"]
+    lock = layout.locks / "install.json"
+    with LiveView(Telemetry(layout.data / "install.sqlite3"), view_mode(args) or ("live" if sys.stdout.isatty() else "plain"),
+                  task_ids=[run], after=0):
+        try:
+            while lock.exists() and run in lock.read_text(encoding="utf-8"):
+                clock_time.sleep(1)
+        except (KeyboardInterrupt, OSError):
+            pass
     return 0
 
 
@@ -876,7 +900,9 @@ def cmd_shell(args, layout):
         run_goal(context, goal.split(":", 1)[1].strip() if orchestrated else goal, orchestrated)
 
 
-def doctor_report(layout: Layout, offline: bool) -> dict:
+def doctor_report(layout: Layout, offline: bool, full: bool = False) -> dict:
+    """`ok` is the application itself (what install and update gate on); `readiness` is the
+    level the whole environment reached (brain.local.readiness)."""
     checks = []
 
     def check(name, ok, detail="", core=True):
@@ -926,35 +952,35 @@ def doctor_report(layout: Layout, offline: bool) -> dict:
     multimodal = multimodal_status(config or settings.DEFAULTS, offline)
     for name, ok, detail in multimodal:
         check(name, ok, detail, core=name == "documents")  # parsers ship with the app; the rest is optional
+    readiness = None
     if not offline:
-        docker = shutil.which("docker")
-        images = []
-        if docker:
-            listed = subprocess.run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
-                                    capture_output=True, text=True, timeout=30)
-            images = listed.stdout.split() if listed.returncode == 0 else []
-            wanted = (config or settings.DEFAULTS)["sandbox"]["python_image"]
-            check("docker sandbox", wanted in images,
-                  f"{wanted} {'ready' if wanted in images else 'missing: run `codingbrain setup --sandbox`'}"
-                  if listed.returncode == 0 else "Docker is installed but not running", core=False)
-        else:
-            check("docker sandbox", False, "Docker not found: tests cannot run until Docker Desktop is installed",
-                  core=False)
-        if config and config["models"]["provider"] == "ollama":
-            try:
-                import httpx
-                tags = httpx.get(config["models"]["url"].rstrip("/") + "/api/tags", timeout=5, trust_env=False).json()
-                names = [item["name"] for item in tags.get("models", [])]
-                wanted = config["models"]["model"]
-                found = any(name == wanted or name.split(":")[0] == wanted.split(":")[0] for name in names)
-                check("local model", found, f"Ollama has {len(names)} model(s); {wanted or 'none selected'} "
-                      f"{'available' if found else 'not pulled'}", core=False)
-            except Exception as error:
-                check("local model", False, f"Ollama not reachable at {config['models']['url']}: "
-                      f"{type(error).__name__}", core=False)
-        for name, detail in premium_status().items():
-            check(f"premium: {name}", detail["usable"], detail["detail"], core=False)
-    return {"ok": all(item["ok"] for item in checks if item["core"]), "version": version(), "checks": checks}
+        from .components import Env, check_all
+        from .installer import InstallState
+        from .readiness import assess
+        from .system import System
+        state = InstallState(layout)
+        env = Env(System(), layout, config or settings.DEFAULTS, evidence=state.evidence)
+        results = check_all(env, deep=full)
+        if full:
+            state.save()  # deep checks are evidence for later quick checks
+        docker, sandbox = results["docker"], results["sandbox"]
+        check("docker sandbox", docker.ready and sandbox.ready,
+              f"{docker.detail}; {sandbox.detail}" if docker.ready else docker.detail, core=False)
+        check("local model", results["model"].ready, results["model"].detail
+              if results["ollama"].ready else results["ollama"].detail, core=False)
+        for name in ("claude", "codex"):
+            check(f"premium: {name}", results[name].ready, f"{(results[name].data or {}).get('auth', '')}: "
+                  f"{results[name].detail}", core=False)
+        problems = [item["name"] for item in checks if item["core"] and not item["ok"]]
+        profile = state.data.get("profile")
+        from .components import PROFILES
+        readiness = assess(results, app_ok=not problems, app_problems=problems, declined=state.data.get("declined", []),
+                           config=config or settings.DEFAULTS, profile=profile,
+                           expected=PROFILES.get(profile or "", []))
+        readiness["components"] = {key: value.to_dict() for key, value in results.items()}
+        readiness["deep"] = full
+    return {"ok": all(item["ok"] for item in checks if item["core"]), "version": version(), "checks": checks,
+            "readiness": readiness}
 
 
 def multimodal_status(config: dict, offline: bool = False) -> list[tuple[str, bool, str]]:
@@ -1026,18 +1052,75 @@ def premium_status() -> dict:
 
 
 def cmd_doctor(args, layout):
-    report = doctor_report(layout, args.offline)
+    if args.full and args.offline:
+        raise SystemExit("--full runs real checks (model generation, sandbox start, sign-ins); it cannot be offline")
+    if args.full and not args.json:
+        print("Full check: generating text with the local model, starting the sandbox images offline and asking "
+              "Claude Code and Codex for their sign-in state. This can take a few minutes.\n")
+    report = doctor_report(layout, args.offline, full=args.full)
     if args.json:
-        print(json.dumps(report, indent=2))
+        print(json.dumps(report, indent=2, default=str))
     else:
         for item in report["checks"]:
             mark = "ok " if item["ok"] else ("ERR" if item["core"] else "-- ")
             print(f"[{mark}] {item['name']:<20} {item['detail']}")
-        print("\nHealthy." if report["ok"] else "\nProblems found above.")
+        if report["readiness"]:
+            from .readiness import render
+            print("\n" + render(report["readiness"]))
+        else:
+            print("\nApplication checks passed (offline: run `codingbrain doctor --full` for readiness)."
+                  if report["ok"] else "\nProblems found above.")
     return 0 if report["ok"] else 1
 
 
+def cmd_install(args, layout):
+    """Install and verify everything the chosen profile needs (see brain.local.installer)."""
+    from .installer import Installer
+    profile = "full" if args.full else args.profile
+    mode = "json" if args.json else view_mode(args) or ("live" if sys.stdout.isatty() else "plain")
+    installer = Installer(layout, yes=args.yes, mode=mode, interactive=sys.stdin.isatty() and not args.non_interactive)
+    report = installer.install(profile, only=args.only, skip=args.skip or (), resume=args.resume,
+                               plan_only=args.plan, retry_declined=args.retry_declined,
+                               register_resume=False if args.no_auto_resume else None)
+    if not args.plan and not report.get("restart_required") and report["levels"]["sandbox"]["ready"] and (
+            args.selftest or (installer.interactive and not args.yes and ask(
+                "Run a short end-to-end test now (a throwaway project, a real task for your model, tests in the "
+                "sandbox; your projects are not touched)?", False))):
+        report["selftest"] = run_selftest(layout, args.json)
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+    return 0 if args.plan or report["level"] not in {"blocked"} else 1
+
+
+def run_selftest(layout, quiet=False) -> dict:
+    from .installer import selftest
+    if not quiet:
+        print("\nEnd-to-end test: a throwaway project with a failing test; the configured model must fix it and the "
+              "sandbox must run the test.")
+    result = selftest(layout)
+    if not quiet:
+        print(("PASSED" if result["passed"] else "NOT PASSED") + f": task {result['status']}"
+              + (f", tests exit {result.get('tests_exit_code')}" if result.get("tests_exit_code") is not None else "")
+              + (f", {result.get('seconds')} s with {result.get('model')}" if result.get("model") else "")
+              + (f"\n  {result['failure']}" if result.get("failure") else ""))
+    return result
+
+
+def cmd_selftest(args, layout):
+    result = run_selftest(layout, args.json)
+    if args.json:
+        print(json.dumps(result, indent=2))
+    return 0 if result["passed"] else 1
+
+
 def cmd_setup(args, layout):
+    if args.repair:
+        from .installer import Installer
+        installer = Installer(layout, yes=args.yes, interactive=sys.stdin.isatty() and not args.non_interactive,
+                              mode="live" if sys.stdout.isatty() else "plain")
+        print("Repair: every component of your profile gets a full check; anything not working is offered a fix.")
+        report = installer.install(None, resume=True, deep_plan=True)
+        return 0 if report["level"] != "blocked" else 1
     layout.ensure()
     config = settings.load(layout)
     models = config["models"]
@@ -1331,6 +1414,30 @@ def main(argv=None) -> int:
     doctor = commands.add_parser("doctor", help="check the installation, models and premium CLIs")
     doctor.add_argument("--offline", action="store_true", help="only local checks")
     doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--full", action="store_true",
+                        help="real checks: model generation, sandbox start, sign-in states (slower)")
+    install_parser = commands.add_parser("install", help="install and verify Python, Git, WSL 2, Docker, Ollama, "
+                                         "a model, Claude Code, Codex, sandbox and extras (asks first)")
+    install_parser.add_argument("--profile", choices=["local", "full"], default=None,
+                                help="local: Git, Ollama and a model; full: everything (default: your last profile, "
+                                     "else local)")
+    install_parser.add_argument("--full", action="store_true", help="same as --profile full")
+    install_parser.add_argument("--resume", action="store_true", help="continue after a restart or interruption")
+    install_parser.add_argument("--plan", action="store_true", help="show the checks and the plan; change nothing")
+    install_parser.add_argument("--only", action="append", metavar="COMPONENT", help="only this component (repeatable)")
+    install_parser.add_argument("--skip", action="append", metavar="COMPONENT", help="leave this component out")
+    install_parser.add_argument("--yes", action="store_true",
+                                help="agree to the plan shown (Windows still asks for administrator changes)")
+    install_parser.add_argument("--retry-declined", action="store_true", help="ask again about declined components")
+    install_parser.add_argument("--no-auto-resume", action="store_true",
+                                help="never register a one-time resume after a restart")
+    install_parser.add_argument("--selftest", action="store_true", help="run the end-to-end test at the end")
+    install_parser.add_argument("--non-interactive", action="store_true")
+    install_output = install_parser.add_mutually_exclusive_group()
+    for flag in ("--verbose", "--quiet", "--plain", "--json"):
+        install_output.add_argument(flag, action="store_true")
+    selftest_parser = commands.add_parser("selftest", help="a throwaway end-to-end task: model, sandbox and tests")
+    selftest_parser.add_argument("--json", action="store_true")
     setup = commands.add_parser("setup", help="configure models, premium supervisors, budgets and approvals")
     setup.add_argument("--non-interactive", action="store_true")
     setup.add_argument("--provider", choices=["ollama", "openai"])
@@ -1349,6 +1456,8 @@ def main(argv=None) -> int:
     setup.add_argument("--premium-vision", choices=["off", "claude", "codex"])
     setup.add_argument("--ocr-command", help="path to tesseract if it is not on PATH")
     setup.add_argument("--browser", action="store_true", help="set up the browser for visual checks")
+    setup.add_argument("--repair", action="store_true", help="fully check every component and offer fixes")
+    setup.add_argument("--yes", action="store_true", help="--repair: agree to the fixes shown")
     attachments_parser = commands.add_parser("attachments", help="attachments: preview, list, show, approve, "
                                              "reprocess, purge")
     attachments_parser.add_argument("action", choices=["preview", "list", "show", "approve", "reprocess", "purge"])
@@ -1391,6 +1500,7 @@ def main(argv=None) -> int:
     watch = commands.add_parser("watch", help="follow a task's live activity from any terminal")
     watch.add_argument("task", nargs="?")
     watch.add_argument("--history", action="store_true", help="start from the task's first event")
+    watch.add_argument("--install", action="store_true", help="follow the latest installation instead of a task")
     watch_output = watch.add_mutually_exclusive_group()
     for flag in ("--verbose", "--quiet", "--plain", "--json"):
         watch_output.add_argument(flag, action="store_true")
@@ -1427,5 +1537,6 @@ def main(argv=None) -> int:
                 "post-install": cmd_post_install, "memory": cmd_memory, None: cmd_shell,
                 "attachments": cmd_attachments, "inspect-ui": cmd_inspect_ui, "activity": cmd_activity,
                 "watch": cmd_watch, "trace": cmd_trace, "snapshots": cmd_snapshots, "snapshot": cmd_snapshot,
+                "install": cmd_install, "selftest": cmd_selftest,
                 "version": lambda args, layout: print(f"codingbrain {version()}")}
     return handlers[args.command](args, layout) or 0
