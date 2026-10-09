@@ -14,6 +14,7 @@ on:
       - "tests/test_activity.py"
       - "tests/test_installer.py"
       - "tests/installer_fakes.py"
+      - "tests/test_new.py"
       - ".github/workflows/windows-local-install.yml"
   workflow_dispatch:
   push:
@@ -52,7 +53,7 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check -e ".[dev]"
           $env:CODINGBRAIN_TRANSCRIPTS = "$PWD\transcripts\${{ matrix.os }}-${{ matrix.python }}-${{ matrix.shell }}"
-          python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_memory.py tests/test_multimodal.py tests/test_activity.py tests/test_installer.py
+          python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_memory.py tests/test_multimodal.py tests/test_activity.py tests/test_installer.py tests/test_new.py
           Get-ChildItem transcripts -Recurse -Filter run-*.txt | ForEach-Object { python scripts/render_transcript.py $_.FullName ($_.FullName -replace '\.txt$', '.png') "Windows, Python ${{ matrix.python }}, ${{ matrix.shell }}" }
       - name: Installer on a real Windows runner (preflight, plan, readiness, winget package ids)
         shell: pwsh
@@ -227,9 +228,9 @@ jobs:
           assert report["components"]["model"]["verified"], report["components"]["model"]
           assert report["components"]["sandbox"]["verified"], report["components"]["sandbox"]
           PY
-      - name: Real model and end-to-end tests
+      - name: Real model and end-to-end tests (installer self-test and goal-first build)
         shell: bash
-        run: python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py -k real 2>&1 | tee installer-real.log
+        run: python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py tests/test_new.py -k real 2>&1 | tee installer-real.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -36,6 +36,8 @@ DEFAULTS = {
     "visual": {"enabled": True, "viewports": ["desktop", "tablet", "mobile"], "max_repairs": 2,
                "browser_channel": "", "browser_executable": "", "accessibility_blocking": ["critical"],
                "pixel_threshold": 0.35},
+    # codingbrain new: where new projects are created (empty = <home>/Projects).
+    "create": {"projects_root": ""},
     "multimodal_budgets": {"max_ocr_images": 12, "max_vision_images": 6, "max_premium_vision_calls": 2},
 }
 
