@@ -49,6 +49,13 @@ def accept_requirement_tests(task: dict, raw: str) -> dict | None:
     tests = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name.startswith("test")]
     if not tests or len(content) > 20_000:
         return None
+    # Small models often use pytest without importing it; add the import deterministically.
+    if "pytest." in content and not re.search(r"^\s*import pytest\b", content, re.M):
+        content = "import pytest\n" + content
+    # Checks that reference undefined names would fail on their own defect, not the work's.
+    from .validators import static_issues
+    if any(item.category == "Undefined name" for item in static_issues(expected, content, lambda name: None)):
+        return None
     return {"path": expected, "content": content, "tests": len(tests)}
 
 

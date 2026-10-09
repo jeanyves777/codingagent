@@ -236,6 +236,7 @@ class Gauntlet:
         from .accounting import summarize as summarize_models
         return {"final": workspace if workspace.exists() else target, "status": stored["status"],
                 "models": summarize_models(stored.get("inference_log", [])),
+                "completion_verified": stored.get("completion_verified"),
                 "metrics": {**stored.get("metrics", {}), "repair_attempts": len(stored.get("failure_log", []))},
                 "premium_calls": ledger.count(item["id"], ok=1) if ledger else 0,
                 "premium_attempts": ledger.count(item["id"]) if ledger else 0,
@@ -285,6 +286,9 @@ class Gauntlet:
         entries = [entry for item in [group, *children] for entry in item.get("inference_log", [])]
         return {"final": final if final and final.exists() else brain.repository(name), "status": group["status"],
                 "models": summarize_models(entries),
+                "completion_verified": (None if any(child.get("completion_verified") is None for child in children)
+                                        else all(child["completion_verified"] for child in children))
+                if children else None,
                 "metrics": metrics, "events": events, "error": error,
                 "premium_calls": sum(ledger.count(item["id"], ok=1) for item in [group, *children]) if ledger else 0,
                 "premium_attempts": sum(ledger.count(item["id"]) for item in [group, *children]) if ledger else 0}
@@ -391,6 +395,7 @@ class Gauntlet:
                 "repair_attempts": metrics.get("repair_attempts", 0),
                 "error": result.get("error"), "hidden_output": hidden["output"][-600:],
                 "models": result.get("models"),
+                "completion_verified": result.get("completion_verified"),
                 "trajectory": result["events"]}
 
     async def run(self, conditions: list[str], tasks: list[dict], repeat: int = 1,

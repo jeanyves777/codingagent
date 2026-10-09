@@ -112,6 +112,12 @@ def test_requirement_file_is_accepted_only_in_the_expected_shape():
                 {"changes": [{"path": name, "content": "def test_a():\n    pass\n" * 2000}]}):
         assert accept_requirement_tests(task, json.dumps(bad)) is None
     assert accept_requirement_tests(task, "not json") is None
+    # Seen live: pytest used without an import (fixed), and an undefined helper (rejected).
+    raises = "def test_a():\n    with pytest.raises(ValueError):\n        int('x')\n"
+    fixed = accept_requirement_tests(task, json.dumps({"changes": [{"path": name, "content": raises}]}))
+    assert fixed["content"].startswith("import pytest\n")
+    undefined = "def test_a():\n    assert helper() == 1\n"
+    assert accept_requirement_tests(task, json.dumps({"changes": [{"path": name, "content": undefined}]})) is None
 
 
 def test_requirement_checks_are_off_unless_enabled(tmp_path, monkeypatch):
