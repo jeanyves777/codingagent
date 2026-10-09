@@ -331,11 +331,31 @@ class VisualVerifier:
                 shots = await self.capture_fn(server.origin + path, scratch, viewports, self.settings)
         except Exception as error:
             return {"status": "inconclusive", "reason": f"browser unavailable: {type(error).__name__}: {str(error)[:300]}"}
-        return await self.assess(shots, workspace)
+        if "visual_baseline" not in task:
+            task["visual_baseline"] = await self.baseline(workspace.parent / "baseline", scratch.parent / "baseline")
+        return await self.assess(shots, workspace, task.get("visual_baseline"))
 
-    async def assess(self, shots: list[dict], workspace: Path) -> dict:
+    async def baseline(self, original: Path, scratch: Path) -> dict | None:
+        """The accessibility problems the page had before the task changed it, per viewport, so
+        that problems a change introduces can be told apart from ones that were already there."""
+        if not original.is_dir():
+            return None
+        scratch.mkdir(parents=True, exist_ok=True)
+        try:
+            root, path = await asyncio.to_thread(prepare_preview, original, scratch, self.sandbox_images, self.run_build)
+            with StaticServer(root) as server:
+                shots = await self.capture_fn(server.origin + path, scratch, self.settings["viewports"], self.settings)
+        except Exception:
+            return None  # unknown: no regression judgement rather than a wrong one
+        return {shot["viewport"]: sorted({item["rule"] for item in shot.get("accessibility", [])})
+                for shot in shots if not shot.get("error")}
+
+    async def assess(self, shots: list[dict], workspace: Path, baseline: dict | None = None) -> dict:
         findings, uncertainty, comparisons = [], [], []
         blocking_a11y = set(self.settings["accessibility_blocking"])
+        if baseline is None:
+            uncertainty.append("the original page could not be checked, so accessibility regressions are not "
+                               "separated from existing problems")
         for shot in shots:
             if shot.get("error"):
                 uncertainty.append(f"{shot['viewport']}: page did not load ({shot['error'][:160]})")
@@ -343,10 +363,15 @@ class VisualVerifier:
             for issue in shot.get("issues", []):
                 findings.append({"viewport": shot["viewport"], "source": "layout measurement", **issue,
                                  "blocking": issue.get("severity") == "major"})
+            before = set((baseline or {}).get(shot["viewport"], [])) if baseline is not None else None
             for item in shot.get("accessibility", []):
-                findings.append({"viewport": shot["viewport"], "source": "accessibility check", "kind": item["rule"],
-                                 "severity": item["severity"], "detail": item.get("detail", ""),
-                                 "element": item.get("element"), "blocking": item["severity"] in blocking_a11y})
+                regression = before is not None and item["rule"] not in before and item["severity"] in {"serious", "critical"}
+                findings.append({"viewport": shot["viewport"],
+                                 "source": "accessibility check" + (" (new: the original page did not have it)"
+                                                                    if regression else ""),
+                                 "kind": item["rule"], "severity": item["severity"], "detail": item.get("detail", ""),
+                                 "element": item.get("element"),
+                                 "blocking": item["severity"] in blocking_a11y or regression})
             for message in shot.get("console", [])[:5]:
                 if message.startswith(("error", "pageerror")):
                     findings.append({"viewport": shot["viewport"], "source": "browser console", "kind": "console_error",
