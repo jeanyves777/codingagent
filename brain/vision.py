@@ -112,6 +112,25 @@ def normalize(findings: dict, schema: dict) -> dict:
     return clean
 
 
+def consistent(findings: dict) -> dict:
+    """Small models contradict themselves: listing 'expected red, actual red' as a difference, or
+    a verdict of 'matches' next to major differences. Non-differences are dropped and the verdict
+    follows the listed differences; both corrections are recorded as uncertainty."""
+    def same(item):
+        return " ".join(str(item.get("expected", "")).lower().split()) == " ".join(str(item.get("actual", "")).lower().split())
+    kept = [item for item in findings["differences"] if not same(item)]
+    notes = list(findings["uncertain"])
+    if len(kept) != len(findings["differences"]):
+        notes.append(f"{len(findings['differences']) - len(kept)} listed difference(s) had identical expected and "
+                     "actual values and were dropped")
+    derived = ("major_differences" if any(item.get("severity") == "major" for item in kept) else
+               "minor_differences" if kept else "matches")
+    if derived != findings["overall"]:
+        notes.append(f"the model's verdict '{findings['overall']}' contradicted its listed differences; "
+                     f"'{derived}' is derived from them")
+    return {**findings, "differences": kept, "overall": derived, "uncertain": notes}
+
+
 class VisionProvider:
     provider = ""
     premium = False
@@ -130,8 +149,10 @@ class VisionProvider:
         return await self._run("vision_describe", DESCRIBE.format(goal=goal[:1500]), [image], DESCRIBE_SCHEMA, loc)
 
     async def compare(self, reference: Path, actual: Path, goal: str, viewport: str = "desktop") -> dict:
-        return await self._run("vision_compare", COMPARE.format(goal=goal[:1500], viewport=viewport),
-                               [reference, actual], COMPARE_SCHEMA, viewport)
+        result = await self._run("vision_compare", COMPARE.format(goal=goal[:1500], viewport=viewport),
+                                 [reference, actual], COMPARE_SCHEMA, viewport)
+        result["findings"] = consistent(result["findings"])
+        return result
 
     async def _run(self, role, prompt, images, schema, loc) -> dict:
         usable, reason = await self.capability()

@@ -781,3 +781,31 @@ def test_real_coding_model_repairs_a_ui_defect_within_the_visual_budget(tmp_path
     assert task["status"] == "passed"
     assert task["visual_log"][-1]["status"] == "passed", task["visual_log"]
     assert task["visual_repairs"] <= 2
+
+
+def test_contradictory_comparison_verdicts_follow_the_listed_differences(files):
+    reply = {"overall": "matches", "matches": ["header"], "uncertain": [],
+             "differences": [{"area": "border", "expected": "red border", "actual": "Red  border", "severity": "major"},
+                             {"area": "button", "expected": "green button", "actual": "red button", "severity": "major"}]}
+    vision = OllamaVision("http://ollama", "qwen2.5vl:3b", client_factory=FakeOllama(reply=reply).factory())
+    result = asyncio.run(vision.compare(fx.ui_image(files / "a.png"), fx.ui_image(files / "b.png"), "match"))
+    findings = result["findings"]
+    assert findings["overall"] == "major_differences"
+    assert [item["area"] for item in findings["differences"]] == ["button"]
+    assert any("contradicted" in note for note in findings["uncertain"])
+    assert any("identical expected and actual" in note for note in findings["uncertain"])
+
+
+def test_accessibility_problems_introduced_by_a_change_block(tmp_path):
+    workspace = tmp_path / "site"
+    workspace.mkdir()
+    shot = {"viewport": "desktop", "screenshot": None, "issues": [], "console": [], "blocked_requests": [],
+            "accessibility": [{"rule": "html-lang", "severity": "serious"}, {"rule": "heading-order", "severity": "moderate"},
+                              {"rule": "color-contrast", "severity": "serious"}]}
+    verifier = VisualVerifier([], "fix the layout")
+    result = asyncio.run(verifier.assess([shot], workspace, {"desktop": ["color-contrast"]}))
+    blocking = [item["kind"] for item in result["findings"] if item["blocking"]]
+    assert blocking == ["html-lang"]  # new and serious; the contrast problem was already there
+    unknown = asyncio.run(verifier.assess([shot], workspace, None))
+    assert not [item for item in unknown["findings"] if item["blocking"]]
+    assert any("regressions are not separated" in note for note in unknown["uncertainty"])

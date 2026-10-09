@@ -103,11 +103,14 @@ jobs:
           ollama pull "$CODINGBRAIN_TEST_VISION_MODEL"
           ollama pull "$CODINGBRAIN_TEST_CODING_MODEL"
           curl -s http://localhost:11434/api/show -d "{\"model\": \"$CODINGBRAIN_TEST_VISION_MODEL\"}" | python -c "import json, sys; print('capabilities:', json.load(sys.stdin).get('capabilities'))"
-      - name: Allow unprivileged user namespaces (benchmark isolation tests)
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Full test suite with real engines
         shell: bash  # bash -eo pipefail: a failing pytest fails the step despite tee
-        run: python -m pytest -q -p no:cacheprovider -rfs -s tests 2>&1 | tee engines-test.log
+        run: |
+          # The benchmark isolation test needs mount namespaces (root); it runs in the next step.
+          python -m pytest -q -p no:cacheprovider -rfs -s tests \
+            --deselect tests/test_gauntlet.py::test_isolation_masks_outermost_roots_and_is_probed 2>&1 | tee engines-test.log
+      - name: Benchmark isolation test (needs root for mount namespaces)
+        run: sudo -E env "PATH=$PATH" python -m pytest -q -p no:cacheprovider -rfs tests/test_gauntlet.py::test_isolation_masks_outermost_roots_and_is_probed
       - uses: actions/upload-artifact@v4
         if: always()
         with:
