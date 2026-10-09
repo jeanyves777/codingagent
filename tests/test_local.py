@@ -428,3 +428,32 @@ def test_backup_and_restore_handle_write_ahead_logs(installed, tmp_path):
     with sqlite3.connect(database) as db:
         assert db.execute("SELECT name FROM events").fetchall() == [("before update",)]
         assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_restore_refuses_while_a_database_is_in_use_and_changes_nothing(installed):
+    layout, _, _ = installed
+    database = layout.projects / "app-123" / "telemetry.sqlite3"
+    holder = sqlite3.connect(database)
+    holder.execute("PRAGMA journal_mode=WAL")
+    holder.execute("CREATE TABLE events (name TEXT)")
+    holder.execute("INSERT INTO events VALUES ('kept')")
+    holder.commit()
+    backup = updater.backup_state(layout, "0.9.0", "test")
+    holder.execute("BEGIN")
+    holder.execute("INSERT INTO events VALUES ('uncommitted')")  # another process mid-write
+    with pytest.raises(updater.UpdateError, match="in use"):
+        updater.restore_state(layout, backup)
+    holder.rollback()
+    assert holder.execute("SELECT name FROM events").fetchall() == [("kept",)]  # its log was not deleted
+    holder.close()
+    updater.restore_state(layout, backup)  # once released, the restore succeeds
+
+
+def test_restore_checks_the_whole_backup_before_changing_anything(installed):
+    layout, _, _ = installed
+    backup = updater.backup_state(layout, "0.9.0", "test")
+    settings.save(layout, {**settings.load(layout), "models": {**settings.DEFAULTS["models"], "model": "newer"}})
+    (backup / "data" / "projects" / "app-123" / "brain.sqlite3").write_bytes(b"damaged")
+    with pytest.raises(updater.UpdateError, match="damaged; nothing was restored"):
+        updater.restore_state(layout, backup)
+    assert settings.load(layout)["models"]["model"] == "newer"
