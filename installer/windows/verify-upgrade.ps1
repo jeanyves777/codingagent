@@ -57,12 +57,12 @@ $newVersion = (Get-Content -Raw (Join-Path $New 'release.json') | ConvertFrom-Js
 try {
   New-Item -ItemType Directory -Path $work | Out-Null
   # 1. The published release, verified against its own checksums
-  $published = Join-Path $work 'published'
-  New-Item -ItemType Directory -Path $published | Out-Null
+  $assetsDir = Join-Path $work 'published'
+  New-Item -ItemType Directory -Path $assetsDir | Out-Null
   $base = "https://github.com/$Repository/releases/download/$Published"
   $oldVersion = $Published.TrimStart('v')
   foreach ($name in @('SHA256SUMS', 'release.json', 'constraints.txt', 'install.ps1', 'uninstall.ps1', "coding_brain-$oldVersion-py3-none-any.whl")) {
-    $target = Join-Path $published $name
+    $target = Join-Path $assetsDir $name
     if ($PublishedDir) { Copy-Item (Join-Path $PublishedDir $name) $target; continue }
     foreach ($attempt in 1..4) {
       try { Invoke-WebRequest -UseBasicParsing -Uri "$base/$name" -OutFile $target; break }
@@ -73,12 +73,12 @@ try {
     }
   }
   $sumsOk = $true
-  foreach ($line in Get-Content (Join-Path $published 'SHA256SUMS')) {
+  foreach ($line in Get-Content (Join-Path $assetsDir 'SHA256SUMS')) {
     $hash, $file = $line -split '\s+', 2
-    if ((Get-FileHash -Algorithm SHA256 (Join-Path $published $file)).Hash.ToLower() -ne $hash) { $sumsOk = $false }
+    if ((Get-FileHash -Algorithm SHA256 (Join-Path $assetsDir $file)).Hash.ToLower() -ne $hash) { $sumsOk = $false }
   }
   Check 'published release downloaded and checksums match' $sumsOk $Published
-  & $shellExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $published 'install.ps1') -From $published -InstallDir $home_ -Python $pythonExe -Yes
+  & $shellExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $assetsDir 'install.ps1') -From $assetsDir -InstallDir $home_ -Python $pythonExe -Yes
   Check 'published installer installs v0.9.0' ($LASTEXITCODE -eq 0) "exit $LASTEXITCODE"
   $env:Path = "$home_\bin;" + $env:Path
   $env:CODINGBRAIN_HOME = $home_
