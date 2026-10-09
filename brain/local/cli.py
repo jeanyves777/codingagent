@@ -95,7 +95,16 @@ class Context:
             os.environ.update(settings.project_environment(self.layout, self.config, self.root, self.data))
             from ..factory import build_brain_from_env
             self._brain = build_brain_from_env()
+            self._brain.project_knowledge = self.memory.context_for
         return self._brain
+
+    @property
+    def memory(self):
+        if getattr(self, "_memory", None) is None:
+            from .memory import ProjectMemory
+            self.data.mkdir(parents=True, exist_ok=True)
+            self._memory = ProjectMemory(self.layout, self.project)
+        return self._memory
 
     def tasks(self) -> list[dict]:
         if not (self.data / "brain.sqlite3").exists():
@@ -195,6 +204,9 @@ async def handle(context: Context, task: dict, auto: bool) -> dict:
         else:
             if status in {"failed", "blocked", "integration_conflict"}:
                 last = (task.get("failure_log") or [{}])[-1]
+                context.memory.remember("repair", f"Attempt at '{task['goal'][:200]}' ended {status}: "
+                                        f"{last.get('category', '')} {str(last.get('summary', ''))[:300]}",
+                                        verified=False, ref=f"task:{task['id']}")
                 print(f"\nTask {status}. {last.get('category', '')} {str(last.get('summary', ''))[:800]}")
                 print(f"Retry with `codingbrain resume {task['id'][:8]}`.")
             return task
@@ -208,6 +220,12 @@ async def accept(context: Context, task: dict) -> dict:
         context.brain.store.save(task)
         print(f"Accepted. New branch {name} (your current branch is unchanged). Review it with "
               f"`git log {name}` and merge when ready.")
+    if task["status"] == "accepted":
+        # Tested in the sandbox and accepted by the user: a verified fact about the project.
+        plan = (task.get("proposal") or {}).get("plan", "")[:300]
+        context.memory.remember("change", f"Accepted: {task['goal'][:240]}. Plan: {plan}"
+                                + (f" Branch {task['branch']}." if task.get("branch") else ""),
+                                verified=True, ref=f"task:{task['id']}")
     return task
 
 
@@ -336,10 +354,36 @@ def cmd_accept(args, layout):
     asyncio.run(accept(context, task))
 
 
+def onboard(context: Context, interactive: bool):
+    """First launch in a project: discover, import project-local knowledge, ask before private
+    agent memory, reconcile with the code and summarize. Later launches sync changes only."""
+    from .memory import render_profile
+    memory = context.memory
+    first = not memory.initialized
+    if first:
+        print("\nLooking for what earlier agents and the project already know...")
+    totals = memory.import_sources(only_changed=not first)
+    private = [source for source in memory.scan() if not source.get("authorized") and source.get("status") != "declined"]
+    if private and first:
+        print(f"Found {len(private)} private memory source(s) from other agents (not imported without your consent):")
+        for source in private[:10]:
+            print(f"  {source['id']}  {source['agent']:<12} {source['kind']:<20} {source['ref']}")
+        if interactive and ask("Import these too (read-only, secrets redacted, kept as untrusted history)?"):
+            totals = memory.import_sources(authorize=[source["id"] for source in private])
+        elif interactive:
+            memory.store.authorize([source["id"] for source in private if source["scope"] != "account_global"], False)
+            memory.global_store.authorize([source["id"] for source in private if source["scope"] == "account_global"], False)
+            print("Skipped. Import later with `codingbrain memory import --source <id>`.")
+    if first or totals.get("new") or totals.get("superseded"):
+        print(render_profile(memory.profile()))
+    return totals
+
+
 def cmd_run(args, layout):
     context = Context(layout, Path.cwd())
     context.check()
     print(describe(context.project))
+    onboard(context, interactive=sys.stdin.isatty())
     run_goal(context, " ".join(args.goal), args.orchestrate, True if args.yes else None)
 
 
@@ -347,6 +391,7 @@ def cmd_shell(args, layout):
     context = Context(layout, Path.cwd())
     print(f"Coding Brain {version()}\n" + describe(context.project))
     context.check()
+    onboard(context, interactive=sys.stdin.isatty())
     pending = [task for task in context.tasks() if task["status"] in RESUMABLE and task.get("kind") == "task"]
     if pending:
         print(f"\n{len(pending)} unfinished task(s); `codingbrain resume` continues the latest:")
@@ -603,6 +648,68 @@ def cmd_rollback(args, layout):
     return 0
 
 
+def cmd_memory(args, layout):
+    from .memory import AUTHORITY, render_profile
+    context = Context(layout, Path.cwd())
+    context.register()
+    memory = context.memory
+    action = args.action
+    if action == "scan":
+        for source in memory.scan():
+            state = ("imported" if source.get("imported_sha256") == source["sha256"] else
+                     "changed" if source.get("imported_sha256") else
+                     "needs authorization" if not source.get("authorized") else "new")
+            print(f"{source['id']}  {source['scope']:<15} {source['agent']:<13} {source['kind']:<20} {state:<20} {source['ref']}")
+    elif action in {"import", "sync"}:
+        authorize = list(args.source or [])
+        if args.all_private:
+            authorize += [source["id"] for source in memory.scan() if not source.get("authorized")]
+        totals = memory.import_sources(authorize=authorize, only_changed=action == "sync")
+        print(json.dumps(totals) if args.json else ", ".join(f"{key} {value}" for key, value in totals.items()))
+    elif action == "status":
+        status = memory.status()
+        print(json.dumps(status, indent=2) if args.json else "\n".join(f"{key}: {value}" for key, value in status.items()))
+    elif action == "show":
+        profile = memory.profile()
+        print(json.dumps(profile, indent=2) if args.json else render_profile(profile))
+    elif action == "conflicts":
+        if args.resolve is not None:
+            memory.store.resolve(args.resolve, args.keep or "both")
+            print(f"Conflict {args.resolve} resolved: keep {args.keep or 'both'}")
+        for item in memory.store.conflicts():
+            print(f"#{item['id']} {item['reason']}\n  a {item['a']}: {(item['a_record'] or {}).get('text', '')[:200]}\n"
+                  f"  b {item['b']}: {(item['b_record'] or {}).get('text', '')[:200]}")
+        print("Resolve with `codingbrain memory conflicts --resolve <id> --keep a|b|both`.")
+    elif action == "forget":
+        for record_id in args.ids:
+            memory.store.set_status(record_id, "removed", "removed by the user")
+        print(f"Removed {len(args.ids)} record(s); they stay in the audit log.")
+    elif action == "approve":
+        for record_id in args.ids:
+            memory.store.approve(record_id)
+        print(f"Approved {len(args.ids)} record(s) as project rules (authority 2).")
+    elif action == "rule":
+        text = " ".join(args.text)
+        store = memory.global_store if args.global_ else memory.store
+        record = store.add("rule", text, "user", 2, "approved", "codingbrain memory rule")
+        print(f"Added {'global' if args.global_ else 'project'} rule {record} (approved, authority 2).")
+    elif action == "contribute":
+        # A controlled adapter for other agents: a findings file is imported as unverified history.
+        path = Path(args.file).resolve()
+        if not path.is_file() or not path.is_relative_to(context.root):
+            raise SystemExit("Contributions must be a file inside this project.")
+        from .memory import _source, parse_markdown
+        source = _source("contribution", args.agent, "contribution", path, "generated")
+        memory.store.note_sources([source])
+        counts = memory.store.upsert(source, [dict(item, category=item["category"] if item["category"] != "rule" else "note")
+                                              for item in parse_markdown(path.read_text(encoding="utf-8"), "note")])
+        memory.reconcile()
+        print(f"Recorded {counts['new']} finding(s) from {args.agent} as unverified history.")
+    if args.explain:
+        print("\nAuthority (lower wins): " + "; ".join(f"{level} {name}" for level, name in AUTHORITY.items()))
+    return 0
+
+
 def cmd_migrate(args, layout):
     from .migrations import migrate
     result = migrate(layout.ensure())
@@ -667,6 +774,20 @@ def main(argv=None) -> int:
     rollback_parser = commands.add_parser("rollback", help="switch back to the previous installed version")
     rollback_parser.add_argument("--restore-state", action="store_true",
                                  help="also restore the state backup taken before the update")
+    memory_parser = commands.add_parser("memory", help="cross-agent project memory: scan, import, status, sync, "
+                                        "conflicts, show, forget, approve, rule, contribute")
+    memory_parser.add_argument("action", choices=["scan", "import", "status", "sync", "conflicts", "show", "forget",
+                                                  "approve", "rule", "contribute"])
+    memory_parser.add_argument("ids", nargs="*", help="record ids (forget, approve) or rule text (rule)")
+    memory_parser.add_argument("--source", action="append", help="authorize and import this private source id")
+    memory_parser.add_argument("--all-private", action="store_true", help="authorize every discovered private source")
+    memory_parser.add_argument("--resolve", type=int, help="conflict id to resolve")
+    memory_parser.add_argument("--keep", choices=["a", "b", "both"])
+    memory_parser.add_argument("--global", dest="global_", action="store_true", help="rule: for every project")
+    memory_parser.add_argument("--agent", default="external", help="contribute: the contributing agent")
+    memory_parser.add_argument("--file", help="contribute: a findings file inside the project")
+    memory_parser.add_argument("--json", action="store_true")
+    memory_parser.add_argument("--explain", action="store_true", help="print the authority hierarchy")
     commands.add_parser("version", help="print the version")
     migrate_parser = commands.add_parser("migrate", help=argparse.SUPPRESS)
     migrate_parser.add_argument("--json", action="store_true")
@@ -674,6 +795,8 @@ def main(argv=None) -> int:
     post.add_argument("--version", required=True)
     post.add_argument("--base-python")
     args = parser.parse_args(argv)
+    if args.command == "memory" and args.action == "rule":
+        args.text = args.ids
     for stream in (sys.stdout, sys.stderr):  # never crash on a console that cannot show a character
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
@@ -681,6 +804,6 @@ def main(argv=None) -> int:
     handlers = {"init": cmd_init, "status": cmd_status, "tasks": cmd_tasks, "resume": cmd_resume,
                 "accept": cmd_accept, "run": cmd_run, "doctor": cmd_doctor, "setup": cmd_setup,
                 "update": cmd_update, "rollback": cmd_rollback, "migrate": cmd_migrate,
-                "post-install": cmd_post_install, None: cmd_shell,
+                "post-install": cmd_post_install, "memory": cmd_memory, None: cmd_shell,
                 "version": lambda args, layout: print(f"codingbrain {version()}")}
     return handlers[args.command](args, layout) or 0

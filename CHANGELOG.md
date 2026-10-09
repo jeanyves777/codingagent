@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.10.0
+
+Durable cross-agent project memory (see docs/project-memory.md).
+
+- **Discovery:** project instruction files from Claude Code, Codex, Cursor, Copilot, OpenCode and
+  others; READMEs, architecture docs, ADRs, plans, changelogs, Git history and Coding Brain's own
+  work.
+- **Private memory:** Claude Code and Codex sessions for the project and account-wide instruction
+  files are imported only with authorization.
+- **Three scopes:** global (approved rules only), per-project (isolated), and task/session.
+  Versioned schemas are migrated and backed up by `codingbrain update`.
+- **Records:** each keeps its provenance (source, file and line, times, checksum), a verification
+  status and an authority level (1 to 6). Claims are reconciled with the code, and superseded and
+  rejected decisions are tracked.
+- **Safety:** conflicts are surfaced, not silently resolved; secrets are redacted before storage;
+  suspected prompt injection is quarantined and kept out of model context.
+- **Onboarding:** first launch prints a project profile and continuation summary; later launches
+  sync incrementally. Accepted work and failed attempts are recorded automatically.
+- **Commands:** `codingbrain memory scan|import|sync|status|show|conflicts|forget|approve|rule|contribute`.
+- **Engine:** project memory reaches the model as provenance-labelled reference data in the
+  existing engineering packet.
+
 ## 0.9.0
 
 Local installation for Windows (and Linux/macOS): install once, use `codingbrain` in any project,

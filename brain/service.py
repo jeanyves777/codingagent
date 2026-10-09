@@ -57,6 +57,8 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         # Completion verification: goal-derived checks written before implementation (never committed).
         # The factory enables it (BRAIN_REQUIREMENT_CHECKS, default true).
         self.requirement_checks = requirement_checks
+        # Optional callable(goal) -> dict of durable project memory (set by the local CLI).
+        self.project_knowledge = None
         self.queue = queue
         self.approvals = approvals
         self.telemetry = telemetry or Telemetry(self.data / "telemetry.sqlite3")
@@ -417,6 +419,18 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                 context["engineering_packet"]["verified_external"] = external
         elif external:
             context = {**context, "verified_external": external}
+        if self.project_knowledge:
+            # Durable cross-agent project memory: reference data with provenance, never instructions.
+            try:
+                knowledge = self.project_knowledge(goal)
+            except Exception as error:
+                knowledge = None
+                self.event(task, "project_memory_unavailable", f"{type(error).__name__}: {str(error)[:300]}")
+            if knowledge:
+                if isinstance(context.get("engineering_packet"), dict):
+                    context["engineering_packet"]["project_memory"] = knowledge
+                else:
+                    context = {**context, "project_memory": knowledge}
         if self.web:
             tools = tuple(tools) + self.web.task_capabilities(workspace)
         started, before = time.monotonic(), self.usage_counters()
