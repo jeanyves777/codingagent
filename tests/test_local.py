@@ -402,3 +402,26 @@ def test_temporary_folder_cleanup_cannot_fail_a_successful_update(installed, tmp
     result = updater.install_release(layout, updater.DirectorySource(make_release(tmp_path / "r091", "0.9.1")),
                                      "0.9.0", log=lambda message: None)
     assert result["status"] == "installed" and updater.read_current(layout)["version"] == "0.9.1"
+
+
+def test_backup_and_restore_handle_write_ahead_logs(installed, tmp_path):
+    """Databases in WAL mode (telemetry, approvals) are captured consistently and restored
+    without a stale log replaying over them."""
+    layout, _, _ = installed
+    database = layout.projects / "app-123" / "telemetry.sqlite3"
+    writer = sqlite3.connect(database)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE events (name TEXT)")
+    writer.execute("INSERT INTO events VALUES ('before update')")
+    writer.commit()  # committed, but still only in the -wal file while the connection is open
+    assert Path(str(database) + "-wal").exists()
+    backup = updater.backup_state(layout, "0.9.0", "test")
+    manifest = json.loads((backup / "manifest.json").read_text())
+    assert not any(name.endswith(("-wal", "-shm")) for name in manifest["files"])
+    writer.execute("INSERT INTO events VALUES ('after update')")
+    writer.commit()
+    writer.close()
+    updater.restore_state(layout, backup)
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT name FROM events").fetchall() == [("before update",)]
+        assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)

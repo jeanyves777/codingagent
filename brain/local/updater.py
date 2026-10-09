@@ -28,6 +28,7 @@ REPOSITORY = "jeanyves777/codingagent"
 REQUIRED = ("release.json", "constraints.txt", "SHA256SUMS")
 KEEP_VERSIONS = 3
 SKIPPED_STATE = {"workspace", "baseline", "integration"}  # task worktrees: large, not state
+SQLITE_SIDE_FILES = ("-wal", "-shm", "-journal")  # captured by SQLite's backup API, never copied raw
 
 
 class UpdateError(RuntimeError):
@@ -208,7 +209,7 @@ def _state_files(layout: Layout):
             continue
         for path in sorted(root.rglob("*")):
             relative = path.relative_to(layout.home)
-            if path.is_file() and not SKIPPED_STATE & set(relative.parts):
+            if path.is_file() and not SKIPPED_STATE & set(relative.parts) and not path.name.endswith(SQLITE_SIDE_FILES):
                 yield path, relative
 
 
@@ -220,8 +221,16 @@ def backup_state(layout: Layout, version: str, reason: str) -> Path:
         destination = target / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         if path.suffix in {".sqlite3", ".db"}:
-            with sqlite3.connect(path) as source, sqlite3.connect(destination) as copy:
+            source, copy = sqlite3.connect(path), sqlite3.connect(destination)
+            try:
                 source.backup(copy)
+                # The copy inherits WAL mode; fold it into one self-contained file before closing,
+                # so the checksum and a later restore see every page.
+                copy.execute("PRAGMA journal_mode=DELETE")
+                copy.commit()
+            finally:
+                copy.close()
+                source.close()
         else:
             shutil.copy2(path, destination)
         files[relative.as_posix()] = sha256(destination)
@@ -242,6 +251,8 @@ def restore_state(layout: Layout, backup: Path):
             raise UpdateError(f"Backup file {relative} is damaged")
         destination = layout.home / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
+        for suffix in SQLITE_SIDE_FILES:  # a stale write-ahead log must not replay onto the restored database
+            Path(str(destination) + suffix).unlink(missing_ok=True)
         shutil.copy2(source, destination)
 
 
