@@ -605,8 +605,10 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
         self.event(task, author, "Indexed repository and completed proposal" if author == "implementer"
                    else "Proposal supplied by " + author)
         route = task.get("model_route") or {}
-        self.decision(task, "proposal", author, proposal.plan[:2000], "model-provided",
-                      files=[change.path for change in proposal.changes], model=route.get("model"))
+        model_name = route.get("model") or (getattr(self.model, "name", None) if author == "implementer" else None)
+        self.journal_event(task, "decision", phase="proposal", status="COMPLETED", agent=author, model=model_name,
+                           summary=proposal.plan[:2000],
+                           data={"source": "model-provided", "files": [change.path for change in proposal.changes]})
         self.snapshot(task, "after_proposal")
         self.journal_event(task, "approval", phase="approval", status="WAITING_APPROVAL", agent="user",
                            summary="Waiting for approval to review, apply and test: " +

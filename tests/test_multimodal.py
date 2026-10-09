@@ -253,6 +253,7 @@ def test_incomplete_vision_output_is_rejected_not_completed_with_defaults(tmp_pa
     with pytest.raises(ValueError, match="incomplete"):
         asyncio.run(vision.compare(fx.ui_image(files / "a.png"), fx.ui_image(files / "b.png"), "match"))
     assert truncated.chats[0]["options"]["num_ctx"] >= 8192
+    assert len(truncated.chats) == 2 and "previous answer was not usable" in truncated.chats[1]["messages"][1]["content"]
     image = ingest(str(fx.ui_image(files / "ui.png")), tmp_path / "work")
     analyzer = Analyzer(vision=OllamaVision("http://ollama", "qwen2.5vl:7b", client_factory=truncated.factory()))
     asyncio.run(analyzer.analyze([image], "fix the UI"))
@@ -809,3 +810,20 @@ def test_accessibility_problems_introduced_by_a_change_block(tmp_path):
     unknown = asyncio.run(verifier.assess([shot], workspace, None))
     assert not [item for item in unknown["findings"] if item["blocking"]]
     assert any("regressions are not separated" in note for note in unknown["uncertainty"])
+
+
+def test_one_corrective_retry_recovers_a_bad_vision_reply(files):
+    good = {"overall": "major_differences", "matches": [], "uncertain": [],
+            "differences": [{"area": "button", "expected": "green", "actual": "red", "severity": "major"}]}
+
+    class Flaky(FakeOllama):
+        def handler(self, request):
+            response = super().handler(request)
+            if request.url.path == "/api/chat" and len(self.chats) == 2:
+                self.reply = good
+                return super().handler(request)
+            return response
+    server = Flaky(reply={"summary": "a dashboard"})  # first answer: the wrong structure
+    vision = OllamaVision("http://ollama", "qwen2.5vl:3b", client_factory=server.factory())
+    result = asyncio.run(vision.compare(fx.ui_image(files / "a.png"), fx.ui_image(files / "b.png"), "match"))
+    assert result["attempt"] == 2 and result["findings"]["differences"][0]["area"] == "button"

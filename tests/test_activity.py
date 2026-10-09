@@ -431,8 +431,8 @@ def test_cli_run_shows_live_activity_without_a_tty(tmp_path):
         run = subprocess.run([sys.executable, "-m", "brain.local", "run", "Set x to 2", "--yes"],
                              capture_output=True, env=env, cwd=str(repo), timeout=300, stdin=subprocess.DEVNULL)
         output = run.stdout.decode("cp1252")
-        order = ["live activity", "Project and Git validation", "Repository indexing", "Implementer (fake-coder:7b)",
-                 "explanation (model-provided): Return the sum", "Waiting for approval", "Code review",
+        order = ["live activity", "Project and Git validation", "Repository indexing", "served by fake-coder:7b",
+                 "Implementer (fake-coder:7b) explanation (model-provided): Return the sum", "Waiting for approval", "Code review",
                  "Sandbox execution"]
         positions = [output.find(marker) for marker in order]
         assert all(position >= 0 for position in positions), (positions, output[-3000:])
