@@ -1,0 +1,8 @@
+{
+  "id": "debug-mutable-default",
+  "category": "debugging",
+  "goal": "Users report that tags from earlier calls appear in new results. add_tag in tags.py must start from an empty list on every call made without a tags argument, while still appending to a list that is passed in.",
+  "protected": [
+    "test_tags.py"
+  ]
+}

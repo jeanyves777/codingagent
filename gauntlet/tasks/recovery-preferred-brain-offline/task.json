@@ -1,0 +1,14 @@
+{
+  "id": "recovery-preferred-brain-offline",
+  "category": "security_recovery",
+  "goal": "is_leap_year in calendar_utils.py is wrong for century years: 1900 is not a leap year but 2000 is. Fix it.",
+  "requires": [
+    "failover"
+  ],
+  "chaos": {
+    "preferred_brain_offline": true
+  },
+  "protected": [
+    "test_calendar_utils.py"
+  ]
+}

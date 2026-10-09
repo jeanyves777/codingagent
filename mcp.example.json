@@ -1,0 +1,20 @@
+{
+  "servers": {
+    "docs": {
+      "url": "http://127.0.0.1:9000/mcp",
+      "tools": {
+        "search_docs": "read_only",
+        "update_document": "approval_required"
+      }
+    },
+    "serena": {
+      "url": "http://127.0.0.1:9121/mcp",
+      "tools": {
+        "find_symbol": "read_only",
+        "find_referencing_symbols": "read_only",
+        "get_symbols_overview": "read_only",
+        "search_for_pattern": "read_only"
+      }
+    }
+  }
+}

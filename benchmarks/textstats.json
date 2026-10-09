@@ -1,0 +1,11 @@
+{
+  "name": "textstats-whitespace-fix",
+  "cases": [
+    {
+      "name": "fix word_count and average_word_length",
+      "repository": "demo",
+      "goal": "Fix textstats.py so all tests in test_textstats.py pass: word_count must ignore extra whitespace and return 0 for empty text, and average_word_length must return 0.0 for text without words. Do not change the tests.",
+      "expected_paths": ["textstats.py"]
+    }
+  ]
+}

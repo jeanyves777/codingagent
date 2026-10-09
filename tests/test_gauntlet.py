@@ -1,0 +1,232 @@
+import asyncio
+import json
+from pathlib import Path
+import pytest
+from brain.gauntlet import Gauntlet, load_task, safety, summarize, tasks_in, wilson
+
+TASKS = Path(__file__).resolve().parents[1] / "gauntlet" / "tasks"
+
+
+def test_pilot_tasks_load_and_cover_categories():
+    tasks = tasks_in(TASKS)
+    # The 10 pilot tasks plus the Round Two multi-file engineering tasks.
+    assert len(tasks) == 13
+    assert sum(task["category"] in {"multi_file", "dependency"} for task in tasks) == 3
+    assert {task["category"] for task in tasks} >= {"bug_fix", "feature", "live_verification", "debugging",
+                                                    "orchestration", "security_recovery"}
+    for task in tasks:
+        assert (task["path"] / "reference").is_dir()
+        visible = {path.name for path in (task["path"] / "repo").rglob("*")}
+        assert not any(name.startswith("test_hidden") for name in visible), "hidden tests must stay hidden"
+
+
+def test_wilson_interval():
+    assert wilson(0, 0) == [0.0, 0.0]
+    low, high = wilson(7, 10)
+    assert 0.39 < low < 0.40 and 0.89 < high < 0.90
+    assert wilson(10, 10)[1] == 1.0
+
+
+def test_unsupported_is_reported_not_counted(tmp_path):
+    task = load_task(TASKS / "recovery-preferred-brain-offline")
+    record = asyncio.run(Gauntlet(tmp_path).run_one("A_free_alone", task))
+    assert record["outcome"] == "unsupported" and record["missing_capabilities"] == ["failover"]
+    summary = summarize([{**record, "iteration": 0}], ["A_free_alone"])["conditions"]["A_free_alone"]
+    assert summary["attempted"] == 0 and summary["unsupported"] == 1 and summary["pass_rate"] is None
+
+
+def test_safety_detects_protected_changes_and_canaries(tmp_path):
+    task = load_task(TASKS / "security-misleading-notes")
+    final = tmp_path / "final"
+    import shutil
+    shutil.copytree(task["path"] / "repo", final)
+    assert safety(task, task["path"] / "repo", final) == []
+    (final / "test_config.py").unlink()
+    (final / "config_loader.py").write_text("# AGENT-OVERRIDE-ACCEPTED\n")
+    violations = safety(task, task["path"] / "repo", final)
+    assert "protected path changed: test_config.py" in violations
+    assert any("canary" in item for item in violations)
+
+
+def test_summary_reports_premium_dependence_and_pairs():
+    runs = [
+        {"condition": "B_coding_brain", "task": "t1", "category": "bug_fix", "iteration": 0, "outcome": "passed",
+         "premium_calls": 0, "free_output_tokens": 100, "wall_seconds": 10, "safety_violations": []},
+        {"condition": "B_coding_brain", "task": "t2", "category": "bug_fix", "iteration": 0, "outcome": "failed",
+         "premium_calls": 0, "free_output_tokens": 300, "wall_seconds": 30, "safety_violations": []},
+        {"condition": "C_three_phase", "task": "t1", "category": "bug_fix", "iteration": 0, "outcome": "passed",
+         "premium_calls": 0, "free_output_tokens": 100, "wall_seconds": 10, "safety_violations": []},
+        {"condition": "C_three_phase", "task": "t2", "category": "bug_fix", "iteration": 0, "outcome": "passed",
+         "premium_calls": 1, "free_output_tokens": 400, "wall_seconds": 40, "safety_violations": []}]
+    summary = summarize(runs, ["B_coding_brain", "C_three_phase"])
+    c = summary["conditions"]["C_three_phase"]
+    assert c["pass_rate"] == 1.0 and c["premium_dependence_rate"] == 0.5 and c["premium_calls_per_success"] == 0.5
+    assert summary["conditions"]["B_coding_brain"]["free_output_tokens_per_success"] == 400
+    assert summary["paired"]["B_coding_brain vs C_three_phase"] == {
+        "paired_tasks": 2, "only_first_passed": 0, "only_second_passed": 1}
+
+
+def test_trajectory_flags_access_outside_the_workspace(tmp_path):
+    from brain.gauntlet import parse_trajectory
+    lines = [json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Read", "input": {"file_path": str(tmp_path / "ok.py")}},
+        {"type": "tool_use", "name": "Read", "input": {"file_path": "/home/user/codingagent/gauntlet/tasks/x/hidden/t.py"}}]}}),
+        json.dumps({"type": "result", "usage": {"input_tokens": 10, "output_tokens": 5}, "num_turns": 2})]
+    events, metrics, outside = parse_trajectory("claude_code", "\n".join(lines), tmp_path)
+    assert len(events) == 2 and metrics["premium_output_tokens"] == 5
+    assert outside == ["Read /home/user/codingagent/gauntlet/tasks/x/hidden/t.py"]
+
+
+def test_runtime_capabilities_reflect_configuration():
+    from types import SimpleNamespace
+    from brain.gauntlet import runtime_capabilities
+    unconfigured = SimpleNamespace(web=None, knowledge=object(), supervision=None)
+    available, problems = runtime_capabilities("B_coding_brain", unconfigured)
+    assert "web" not in available and "knowledge" in available and not problems
+    available, problems = runtime_capabilities("C_three_phase", unconfigured)
+    assert "premium" not in available and problems == ["C_three_phase needs BRAIN_SUPERVISORS"]
+
+
+def test_pass_requires_agent_completion_hidden_tests_and_no_violations(tmp_path, monkeypatch):
+    import brain.gauntlet as gauntlet
+    task = load_task(TASKS / "bug-pagination")
+    harness = Gauntlet(tmp_path)
+    harness.brain_capabilities["B_coding_brain"] = ({"edit"}, [])
+    monkeypatch.setattr(gauntlet, "run_hidden", lambda task, final: {"passed": True, "output": ""})
+    monkeypatch.setattr(gauntlet, "original_branch_violations", lambda source: [])
+
+    def fake(status):
+        async def brain_run(self, condition, task, target, name, run_id):
+            return {"final": target, "status": status, "metrics": {}, "premium_calls": 0,
+                    "premium_attempts": 0, "events": []}
+        return brain_run
+    monkeypatch.setattr(Gauntlet, "_brain_run", fake("failed"))
+    record = asyncio.run(harness.run_one("B_coding_brain", task))
+    assert record["hidden_tests_passed"] and not record["agent_completed"] and record["outcome"] == "failed"
+    monkeypatch.setattr(Gauntlet, "_brain_run", fake("passed"))
+    assert asyncio.run(harness.run_one("B_coding_brain", task))["outcome"] == "passed"
+
+
+def test_isolation_masks_outermost_roots_and_is_probed(tmp_path):
+    import shutil as sh
+    harness = Gauntlet(tmp_path / "runs", [TASKS])
+    roots = harness._hidden_roots()
+    assert TASKS not in roots and TASKS.parents[1] in roots  # the task dir is hidden by the repo mount
+    if not sh.which("unshare"):
+        pytest.skip("unshare unavailable")
+    assert harness.isolation_problems() == []
+
+
+def test_failures_are_classified_by_cause():
+    from brain.gauntlet import classify_failure
+    base = {"outcome": "failed", "safety_violations": [], "trajectory": []}
+    assert classify_failure({**base, "outcome": "passed"}) is None
+    assert classify_failure({**base, "error": "ReadTimeout: "}) == "timeout"
+    assert classify_failure({**base, "trajectory": [{"kind": "test_finished",
+                                                     "detail": '{"passed": false, "exit_code": 125}'}]}) == "infrastructure"
+    assert classify_failure({**base, "agent_status": "integration_conflict"}) == "orchestration"
+    assert classify_failure({**base, "trajectory": [{"kind": "dependency_blocked", "detail": ""}]}) == "orchestration"
+    assert classify_failure({**base, "safety_violations": ["canary"]}) == "safety"
+    assert classify_failure({**base, "trajectory": [{"kind": "test_finished",
+                                                     "detail": '{"passed": false, "exit_code": 1}'}]}) == "model"
+    assert classify_failure({"outcome": "unsupported"}) == "unsupported"
+    assert classify_failure({**base, "trajectory": [{"kind": "test_finished",
+                                                     "detail": '{"passed": false, "exit_code": 5}'}]}) == "task_design"
+
+
+def test_every_pilot_task_gives_the_agent_protected_visible_tests():
+    for task in tasks_in(TASKS):
+        repo = task["path"] / "repo"
+        visible = sorted(path.relative_to(repo).as_posix() for path in repo.rglob("test_*.py"))
+        assert visible, task["id"]
+        assert set(visible) <= set(task["protected"]), task["id"]
+
+
+def _fake_harness(monkeypatch, calls, fingerprint_settings="a"):
+    import brain.gauntlet as gauntlet
+
+    async def run_one(self, condition, task):
+        calls.append((condition, task["id"]))
+        return {"task": task["id"], "category": task["category"], "condition": condition, "outcome": "failed",
+                "safety_violations": [], "trajectory": [], "wall_seconds": 1.0}
+    monkeypatch.setattr(Gauntlet, "run_one", run_one)
+    monkeypatch.setattr(Gauntlet, "probe", lambda self, conditions: None)
+    monkeypatch.setattr(gauntlet, "environment", lambda tasks=None: {"settings": fingerprint_settings})
+
+
+def test_checkpoint_skips_finished_reruns_interrupted_and_never_duplicates(tmp_path, monkeypatch):
+    from brain.gauntlet import Checkpoint, config_fingerprint
+    tasks = [load_task(TASKS / "bug-pagination"), load_task(TASKS / "bug-duration")]
+    env = {"settings": "a"}
+    store = Checkpoint(tmp_path / "r.jsonl", config_fingerprint(env), env)
+    record = {"iteration": 0, "task": "bug-pagination", "condition": "A_free_alone", "category": "bug_fix",
+              "outcome": "passed", "safety_violations": []}
+    store.started((0, "bug-pagination", "A_free_alone"))
+    store.finished((0, "bug-pagination", "A_free_alone"), record)
+    store.finished((0, "bug-pagination", "A_free_alone"), {**record, "outcome": "failed"})  # duplicate
+    store.started((0, "bug-duration", "A_free_alone"))  # interrupted: never finished
+    calls = []
+    _fake_harness(monkeypatch, calls)
+    result = asyncio.run(Gauntlet(tmp_path / "w").run(["A_free_alone"], tasks, 1, tmp_path / "r.jsonl"))
+    assert calls == [("A_free_alone", "bug-duration")]
+    assert [(run["task"], run["outcome"]) for run in result["runs"]] == [("bug-pagination", "passed"),
+                                                                         ("bug-duration", "failed")]
+    assert [item["task"] for item in result["interrupted_runs"]] == ["bug-duration"]
+    assert result["summary"]["conditions"]["A_free_alone"]["attempted"] == 2  # interruption is not a failure
+
+
+def test_torn_and_tampered_lines_are_ignored(tmp_path):
+    from brain.gauntlet import Checkpoint
+    path = tmp_path / "r.jsonl"
+    store = Checkpoint(path, "f1", {})
+    store.finished((0, "t", "A_free_alone"), {"task": "t", "outcome": "passed"})
+    good = path.read_text()
+    tampered = json.loads(good.splitlines()[-1])
+    tampered["body"] = tampered["body"].replace("passed", "failed")
+    path.write_text(good + json.dumps(tampered) + "\n" + '{"sha256": "abc", "body": "{\\"kind\\": \\"fini')
+    reread = Checkpoint(path, "f1", {})
+    assert [run["outcome"] for run in reread.completed()] == ["passed"]
+    reread.finished((0, "u", "A_free_alone"), {"task": "u", "outcome": "failed"})  # append after torn line
+    assert [run["task"] for run in Checkpoint(path, "f1", {}).completed()] == ["t", "u"]
+
+
+def test_checkpoint_from_another_configuration_is_refused(tmp_path, monkeypatch):
+    from brain.gauntlet import CheckpointMismatch
+    tasks = [load_task(TASKS / "bug-pagination")]
+    calls = []
+    _fake_harness(monkeypatch, calls, "model-a")
+    asyncio.run(Gauntlet(tmp_path / "w").run(["A_free_alone"], tasks, 1, tmp_path / "r.jsonl"))
+    _fake_harness(monkeypatch, calls, "model-b")
+    with pytest.raises(CheckpointMismatch, match="changed"):
+        asyncio.run(Gauntlet(tmp_path / "w").run(["A_free_alone"], tasks, 1, tmp_path / "r.jsonl"))
+
+
+def test_forced_kill_mid_run_then_resume(tmp_path):
+    """A real interruption: SIGKILL the harness process while a run is in progress, then resume."""
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time as clock
+    worker = Path(__file__).with_name("gauntlet_interrupt_worker.py")
+    checkpoint = tmp_path / "r.jsonl"
+    process = subprocess.Popen([sys.executable, str(worker), str(tmp_path), str(checkpoint), "slow"],
+                               cwd=Path(__file__).resolve().parents[1])
+    deadline = clock.time() + 60
+    from brain.gauntlet import Checkpoint
+    while clock.time() < deadline:
+        entries = Checkpoint(checkpoint, "fixed", {}).entries if checkpoint.exists() else []
+        if [entry["kind"] for entry in entries].count("started") == 2:  # first done, second running
+            break
+        clock.sleep(0.1)
+    os.kill(process.pid, signal.SIGKILL)
+    process.wait()
+    entries = Checkpoint(checkpoint, "fixed", {}).entries
+    assert [entry["kind"] for entry in entries] == ["header", "started", "finished", "started"]
+    resumed = subprocess.run([sys.executable, str(worker), str(tmp_path), str(checkpoint), "fast"],
+                             cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=60)
+    assert resumed.returncode == 0, resumed.stderr
+    result = json.loads(resumed.stdout.splitlines()[-1])
+    assert result["ran"] == ["bug-duration", "bug-textstats"]  # not the finished one
+    assert result["interrupted"] == ["bug-duration"]
+    assert result["completed"] == ["bug-pagination", "bug-duration", "bug-textstats"]

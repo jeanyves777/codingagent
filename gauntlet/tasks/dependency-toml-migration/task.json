@@ -1,0 +1,6 @@
+{
+  "id": "dependency-toml-migration",
+  "category": "dependency",
+  "goal": "The deployment image no longer ships the third-party toml package, so importing app fails. Migrate the app package to the standard-library tomllib (Python 3.11) and remove the toml dependency from both requirements.txt and the [project] dependencies in pyproject.toml, keeping the other dependencies. load_config(path) in app/config.py must keep accepting a str or a pathlib.Path and returning a dict, and invalid TOML must raise app.config.ConfigError with the file name in the message. Do not change the tests.",
+  "protected": ["tests/test_settings.py"]
+}

@@ -1,0 +1,8 @@
+{
+  "id": "bug-pagination",
+  "category": "bug_fix",
+  "goal": "pagination.py has two bugs: paginate() returns the wrong items (pages are numbered from 1) and page_count() ignores a final partial page. Fix both functions.",
+  "protected": [
+    "test_pagination.py"
+  ]
+}

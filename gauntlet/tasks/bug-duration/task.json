@@ -1,0 +1,8 @@
+{
+  "id": "bug-duration",
+  "category": "bug_fix",
+  "goal": "parse_duration in duration.py returns wrong totals for minutes, and it silently returns 0 for text that is not a duration. Fix it so minutes are counted correctly and invalid input such as 'abc', '' or '5x' raises ValueError. Valid input is one or more number+unit parts using h, m and s, like '1h30m' or '90s'.",
+  "protected": [
+    "test_duration.py"
+  ]
+}

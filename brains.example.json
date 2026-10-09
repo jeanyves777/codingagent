@@ -1,0 +1,67 @@
+{
+  "brains": {
+    "ollama-coder": {
+      "provider": "ollama",
+      "url": "http://localhost:11434",
+      "model": "qwen2.5-coder:14b"
+    },
+    "ollama-small": {
+      "provider": "ollama",
+      "url": "http://localhost:11434",
+      "model": "qwen2.5-coder:7b"
+    },
+    "lmstudio": {
+      "provider": "openai",
+      "url": "http://localhost:1234/v1",
+      "model": "LOADED_MODEL_ID"
+    },
+    "groq-free": {
+      "provider": "openai",
+      "url": "https://api.groq.com/openai/v1",
+      "model": "llama-3.3-70b-versatile",
+      "api_key_env": "GROQ_API_KEY"
+    }
+  },
+  "roles": {
+    "implementer": [
+      "ollama-coder",
+      "lmstudio",
+      "groq-free"
+    ],
+    "fast": [
+      "ollama-small",
+      "ollama-coder"
+    ],
+    "reviewer": [
+      "lmstudio",
+      "ollama-coder"
+    ],
+    "coordinator": [
+      "ollama-coder",
+      "groq-free"
+    ]
+  },
+  "supervisors": {
+    "claude": {
+      "provider": "claude_cli"
+    },
+    "codex": {
+      "provider": "codex_cli"
+    }
+  },
+  "supervision": {
+    "order": [
+      "claude",
+      "codex"
+    ],
+    "escalate_after": 2,
+    "plan_budget": 1,
+    "diagnose_budget": 1,
+    "decompose_budget": 1,
+    "daily_limit": 20,
+    "plan_complex_tasks": true,
+    "plan_orchestrations": true,
+    "final_review": false,
+    "takeover": false
+  }
+}

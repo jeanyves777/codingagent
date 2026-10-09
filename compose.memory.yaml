@@ -1,0 +1,26 @@
+services:
+  memory:
+    image: pgvector/pgvector:0.8.7-pg17-trixie
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_DB: coding_brain
+      POSTGRES_USER: coding_brain
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - coding_brain_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coding_brain -d coding_brain"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+
+volumes:
+  coding_brain_postgres:
