@@ -27,6 +27,9 @@ MUTATIONS = {
     "1b no repeated repairs against an unchanged failing check": (
         "brain/service.py", "        if set(signatures) <= set(seen):", "        if False:",
         ["test_no_repeated_repairs_against_an_unchanged_failing_check"]),
+    "1c rejected checks preserved for audit": (
+        "brain/service.py", "        entries.append(entry)\n", "        pass\n",
+        ["test_rejected_checks_are_preserved_with_reasons_and_checksums"]),
     "2 escalation on proposal failures": (
         "brain/service.py", "            if not self.supervision or proposals < self.supervision.escalate_after:",
         "            if True:",

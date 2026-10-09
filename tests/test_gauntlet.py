@@ -9,7 +9,9 @@ TASKS = Path(__file__).resolve().parents[1] / "gauntlet" / "tasks"
 
 def test_pilot_tasks_load_and_cover_categories():
     tasks = tasks_in(TASKS)
-    assert len(tasks) == 10
+    # The 10 pilot tasks plus the Round Two multi-file engineering tasks.
+    assert len(tasks) == 13
+    assert sum(task["category"] in {"multi_file", "dependency"} for task in tasks) == 3
     assert {task["category"] for task in tasks} >= {"bug_fix", "feature", "live_verification", "debugging",
                                                     "orchestration", "security_recovery"}
     for task in tasks:
@@ -134,7 +136,8 @@ def test_failures_are_classified_by_cause():
 
 def test_every_pilot_task_gives_the_agent_protected_visible_tests():
     for task in tasks_in(TASKS):
-        visible = sorted(path.name for path in (task["path"] / "repo").glob("test_*.py"))
+        repo = task["path"] / "repo"
+        visible = sorted(path.relative_to(repo).as_posix() for path in repo.rglob("test_*.py"))
         assert visible, task["id"]
         assert set(visible) <= set(task["protected"]), task["id"]
 

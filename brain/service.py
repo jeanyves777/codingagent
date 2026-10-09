@@ -217,17 +217,41 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             self.record_usage(task, started, before)
             self.event(task, "requirement_checks_skipped", f"{type(error).__name__}: {str(error)[:300]}")
             return
+        after = self.usage_counters()
         self.record_usage(task, started, before)
         self._count(task, "requirement_generation_seconds", round(time.monotonic() - started, 1))
+        self._count(task, "requirement_generation_prompt_tokens", after["prompt_tokens"] - before["prompt_tokens"])
+        self._count(task, "requirement_generation_output_tokens", after["output_tokens"] - before["output_tokens"])
         checks = accept_requirement_tests(task, raw)
         if checks and (workspace / checks["path"]).exists():
             checks = None  # never shadow an existing file
         if not checks:
+            self._audit(task, "unusable", content=str(raw)[:20_000])
             task["requirement_tests"] = {}
             self.event(task, "requirement_checks_skipped", "The model did not return one usable test file")
             return
         task["requirement_tests"] = checks
+        self._audit(task, "written", content=checks["content"], tests=checks["tests"])
         self.event(task, "requirement_checks_written", f"{checks['tests']} check(s) in {checks['path']}")
+
+    def _audit(self, task: dict, stage: str, content: str, **fields):
+        """Preserve generated requirement checks as they were, with what happened to them: in the
+        task record (copied into Gauntlet results) and as a read-only file outside the workspace.
+        Audit records never influence execution."""
+        entries = task.setdefault("requirement_audit", [])
+        entry = {"seq": len(entries) + 1, "stage": stage, "time": datetime.now(timezone.utc).isoformat(),
+                 "sha256": hashlib.sha256(content.encode()).hexdigest(), "content": content, **fields}
+        body = json.dumps(entry, sort_keys=True)
+        entry["record_sha256"] = hashlib.sha256(body.encode()).hexdigest()
+        entries.append(entry)
+        try:
+            folder = self.data / "tasks" / task["id"] / "audit"
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / f"requirement-{entry['seq']:03d}-{stage}.json"
+            target.write_text(body + "\n", encoding="utf-8")
+            target.chmod(0o444)
+        except OSError as error:
+            self.event(task, "audit_write_failed", f"{type(error).__name__}: {str(error)[:300]}")
 
     @staticmethod
     def _count(task: dict, key: str, amount=1):
@@ -266,6 +290,8 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             failure = classify_test_failure(evidence)
             if failure["category"] != "test_failure":
                 # Broken generated checks (collection errors) or sandbox problems: never block.
+                self._audit(task, "discarded", content=checks["content"], category=failure["category"],
+                            output=failure["summary"][:2000])
                 task["requirement_tests"] = {}
                 self._completion(task, "inconclusive", f"checks discarded ({failure['category']})")
                 self.event(task, "requirement_checks_discarded", f"{failure['category']}: {failure['summary'][:500]}")
@@ -273,7 +299,11 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             assessment = assess_failures(evidence["output"], checks, task["goal"])
             if not assessment["invalid"]:
                 break
-            checks = without_tests(checks, set(assessment["invalid"]))
+            kept = without_tests(checks, set(assessment["invalid"]))
+            self._audit(task, "rejected", content=checks["content"], reasons=assessment["invalid"],
+                        remaining_sha256=hashlib.sha256(kept["content"].encode()).hexdigest(),
+                        remaining_tests=kept["tests"])
+            checks = kept
             task["requirement_tests"] = checks if checks["tests"] else {}
             self._count(task, "requirement_tests_rejected", len(assessment["invalid"]))
             self.event(task, "requirement_checks_rejected", json.dumps(assessment["invalid"])[:1500])

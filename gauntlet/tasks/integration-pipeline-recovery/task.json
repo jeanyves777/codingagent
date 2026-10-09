@@ -1,0 +1,6 @@
+{
+  "id": "integration-pipeline-recovery",
+  "category": "multi_file",
+  "goal": "Make the pipeline recover from stage failures. Runner(registry, max_attempts=3, sleep=time.sleep, backoff=0.5) in pipeline/runner.py must retry a stage whose function raises, calling the injected sleep with backoff * 2 ** (attempt - 1) seconds between attempts (0.5, then 1.0 by default) and never after the last attempt. A stage that still fails is recorded in the Report with status 'failed' and its last error message as str(error); every stage that depends on it, directly or indirectly, is recorded as 'blocked' and is not run, while independent stages still run. In pipeline/report.py, Report.ok must be True only when every stage succeeded, and Report.attempts must map each stage name that ran to the number of attempts made. Do not change the tests.",
+  "protected": ["tests/test_pipeline.py"]
+}

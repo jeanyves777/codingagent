@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 CATEGORIES = {"bug_fix", "feature", "live_verification", "debugging", "orchestration", "git_pr_ci",
-              "security_recovery", "repository_creation"}
+              "security_recovery", "repository_creation", "multi_file", "dependency"}
 CONDITIONS = ("A_free_alone", "B_coding_brain", "C_three_phase", "claude_code", "codex")
 DESIGNED = {  # the most each condition can offer; runtime_capabilities() checks what is configured
     "A_free_alone": {"edit"},
@@ -238,6 +238,7 @@ class Gauntlet:
                 "models": summarize_models(stored.get("inference_log", [])),
                 "completion_verified": stored.get("completion_verified"),
                 "completion": (stored.get("completion") or {}).get("status"),
+                "requirement_audit": stored.get("requirement_audit"),
                 "metrics": {**stored.get("metrics", {}), "repair_attempts": len(stored.get("failure_log", []))},
                 "premium_calls": ledger.count(item["id"], ok=1) if ledger else 0,
                 "premium_attempts": ledger.count(item["id"]) if ledger else 0,
@@ -291,6 +292,8 @@ class Gauntlet:
                                         else all(child["completion_verified"] for child in children))
                 if children else None,
                 "completion": completion_of([(child.get("completion") or {}).get("status") for child in children]),
+                "requirement_audit": [dict(entry, assignment=child["id"][:8]) for child in children
+                                      for entry in child.get("requirement_audit") or []] or None,
                 "metrics": metrics, "events": events, "error": error,
                 "premium_calls": sum(ledger.count(item["id"], ok=1) for item in [group, *children]) if ledger else 0,
                 "premium_attempts": sum(ledger.count(item["id"]) for item in [group, *children]) if ledger else 0}
@@ -399,6 +402,8 @@ class Gauntlet:
                 "models": result.get("models"),
                 "completion_verified": result.get("completion_verified"),
                 "completion": result.get("completion"),
+                "requirement_audit": result.get("requirement_audit"),
+                "premium_input_tokens": metrics.get("premium_input_tokens", 0),
                 "requirement_metrics": {key: metrics.get(key, 0) for key in REQUIREMENT_METRICS},
                 "model_seconds": metrics.get("model_seconds", 0),
                 "trajectory": result["events"]}
@@ -426,6 +431,11 @@ class Gauntlet:
                     record = await self.run_one(condition, task)
                     record.update({"iteration": iteration, "fingerprint": fingerprint})
                     record["failure_cause"] = classify_failure(record)
+                    record["premium_interventions"] = premium_interventions(record.get("trajectory") or [])
+                    record["premium_recovery"] = record["outcome"] == "passed" and any(
+                        item["after_failures"] and item["followed_by_passing_tests"]
+                        for item in record["premium_interventions"])
+                    record["cost"] = run_cost(record)
                     if downstream_effects(record):
                         record["downstream_effects"] = downstream_effects(record)
                     runs.append(record)
@@ -532,8 +542,54 @@ PROPOSAL_REJECTIONS = {"validation_failed", "implementer_invalid"}
 NEUTRAL_EVENTS = {"knowledge_packet", "web_preflight", "memory_fallback", "upstream_check"}
 
 
-REQUIREMENT_METRICS = ("requirement_generation_seconds", "requirement_check_runs", "requirement_tests_rejected",
+REQUIREMENT_METRICS = ("requirement_generation_seconds", "requirement_generation_prompt_tokens",
+                       "requirement_generation_output_tokens", "requirement_check_runs", "requirement_tests_rejected",
                        "requirement_repairs")
+FAILURE_EVENTS = {"validation_failed", "proposal_failed", "implementer_invalid", "requirement_checks_failed"}
+SUPERVISOR_EVENTS = ("supervisor_plan", "supervisor_decompose", "supervisor_diagnose", "supervisor_review",
+                     "supervisor_takeover")
+
+
+def premium_interventions(events: list[dict]) -> list[dict]:
+    """Each premium consultation, what triggered it, and whether the free model then recovered:
+    a failure came before it and a passing test run came after it."""
+    found = []
+    for index, event in enumerate(events):
+        if event.get("kind") not in SUPERVISOR_EVENTS:
+            continue
+        source = event.get("source")
+        same = [item for item in events if item.get("source") == source] if source else events
+        position = same.index(event) if event in same else index
+        before, after = same[:position], same[position + 1:]
+        failed_before = [item["kind"] for item in before if item.get("kind") in FAILURE_EVENTS or (
+            item.get("kind") == "test_finished" and '"passed": false' in item.get("detail", ""))]
+        trigger = {"supervisor_plan": "complex goal", "supervisor_decompose": "orchestration planning",
+                   "supervisor_review": "final review"}.get(event["kind"])
+        if event["kind"] == "supervisor_diagnose":
+            trigger = "repeated failures: " + (failed_before[-1] if failed_before else "unknown")
+        recovered = any(item.get("kind") == "test_finished" and '"passed": true' in item.get("detail", "")
+                        for item in after)
+        found.append({"kind": event["kind"].removeprefix("supervisor_"), "trigger": trigger,
+                      "after_failures": len(failed_before), "followed_by_passing_tests": recovered})
+    return found
+
+
+def run_cost(run: dict) -> dict:
+    """Everything a run spent: free tokens (including writing requirement checks), premium tokens
+    as the serving models reported them, premium calls, and time."""
+    premium_in = premium_out = 0
+    for name, usage in ((run.get("models") or {}).get("models") or {}).items():
+        if usage.get("provider") in {"claude_cli", "codex_cli", "anthropic"}:
+            premium_in += usage.get("prompt_tokens") or 0
+            premium_out += usage.get("output_tokens") or 0
+    requirement = run.get("requirement_metrics") or {}
+    return {"free_prompt_tokens": run.get("free_prompt_tokens", 0), "free_output_tokens": run.get("free_output_tokens", 0),
+            "requirement_generation_tokens": requirement.get("requirement_generation_prompt_tokens", 0)
+            + requirement.get("requirement_generation_output_tokens", 0),
+            "premium_calls": run.get("premium_calls", 0),
+            "premium_input_tokens": premium_in or run.get("premium_input_tokens", 0),
+            "premium_output_tokens": premium_out or run.get("premium_output_tokens", 0),
+            "wall_seconds": run.get("wall_seconds"), "model_seconds": run.get("model_seconds")}
 COMPLETION_ORDER = ("unverified", "inconclusive", "unchecked", "verified")
 
 
@@ -633,6 +689,20 @@ def summarize(runs: list[dict], conditions: list[str]) -> dict:
             "agent_completed": f"{sum(bool(run.get('agent_completed')) for run in attempted)}/{len(attempted)}",
             "engineering_success": f"{len(passed)}/{len(attempted)}",
             "downstream_orchestration_effects": sum(bool(downstream_effects(run)) for run in attempted),
+            # Agent self-verification against the hidden tests (the authoritative score).
+            "verification_false_negatives": sum(run["outcome"] == "passed" and run.get("completion") != "verified"
+                                                and run.get("completion") is not None for run in attempted),
+            "verification_false_positives": sum(run.get("completion") == "verified" and not run.get("hidden_tests_passed")
+                                                for run in attempted),
+            "verification_false_negative_rate": (round(sum(run.get("completion") not in (None, "verified")
+                                                           for run in passed if run.get("completion")) /
+                                                       max(1, sum(bool(run.get("completion")) for run in passed)), 3)
+                                                 if passed else None),
+            "premium_assisted_recoveries": sum(bool(run.get("premium_recovery")) for run in passed),
+            "mean_cost_per_success": {key: round(sum((run.get("cost") or {}).get(key) or 0 for run in passed)
+                                                 / len(passed), 1) for key in (
+                "free_prompt_tokens", "free_output_tokens", "requirement_generation_tokens", "premium_calls",
+                "premium_input_tokens", "premium_output_tokens", "wall_seconds")} if passed else None,
             # Agent-side completion verification; hidden tests remain the authoritative score.
             "completion": {status: sum(run.get("completion") == status for run in attempted)
                            for status in COMPLETION_ORDER if any(run.get("completion") == status for run in attempted)},
@@ -700,6 +770,18 @@ def markdown_report(saved: dict) -> str:
             ("Failures: timeout", lambda c: str(c["failure_causes"]["timeout"])),
             ("Failures: safety", lambda c: str(c["failure_causes"]["safety"])),
             ("Failures: task design", lambda c: str(c["failure_causes"].get("task_design", 0))),
+            ("Verified / unverified / inconclusive / unchecked", lambda c: " / ".join(
+                str((c.get("completion") or {}).get(key, 0)) for key in ("verified", "unverified", "inconclusive",
+                                                                       "unchecked"))),
+            ("Verification false negatives (hidden pass, not verified)",
+             lambda c: f"{c.get('verification_false_negatives', 0)} (rate {c.get('verification_false_negative_rate')})"),
+            ("Verification false positives (verified, hidden fail)",
+             lambda c: str(c.get("verification_false_positives", 0))),
+            ("Premium-assisted recoveries", lambda c: str(c.get("premium_assisted_recoveries", 0))),
+            ("Mean cost per success (free in/out, premium calls, premium in/out)", lambda c: (
+                "{free_prompt_tokens:.0f}/{free_output_tokens:.0f}, {premium_calls}, "
+                "{premium_input_tokens:.0f}/{premium_output_tokens:.0f}".format(**c["mean_cost_per_success"])
+                if c.get("mean_cost_per_success") else "-")),
             ("Premium attempts", lambda c: str(c["premium_attempts"])),
             ("Premium dependence rate", lambda c: str(c["premium_dependence_rate"])),
             ("Free output tokens / success", lambda c: str(c["free_output_tokens_per_success"])),

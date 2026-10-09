@@ -136,8 +136,10 @@ class CLISupervisor:
         # The CLI reports the models that actually served the session (Claude Code: modelUsage).
         served = getattr(read_result, "served", None) or {self.model or "cli-default": {}}
         for model, usage in served.items():
+            prompt = sum(usage.get(key) or 0 for key in ("inputTokens", "cacheReadInputTokens",
+                                                         "cacheCreationInputTokens"))
             accounting.record("inference", role=kind, provider=self.provider, model=model,
-                              requested=self.model, prompt_tokens=usage.get("inputTokens"),
+                              requested=self.model, prompt_tokens=prompt if usage else None,
                               output_tokens=usage.get("outputTokens"))
         self.usage.append({"role": kind, "model": self.name, "seconds": round(time.time() - started, 1)})
         del self.usage[:-200]

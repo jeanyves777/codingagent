@@ -1,0 +1,6 @@
+{
+  "id": "multifile-inventory-reservations",
+  "category": "multi_file",
+  "goal": "Add stock reservations across the shop package. In shop/inventory.py, Inventory gets reserve(sku, quantity) and release(sku, quantity), and available(sku) becomes stock minus reserved. In shop/errors.py, add OutOfStock, a subclass of ShopError that keeps the failing sku as its .sku attribute. In shop/orders.py, OrderService.place_order(lines) must reserve every line or none: if any line lacks available stock it raises OutOfStock for that sku and reserves nothing. OrderService.cancel(order_id) releases the order's reservations; cancelling an order twice or an unknown order raises ShopError. In shop/reports.py, stock_report(inventory) returns one line per sku, sorted by sku, formatted 'SKU: available/stock (reserved N)'. Do not change the tests.",
+  "protected": ["tests/test_shop.py"]
+}

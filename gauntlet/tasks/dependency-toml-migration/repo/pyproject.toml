@@ -1,0 +1,12 @@
+[project]
+name = "deploy-tool"
+version = "1.4.0"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "toml>=0.10",
+    "rich>=13",
+]
+
+[project.scripts]
+deploy-tool = "app.cli:main"

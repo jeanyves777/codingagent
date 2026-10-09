@@ -463,3 +463,93 @@ def test_requirement_prompts_carry_only_the_goal_for_every_benchmark_task():
             names = [line.split("(")[0][4:] for line in hidden.read_text().splitlines() if line.startswith("def test")]
             assert not any(name in prompt for name in names)
             assert not (task["path"] / "repo" / hidden.name).exists()
+
+
+# Audit preservation of generated checks -----------------------------------------------------
+
+def run_invalid_scenario(tmp_path, monkeypatch, audit=True):
+    from brain import completion
+    from brain.service import Brain as BrainClass
+    monkeypatch.setattr("brain.service.run_tests", local_pytest)
+    admit = lambda task, raw: {"path": completion.requirement_file_name(task["id"]),
+                               "content": json.loads(raw)["changes"][0]["content"], "tests": 4}
+    monkeypatch.setattr("brain.service.accept_requirement_tests", admit)
+    if not audit:
+        monkeypatch.setattr(BrainClass, "_audit", lambda self, task, stage, content, **fields: None)
+    return run(brain_for(tmp_path, ScriptedModel([MONEY], checks=INVALID + VALID)), MONEY_GOAL)
+
+
+def test_rejected_checks_are_preserved_with_reasons_and_checksums(tmp_path, monkeypatch):
+    import hashlib
+    import stat
+    task = run_invalid_scenario(tmp_path, monkeypatch)
+    written, rejected = task["requirement_audit"]
+    assert (written["stage"], rejected["stage"]) == ("written", "rejected")
+    assert written["content"] == INVALID + VALID == rejected["content"]
+    assert written["sha256"] == hashlib.sha256((INVALID + VALID).encode()).hexdigest()
+    assert sorted(rejected["reasons"]) == ["test_forgot_import", "test_invented_attribute", "test_invented_keyword"]
+    assert rejected["remaining_tests"] == 1
+    assert rejected["remaining_sha256"] == hashlib.sha256(task["requirement_tests"]["content"].encode()).hexdigest()
+    folder = tmp_path / "data" / "tasks" / task["id"] / "audit"
+    files = sorted(folder.iterdir())
+    assert [path.name for path in files] == ["requirement-001-written.json", "requirement-002-rejected.json"]
+    for path, entry in zip(files, (written, rejected)):
+        assert stat.S_IMODE(path.stat().st_mode) == 0o444
+        body = path.read_text().strip()
+        assert hashlib.sha256(body.encode()).hexdigest() == entry["record_sha256"]
+        assert json.loads(body)["content"] == entry["content"]
+
+
+def test_audit_records_do_not_change_execution(tmp_path, monkeypatch):
+    with_audit = run_invalid_scenario(tmp_path / "a", monkeypatch)
+    without = run_invalid_scenario(tmp_path / "b", monkeypatch, audit=False)
+    assert [event["kind"] for event in with_audit["events"]] == [event["kind"] for event in without["events"]]
+    keep = lambda task: {key: value for key, value in task["metrics"].items() if "seconds" not in key}
+    assert keep(with_audit) == keep(without)
+    assert with_audit["completion"] == without["completion"] and with_audit["status"] == without["status"]
+    assert "requirement_audit" not in without
+
+
+def test_unusable_and_discarded_checks_are_preserved(tmp_path, monkeypatch):
+    monkeypatch.setattr("brain.service.run_tests", sandbox)
+    task = run(brain_for(tmp_path, ScriptedModel(["x = 3\n"], checks="def broken(:\n")))
+    assert [entry["stage"] for entry in task["requirement_audit"]] == ["unusable"]
+    assert "def broken(:" in task["requirement_audit"][0]["content"]
+    checks = "def broken():\n    pass\n\ndef test_x():\n    assert 1\n"
+    task = run(brain_for(tmp_path / "second", ScriptedModel(["x = 3\n"], checks=checks)))
+    assert [entry["stage"] for entry in task["requirement_audit"]] == ["written", "discarded"]
+    assert task["requirement_audit"][1]["category"] == "collection"
+
+
+# Round Two measurements ---------------------------------------------------------------------
+
+def test_premium_interventions_record_trigger_and_recovery():
+    from brain.gauntlet import premium_interventions, run_cost
+    events = [{"kind": "test_finished", "detail": '{"passed": false}'},
+              {"kind": "test_finished", "detail": '{"passed": false}'},
+              {"kind": "supervisor_diagnose", "detail": "claude: ..."},
+              {"kind": "test_finished", "detail": '{"passed": true}'}]
+    found = premium_interventions(events)
+    assert found == [{"kind": "diagnose", "trigger": "repeated failures: test_finished", "after_failures": 2,
+                      "followed_by_passing_tests": True}]
+    assert premium_interventions(events[:3])[0]["followed_by_passing_tests"] is False
+    run = {"free_prompt_tokens": 10, "free_output_tokens": 2, "premium_calls": 1,
+           "requirement_metrics": {"requirement_generation_prompt_tokens": 4, "requirement_generation_output_tokens": 1},
+           "models": {"models": {"claude-x": {"provider": "claude_cli", "prompt_tokens": 300, "output_tokens": 40},
+                                 "qwen": {"provider": "ollama", "prompt_tokens": 10, "output_tokens": 2}}}}
+    cost = run_cost(run)
+    assert (cost["premium_input_tokens"], cost["premium_output_tokens"], cost["requirement_generation_tokens"]) == \
+        (300, 40, 5)
+
+
+def test_verification_errors_are_scored_against_hidden_tests():
+    from brain.gauntlet import summarize
+    runs = [{"condition": "B", "task": t, "iteration": 0, "category": "bug", "outcome": outcome,
+             "hidden_tests_passed": outcome == "passed", "completion": completion}
+            for t, outcome, completion in [("a", "passed", "verified"), ("b", "passed", "unverified"),
+                                           ("c", "passed", "inconclusive"), ("d", "failed", "verified"),
+                                           ("e", "passed", None)]]
+    summary = summarize(runs, ["B"])["conditions"]["B"]
+    assert summary["engineering_success"] == "4/5"  # hidden tests decide, whatever the agent reported
+    assert summary["verification_false_negatives"] == 2 and summary["verification_false_positives"] == 1
+    assert summary["verification_false_negative_rate"] == round(2 / 3, 3)
