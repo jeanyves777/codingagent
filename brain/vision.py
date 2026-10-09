@@ -138,7 +138,8 @@ class VisionProvider:
         if not usable:
             raise VisionUnavailable(reason)
         started = time.monotonic()
-        raw, usage = await self._infer(prompt, images, schema)
+        async with accounting.request(role, self.provider, self.model, f"{role} on {len(images)} image(s)"):
+            raw, usage = await self._infer(prompt, images, schema)
         seconds = round(time.monotonic() - started, 1)
         accounting.record("inference", role=role, provider=self.provider, model=usage.get("model") or self.model,
                           requested=self.model, prompt_tokens=usage.get("prompt_tokens"),

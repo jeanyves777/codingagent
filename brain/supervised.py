@@ -39,6 +39,13 @@ class SupervisionMixin:
         task.setdefault("supervision", []).append(consultation)
         self.event(task, "supervisor_" + kind, f"{consultation['supervisor']}: " +
                    json.dumps(consultation["result"])[:1500])
+        result = consultation["result"]
+        explanation = result.get("plan") or result.get("diagnosis") or result.get("reason") or json.dumps(result)[:800]
+        if hasattr(self, "decision"):
+            self.decision(task, {"plan": "planning", "diagnose": "repair", "review": "review",
+                                 "decompose": "decomposition"}.get(kind, "supervisor_selection"),
+                          "supervisor", f"{consultation['supervisor']}: {str(explanation)[:1500]}", "model-provided",
+                          supervisor=consultation["supervisor"], kind=kind)
         return consultation
 
     def complex_goal(self, task: dict, context: dict) -> bool:
@@ -51,8 +58,10 @@ class SupervisionMixin:
         if not self.supervision or not (task.get("premium_plan") or (
                 self.supervision.plan_complex_tasks and self.complex_goal(task, context))):
             return ""
-        consultation = await self._consult(task, "plan", {"goal": task["goal"], "repository_context": context},
-                                           workspace)
+        with self.stage(task, "planning", agent="supervisor", summary="Asking a premium supervisor for a plan "
+                        "(complex goal)"):
+            consultation = await self._consult(task, "plan", {"goal": task["goal"], "repository_context": context},
+                                               workspace)
         return guidance_text(consultation) if consultation else ""
 
     async def diagnose(self, task: dict, workspace, evidence: dict) -> dict | None:

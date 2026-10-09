@@ -50,6 +50,12 @@ class OllamaModel:
         self.mcp_gateway = mcp_gateway
         self.usage = []
 
+    async def _post(self, client, role: str, body: dict):
+        async with accounting.request(role, "ollama", self.name):
+            response = await client.post(self.url + "/api/chat", json=body)
+            response.raise_for_status()
+            return response
+
     def _record(self, payload, role):
         accounting.record("inference", role=role, provider="ollama", model=payload.get("model") or self.name,
                           requested=self.name, prompt_tokens=payload.get("prompt_eval_count"),
@@ -65,7 +71,7 @@ class OllamaModel:
 
     async def decompose(self, goal: str) -> dict:
         async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
-            response = await client.post(self.url + "/api/chat", json={
+            response = await self._post(client, "coordinator", {
                 "model": self.name, "stream": False, "format": "json",
                 "messages": [{"role": "system", "content": COORDINATOR},
                              {"role": "user", "content": goal}],
@@ -80,7 +86,7 @@ class OllamaModel:
     async def review(self, goal: str, diff: str) -> dict:
         import json
         async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
-            response = await client.post(self.url + "/api/chat", json={
+            response = await self._post(client, "reviewer", {
                 "model": self.name, "stream": False, "format": "json",
                 "messages": [{"role": "system", "content": REVIEWER},
                              {"role": "user", "content": json.dumps({"goal": goal, "diff": diff})}],
@@ -103,7 +109,7 @@ class OllamaModel:
             for _ in range(self.max_tool_rounds):
                 if sum(len(message.get("content") or "") for message in messages) > self.max_context_chars:
                     raise ValueError("Model context character budget exceeded")
-                response = await client.post(self.url + "/api/chat", json={
+                response = await self._post(client, "implementer", {
                     "model": self.name, "messages": messages,
                     "tools": registry.schemas() + external_tools, "stream": False,
                     "options": {"temperature": 0, "num_predict": self.max_output_tokens},
@@ -126,6 +132,9 @@ class OllamaModel:
                     raise ValueError("Tool call budget exceeded")
                 for call in calls:
                     function = call["function"]
+                    accounting.emit("tool", status="COMPLETED", agent="implementer", provider="ollama", model=self.name,
+                                    summary=f"inspection tool {function['name']}",
+                                    data={"tool": function["name"], "arguments": str(function.get("arguments"))[:300]})
                     try:
                         if function["name"].startswith("mcp__"):
                             if not self.mcp_gateway:
@@ -144,7 +153,7 @@ class OllamaModel:
         """Request the proposal with Ollama structured output, constrained to the proposal schema."""
         import json
         from .contracts import Proposal
-        response = await client.post(self.url + "/api/chat", json={
+        response = await self._post(client, "implementer", {
             "model": self.name, "stream": False, "format": Proposal.model_json_schema(),
             "messages": messages + [{"role": "user", "content": FINALIZE}],
             "options": {"temperature": 0, "num_predict": self.max_output_tokens},

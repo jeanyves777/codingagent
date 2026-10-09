@@ -129,7 +129,9 @@ class CLISupervisor:
         with tempfile.TemporaryDirectory() as scratch:
             cwd = workspace if workspace and workspace.is_dir() else Path(scratch)
             arguments, read_result = self.arguments(SCHEMAS[kind], Path(scratch))
-            code, out, err = await self.runner(arguments, prompt, cwd)
+            async with accounting.request(kind, self.provider, self.model or "cli-default",
+                                          f"{self.name} {kind} consultation"):
+                code, out, err = await self.runner(arguments, prompt, cwd)
             if code:
                 raise SubscriptionError(f"{self.name} exited {code}: {(err or out)[-500:]}")
             result = read_result(out)
