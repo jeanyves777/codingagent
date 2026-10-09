@@ -61,7 +61,8 @@ def test_creates_folder_baseline_and_scaffold_in_the_projects_folder(env):
     assert git(path, "show", "--stat", "--format=", "HEAD~1") == ""  # the baseline is empty
     assert git(path, "status", "--porcelain") == ""
     assert git(path, "branch", "--show-current") == "main"
-    assert json.loads((path / "coding-brain.json").read_text()) == {"test_profile": "python"}
+    assert json.loads((path / "coding-brain.json").read_text()) == {
+        "test_profile": "python", "test_command": ["python", "-m", "pytest", "-vv", "-p", "no:cacheprovider"]}
     assert (path / "conftest.py").is_file() and "task manager" in (path / "README.md").read_text()
     # registered, with the goal in project memory as the user's approved instruction
     from brain.local.cli import Context
@@ -227,8 +228,10 @@ def test_real_goal_first_build(env):
     config = settings.load(env["layout"])
     config["models"]["model"] = os.environ["CODINGBRAIN_TEST_CODING_MODEL"]
     settings.save(env["layout"], config)
-    record = make(env, "Build a Python module tasks.py with add_task(title), complete_task(id) and "
-                       "list_tasks(include_done=False) functions storing tasks in memory, with pytest tests",
+    record = make(env, "Build a Python module tasks.py that keeps tasks in memory: add_task(title) returns the "
+                       "new task's integer id; complete_task(task_id) marks that task done; list_tasks() returns "
+                       "the tasks that are not done, and list_tasks(include_done=True) returns all tasks. "
+                       "Each task is a dict with id, title and done. Include pytest tests",
                   name="tasks", check_ready=True)
     task = build(env["layout"], record, auto=True, view="plain")
     print(report(record, task))
