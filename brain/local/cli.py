@@ -47,14 +47,22 @@ def version() -> str:
 def ask(question: str, default: bool = False) -> bool:
     if not sys.stdin.isatty():
         return default
-    answer = input(f"{question} [{'Y/n' if default else 'y/N'}] ").strip().lower()
+    try:
+        answer = input(f"{question} [{'Y/n' if default else 'y/N'}] ").strip().lower()
+    except EOFError:  # Windows reports a NUL stdin as a terminal; end of input means the default
+        print()
+        return default
     return default if not answer else answer in {"y", "yes"}
 
 
 def prompt(question: str, default: str = "") -> str:
     if not sys.stdin.isatty():
         return default
-    answer = input(f"{question}{f' [{default}]' if default else ''}: ").strip()
+    try:
+        answer = input(f"{question}{f' [{default}]' if default else ''}: ").strip()
+    except EOFError:
+        print()
+        return default
     return answer or default
 
 
@@ -84,6 +92,14 @@ class Context:
             raise SystemExit(f"{self.root} is outside the directories you allowed "
                              f"({', '.join(self.config['permissions']['allowed_roots'])}). "
                              "Change this with `codingbrain setup`.")
+        from ..service import overlaps
+        if overlaps(self.root, self.layout.home):
+            raise SystemExit(f"{self.root} overlaps Coding Brain's own data folder ({self.layout.home}). "
+                             "Open a project folder instead.")
+        if self.project["git"] and not self.project.get("head"):
+            raise SystemExit("This Git repository has no commits yet. Coding Brain works from your last commit "
+                             "and never commits your files for you. Commit them first:\n"
+                             "  git add -A\n  git commit -m \"Initial commit\"")
         if not settings.configured(self.config):
             raise SystemExit("Coding Brain is not configured yet. Run `codingbrain setup` first.")
 
@@ -107,9 +123,13 @@ class Context:
         return self._memory
 
     def tasks(self) -> list[dict]:
+        """Read-only: listing tasks never starts the service, so it cannot disturb a task that
+        another terminal is running."""
         if not (self.data / "brain.sqlite3").exists():
             return []
-        return sorted((task for task in self.brain.store.tasks() if task.get("repository") == self.root.name),
+        from ..store import Store
+        store = self._brain.store if self._brain is not None else Store(self.data / "brain.sqlite3")
+        return sorted((task for task in store.tasks() if task.get("repository") == self.root.name),
                       key=lambda task: task["events"][0]["time"] if task.get("events") else "", reverse=True)
 
 
