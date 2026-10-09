@@ -163,9 +163,13 @@ def write_launcher(layout: Layout, python: Path) -> Path:
         text_path, local = str(python), os.environ.get("LOCALAPPDATA", "")
         if local and text_path.lower().startswith(local.lower() + "\\"):
             text_path = "%LOCALAPPDATA%" + text_path[len(local):]
-        target, text = layout.bin / "codingbrain.cmd", f'@"{text_path}" -m brain.local %* & exit /b\r\n'
+        # -I: never import code from the current directory (a project may have its own `brain`
+        # package) or from PYTHON* variables. The single line ends the script either way, and
+        # passes failure on as exit code 1 (`& exit /b` alone loses it under cmd /c).
+        target, text = (layout.bin / "codingbrain.cmd",
+                        f'@"{text_path}" -I -m brain.local %* && exit /b 0 || exit /b 1\r\n')
     else:
-        target, text = layout.bin / "codingbrain", f'#!/bin/sh\nexec "{python}" -m brain.local "$@"\n'
+        target, text = layout.bin / "codingbrain", f'#!/bin/sh\nexec "{python}" -I -m brain.local "$@"\n'
     temporary = target.with_suffix(".tmp")
     try:
         temporary.write_text(text, encoding="oem" if sys.platform == "win32" else "utf-8", newline="")
@@ -243,6 +247,8 @@ def restore_state(layout: Layout, backup: Path):
 
 def _run(python: Path, layout: Layout, *arguments: str, timeout=900) -> subprocess.CompletedProcess:
     environment = {**os.environ, "CODINGBRAIN_HOME": str(layout.home), "PYTHONUTF8": "1"}
+    if arguments[:2] == ("-m", "brain.local"):
+        arguments = ("-I", *arguments)  # the installed version's code, never the current directory's
     return subprocess.run([str(python), *arguments], capture_output=True, text=True, timeout=timeout,
                           env=environment)
 

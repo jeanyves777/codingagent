@@ -174,7 +174,7 @@ try {
     [Environment]::SetEnvironmentVariable('CODINGBRAIN_HOME', $InstallDir, 'User')
   }
   $env:CODINGBRAIN_HOME = $InstallDir
-  & $venvPython -m brain.local post-install --version $release.Version --base-python $python
+  & $venvPython -I -m brain.local post-install --version $release.Version --base-python $python
   if ($LASTEXITCODE -ne 0) { throw 'The installation health check failed (see above).' }
 } catch {
   if (-not (Test-Path $current) -or ((Get-Content -Raw $current | ConvertFrom-Json).version -ne $release.Version)) {

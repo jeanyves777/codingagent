@@ -298,9 +298,10 @@ def test_windows_launcher_is_one_self_terminating_line(tmp_path, monkeypatch):
     layout = Layout(tmp_path / "home")
     target = updater.write_launcher(layout, Path(r"C:\Users\Zoë\AppData\Local\CodingBrain\app\versions\0.9.1\venv\Scripts\python.exe"))
     text = target.read_bytes().decode()
-    assert target.name == "codingbrain.cmd" and text.count("\r\n") == 1 and text.endswith("& exit /b\r\n")
+    assert target.name == "codingbrain.cmd" and text.count("\r\n") == 1
+    assert text.endswith(" -I -m brain.local %* && exit /b 0 || exit /b 1\r\n")  # isolated; exit code kept
     # No non-ASCII user folder in the batch file: cmd.exe reads it in the console code page.
-    assert text.startswith('@"%LOCALAPPDATA%\\CodingBrain\\app') and "-m brain.local %*" in text and text.isascii()
+    assert text.startswith('@"%LOCALAPPDATA%\\CodingBrain\\app') and text.isascii()
 
 
 def test_migrations_refuse_newer_state(tmp_path):
@@ -380,3 +381,24 @@ def test_interrupted_task_is_resumed_after_restart(tmp_path, monkeypatch):
         await cli.drain(restarted.brain)
         return await cli.handle(restarted, current, True)
     assert asyncio.run(resume())["status"] == "passed"
+
+
+def test_temporary_folder_cleanup_cannot_fail_a_successful_update(installed, tmp_path, monkeypatch):
+    import tempfile
+    layout, _, _ = installed
+    real = tempfile.TemporaryDirectory
+
+    class LockedOnWindows(real):
+        """A download folder a virus scanner still holds: deleting it fails."""
+        def __init__(self, *args, ignore_cleanup_errors=False, **kwargs):
+            super().__init__(*args, ignore_cleanup_errors=ignore_cleanup_errors, **kwargs)
+            self.tolerant = ignore_cleanup_errors
+
+        def __exit__(self, *exc):
+            super().__exit__(*exc)
+            if not self.tolerant:
+                raise PermissionError("[WinError 32] The process cannot access the file")
+    monkeypatch.setattr(updater.tempfile, "TemporaryDirectory", LockedOnWindows)
+    result = updater.install_release(layout, updater.DirectorySource(make_release(tmp_path / "r091", "0.9.1")),
+                                     "0.9.0", log=lambda message: None)
+    assert result["status"] == "installed" and updater.read_current(layout)["version"] == "0.9.1"
