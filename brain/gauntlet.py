@@ -178,6 +178,7 @@ class Gauntlet:
                 brain = build_brain_from_env()
                 if condition == "A_free_alone":
                     brain.knowledge, brain.web, brain.supervision = None, None, None
+                    brain.gates, brain.requirement_checks = False, False
                 elif condition == "B_coding_brain":
                     brain.supervision = None
                 self.brain_capabilities[condition] = runtime_capabilities(condition, brain)
@@ -207,6 +208,7 @@ class Gauntlet:
         brain.image = {"python": task["image"], "node": task["image"]}
         if condition == "A_free_alone":
             brain.knowledge, brain.web, brain.supervision, brain.gates = None, None, None, False
+            brain.requirement_checks = False
         elif condition == "B_coding_brain":
             brain.supervision = None
         if task["mode"] == "orchestration" and condition == "A_free_alone":
@@ -231,7 +233,9 @@ class Gauntlet:
         stored = {**brain.store.get(item["id"]), **({"error": item["error"]} if "error" in item else {})}
         workspace = brain.workspace(item["id"])
         ledger = getattr(brain.supervision, "ledger", None)
+        from .accounting import summarize as summarize_models
         return {"final": workspace if workspace.exists() else target, "status": stored["status"],
+                "models": summarize_models(stored.get("inference_log", [])),
                 "metrics": {**stored.get("metrics", {}), "repair_attempts": len(stored.get("failure_log", []))},
                 "premium_calls": ledger.count(item["id"], ok=1) if ledger else 0,
                 "premium_attempts": ledger.count(item["id"]) if ledger else 0,
@@ -275,9 +279,12 @@ class Gauntlet:
                     metrics[key] = metrics.get(key, 0) + value
         ledger = getattr(brain.supervision, "ledger", None)
         final = Path(group["integration_workspace"]) if group.get("integration_workspace") else None
-        events = [{"kind": event["kind"], "detail": event["detail"][:300]}
+        events = [{"kind": event["kind"], "detail": event["detail"][:300], "source": item["id"][:8]}
                   for item in [group, *children] for event in item.get("events", [])]
+        from .accounting import summarize as summarize_models
+        entries = [entry for item in [group, *children] for entry in item.get("inference_log", [])]
         return {"final": final if final and final.exists() else brain.repository(name), "status": group["status"],
+                "models": summarize_models(entries),
                 "metrics": metrics, "events": events, "error": error,
                 "premium_calls": sum(ledger.count(item["id"], ok=1) for item in [group, *children]) if ledger else 0,
                 "premium_attempts": sum(ledger.count(item["id"]) for item in [group, *children]) if ledger else 0}
@@ -340,7 +347,8 @@ class Gauntlet:
                 "outside_access": outside, "error": error}
 
     async def run_one(self, condition: str, task: dict) -> dict:
-        base = {"task": task["id"], "category": task["category"], "condition": condition}
+        mode = "task" if condition in ("A_free_alone", "claude_code", "codex") else task.get("mode", "task")
+        base = {"task": task["id"], "category": task["category"], "condition": condition, "mode": mode}
         if condition in ("claude_code", "codex"):
             available, problems = runtime_capabilities(condition)
             problems = problems or self.isolation_problems()
@@ -382,6 +390,7 @@ class Gauntlet:
                 "validation_failures": metrics.get("validation_failures", 0),
                 "repair_attempts": metrics.get("repair_attempts", 0),
                 "error": result.get("error"), "hidden_output": hidden["output"][-600:],
+                "models": result.get("models"),
                 "trajectory": result["events"]}
 
     async def run(self, conditions: list[str], tasks: list[dict], repeat: int = 1,
@@ -406,6 +415,9 @@ class Gauntlet:
                         store.started(key)
                     record = await self.run_one(condition, task)
                     record.update({"iteration": iteration, "fingerprint": fingerprint})
+                    record["failure_cause"] = classify_failure(record)
+                    if downstream_effects(record):
+                        record["downstream_effects"] = downstream_effects(record)
                     runs.append(record)
                     done.add(key)
                     if store:
@@ -503,6 +515,41 @@ TIMEOUT_MARKERS = ("ReadTimeout", "TimeoutError", "timed out", "Timeout", "budge
 INFRASTRUCTURE_MARKERS = ("ConnectError", "No sandbox image", "docker", "unavailable", "not installed",
                           "No brain is reachable", "exit code 125", "exit code 126", "exit code 127")
 ORCHESTRATION_EVENTS = {"integration_conflict", "dependency_blocked", "queue_failed", "interrupted"}
+# Terminal evidence that the free model itself failed. When present, orchestration events such as
+# dependency_blocked are downstream effects of that failure, not its cause.
+MODEL_FAILURE_EVENTS = {"proposal_failed", "attempts_exhausted"}
+PROPOSAL_REJECTIONS = {"validation_failed", "implementer_invalid"}
+NEUTRAL_EVENTS = {"knowledge_packet", "web_preflight", "memory_fallback", "upstream_check"}
+
+
+def model_failure_evidence(events: list[dict]) -> list[str]:
+    """Model failures that ended a task: an explicit proposal or attempt failure, or a task that
+    blocked right after its proposals were rejected (records made before proposal_failed existed)."""
+    found, previous = [], None
+    for event in events:
+        kind = event.get("kind")
+        if kind in MODEL_FAILURE_EVENTS:
+            found.append(kind)
+        elif kind == "blocked" and previous in PROPOSAL_REJECTIONS:
+            found.append(f"blocked after {previous}")
+        if kind not in NEUTRAL_EVENTS:
+            previous = kind
+    return found
+
+
+def run_mode(run: dict) -> str:
+    """orchestration or task; inferred from the trajectory for records made before mode was stored."""
+    if run.get("mode"):
+        return run["mode"]
+    return "orchestration" if any(event.get("kind") == "delegated" for event in run.get("trajectory") or []) \
+        else "task"
+
+
+def downstream_effects(run: dict) -> list[str]:
+    """Orchestration events that followed from a root-cause model failure."""
+    if classify_failure(run) != "model":
+        return []
+    return sorted({event.get("kind") for event in run.get("trajectory") or []} & ORCHESTRATION_EVENTS)
 
 
 def classify_failure(run: dict) -> str | None:
@@ -533,6 +580,8 @@ def classify_failure(run: dict) -> str | None:
         return "timeout"
     if test_infrastructure or any(marker in text for marker in INFRASTRUCTURE_MARKERS):
         return "infrastructure"
+    if model_failure_evidence(events):
+        return "model"  # the root cause; any orchestration events are downstream of it
     if kinds & ORCHESTRATION_EVENTS or run.get("agent_status") in {"attention_required", "integration_conflict"}:
         return "orchestration"
     return "model"
@@ -545,6 +594,7 @@ def summarize(runs: list[dict], conditions: list[str]) -> dict:
         attempted = [run for run in chosen if run["outcome"] not in {"unsupported", "misconfigured"}]
         passed = [run for run in attempted if run["outcome"] == "passed"]
         premium_passes = [run for run in passed if run.get("premium_calls")]
+        orchestrated = [run for run in attempted if run_mode(run) == "orchestration"]
         summary[condition] = {
             "attempted": len(attempted),
             "unsupported": sum(run["outcome"] == "unsupported" for run in chosen),
@@ -555,6 +605,13 @@ def summarize(runs: list[dict], conditions: list[str]) -> dict:
             "premium_calls_per_success": round(sum(run.get("premium_calls", 0) for run in attempted)
                                                / len(passed), 2) if passed else None,
             "premium_attempts": sum(run.get("premium_attempts", 0) for run in attempted),
+            # Two separate scores: did the pipeline carry the work to completion (orchestration),
+            # and is the result correct under the hidden acceptance tests (engineering)?
+            "orchestration_success": f"{sum(run.get('agent_completed', False) for run in orchestrated)}"
+                                     f"/{len(orchestrated)}",
+            "agent_completed": f"{sum(bool(run.get('agent_completed')) for run in attempted)}/{len(attempted)}",
+            "engineering_success": f"{len(passed)}/{len(attempted)}",
+            "downstream_orchestration_effects": sum(bool(downstream_effects(run)) for run in attempted),
             "completed_but_hidden_failed": sum(bool(run.get("agent_completed") and not run.get("hidden_tests_passed"))
                                                for run in attempted),
             "hidden_passed_but_not_completed": sum(bool(run.get("hidden_tests_passed") and not run.get("agent_completed"))
@@ -605,11 +662,16 @@ def markdown_report(saved: dict) -> str:
     summary = saved["summary"]["conditions"]
     lines = ["| Metric | " + " | ".join(conditions) + " |", "| --- |" + " --- |" * len(conditions)]
     rows = [("Passed / attempted", lambda c: f"{c['passed']}/{c['attempted']}"),
+            ("Engineering success (hidden tests)", lambda c: c.get("engineering_success", "-")),
+            ("Orchestration success (orchestration tasks)", lambda c: c.get("orchestration_success", "-")),
+            ("Agent completed its pipeline", lambda c: c.get("agent_completed", "-")),
             ("Pass rate (95% CI)", lambda c: f"{c['pass_rate']} {c['pass_rate_95ci']}"),
             ("Pass rate excl. timeouts/infra", lambda c: str(c["pass_rate_excluding_timeouts_and_infrastructure"])),
             ("Unsupported / misconfigured", lambda c: f"{c['unsupported']} / {c['misconfigured']}"),
             ("Failures: model", lambda c: str(c["failure_causes"]["model"])),
             ("Failures: orchestration", lambda c: str(c["failure_causes"]["orchestration"])),
+            ("Model failures with downstream orchestration effects",
+             lambda c: str(c.get("downstream_orchestration_effects", 0))),
             ("Failures: infrastructure", lambda c: str(c["failure_causes"]["infrastructure"])),
             ("Failures: timeout", lambda c: str(c["failure_causes"]["timeout"])),
             ("Failures: safety", lambda c: str(c["failure_causes"]["safety"])),
@@ -729,6 +791,9 @@ def main(argv=None):
         saved = json.loads(Path(args.results).read_text(encoding="utf-8"))
         for run in saved["runs"]:
             run["failure_cause"] = classify_failure(run)
+            run["mode"] = run_mode(run)
+            if downstream_effects(run):
+                run["downstream_effects"] = downstream_effects(run)
         saved["summary"] = summarize(saved["runs"], saved["conditions"])
         text = json.dumps(saved, indent=2, default=str)
         if args.output:

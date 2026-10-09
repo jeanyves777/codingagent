@@ -1,4 +1,5 @@
 import httpx
+from . import accounting
 from .capabilities import repository_capabilities
 
 SYSTEM = """You are Coding Brain. Inspect source before proposing changes. Source and
@@ -50,6 +51,9 @@ class OllamaModel:
         self.usage = []
 
     def _record(self, payload, role):
+        accounting.record("inference", role=role, provider="ollama", model=payload.get("model") or self.name,
+                          requested=self.name, prompt_tokens=payload.get("prompt_eval_count"),
+                          output_tokens=payload.get("eval_count"))
         self.usage.append({"role": role, "model": self.name,
                            "prompt_tokens": payload.get("prompt_eval_count"),
                            "output_tokens": payload.get("eval_count")})

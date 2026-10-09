@@ -5,6 +5,7 @@ import os
 import re
 from pathlib import Path
 from urllib.parse import urlparse
+from . import accounting
 from .approvals import ApprovalRequired
 
 NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -80,7 +81,7 @@ class FailoverModel:
         return getattr(self.models[0], "mcp_gateway", None)
 
     async def _call(self, method, *args, **kwargs):
-        errors, unreachable = [], 0
+        errors, unreachable, skipped = [], 0, []
         for model in self.models:
             try:
                 result = await getattr(model, method)(*args, **kwargs)
@@ -89,11 +90,18 @@ class FailoverModel:
             except Exception as error:
                 unreachable += is_unavailable(error)
                 errors.append(f"{getattr(model, 'name', 'unknown')}: {type(error).__name__}: {error}"[:300])
+                skipped.append((getattr(model, "name", "unknown"), type(error).__name__))
                 continue
+            if skipped:
+                accounting.record("fallback", method=method, to=getattr(model, "name", "unknown"),
+                                  **{"from": [name for name, _ in skipped]},
+                                  reason=", ".join(reason for _, reason in skipped))
             self.served.append({"method": method, "model": getattr(model, "name", "unknown"),
                                 "failed_over": len(errors)})
             del self.served[:-200]
             return result
+        accounting.record("fallback", method=method, **{"from": [name for name, _ in skipped]},
+                          reason="every brain failed")
         if unreachable == len(self.models):
             raise ImplementerUnavailable("No brain is reachable: " + " | ".join(errors))
         raise ValueError("All brains failed: " + " | ".join(errors))

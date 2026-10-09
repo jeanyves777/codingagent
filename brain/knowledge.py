@@ -178,11 +178,16 @@ class KnowledgeLibrary:
         return [dict(zip(keys, row)) for row in rows]
 
     # ---- retrieval ----------------------------------------------------------------------------
-    def search(self, query: str, limit: int = 5, kinds: tuple = ("skill", "reference")) -> list[dict]:
+    def search(self, query: str, limit: int = 5, kinds: tuple = ("skill", "reference"),
+               metadata_only: bool = False) -> list[dict]:
+        """Full-text search. metadata_only restricts matching to names, titles and descriptions,
+        so a document is found for what it is about, not for words that occur in its body."""
         words = query_words(query)
         if not words:
             return []
         match = " OR ".join(f'"{word}"' for word in words)
+        if metadata_only:
+            match = "{name title description} : (" + match + ")"
         marks = ",".join("?" * len(kinds))
         with self.connect() as db:
             rows = db.execute(
@@ -205,9 +210,10 @@ class KnowledgeLibrary:
 
 
 INTENTS = [  # goal pattern -> query for the matching engineering practice
-    (r"\b(fix|bug|fail\w*|error|broken|crash\w*|regression)\b", "systematic debugging root cause"),
+    (r"\b(fix|bug|fail\w*|error|broken|crash\w*|regression|wrong|incorrect|report\w*|leak\w*)\b",
+     "systematic debugging root cause"),
     (r"\btests?\b", "test driven development"),
-    (r"\b(refactor\w*|clean ?up|simplif\w*)\b", "refactoring"),
+    (r"\b(refactor\w*|clean ?up|simplif\w*|renam\w*|deprecat\w*)\b", "refactoring"),
     (r"\b(add|implement|create|build|feature|endpoint|support)\b", "writing plans implementation"),
     (r"\breview\w*\b", "code review"),
     (r"\b(secur\w*|auth\w*|token|password|secret)\b", "security"),
@@ -223,7 +229,10 @@ class KnowledgeRouter:
     engineering rules, verified fixes, and explicit success criteria, within a character budget."""
 
     def __init__(self, library: KnowledgeLibrary | None = None, budget_chars: int = 6000,
-                 max_skills: int = 3):
+                 max_skills: int = 2, include_references: bool = False):
+        # Reference passages matched on generic words in the pilot; by default they stay out of
+        # the packet and remain available on demand through search_knowledge and read_skill.
+        self.include_references = include_references
         self.library, self.max_skills = library, max(0, min(8, max_skills))
         self.budget = max(1500, min(40_000, budget_chars))
 
@@ -249,16 +258,24 @@ class KnowledgeRouter:
             hits, seen = [], set()
             for query in intents(goal + " " + " ".join(
                     item.get("category", "") for item in (failure_log or [])[-2:])):
-                for hit in self.library.search(query, limit=2, kinds=("skill",))[:1]:
-                    if hit["id"] not in seen:
+                wanted = set(query_words(query))
+                for hit in self.library.search(query, limit=3, kinds=("skill",), metadata_only=True):
+                    about = set(query_words(f"{hit['name'].replace('-', ' ')} {hit['description']}"))
+                    if hit["id"] not in seen and wanted & about:
                         hits.append(hit)
                         seen.add(hit["id"])
-            hits += [hit for hit in self.library.search(goal, limit=1, kinds=("reference",))
-                     if hit["id"] not in seen]
+                        break
+            if self.include_references:
+                goal_terms = set(query_words(goal))
+                for hit in self.library.search(goal, limit=3, kinds=("reference",), metadata_only=True):
+                    title = set(query_words(f"{hit['name'].replace('-', ' ')} {hit['title'] or ''}"))
+                    if hit["id"] not in seen and len(goal_terms & title) >= 3:
+                        hits.append(hit)
+                        break
             for hit in hits:
                 if len(rules) >= self.max_skills or used > self.budget * 0.35:
                     break
-                text = excerpt(hit["body"], words, min(900, int(self.budget * 0.35) - used))
+                text = excerpt(hit["body"], words, min(700, int(self.budget * 0.35) - used))
                 if not text:
                     continue
                 rules.append({"source": hit["source"], "name": hit["name"], "title": hit["title"],

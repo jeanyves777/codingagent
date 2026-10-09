@@ -7,6 +7,7 @@ to a specific task. An unavailable free model never triggers escalation.
 import sqlite3
 import time
 from pathlib import Path
+from . import accounting
 from .subscriptions import SubscriptionError
 
 KINDS = ("plan", "diagnose", "review", "decompose")
@@ -102,8 +103,13 @@ class SupervisionPolicy:
                 result = await supervisor.ask(kind, payload, workspace)
             except (SubscriptionError, ValueError, OSError, TimeoutError) as error:
                 self.ledger.record(task["id"], supervisor.name, kind, started, False, str(error))
+                accounting.record("escalation", kind=kind, supervisor=supervisor.name,
+                                  model=getattr(supervisor, "model", None), ok=False,
+                                  reason=type(error).__name__)
                 errors.append(f"{supervisor.name}: {error}"[:300])
                 continue
             self.ledger.record(task["id"], supervisor.name, kind, started, True)
+            accounting.record("escalation", kind=kind, supervisor=supervisor.name,
+                              model=getattr(supervisor, "model", None), ok=True)
             return {"supervisor": supervisor.name, "kind": kind, "result": result}
         raise SubscriptionError("No supervisor could answer: " + " | ".join(errors))

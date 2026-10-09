@@ -151,3 +151,71 @@ def classify_test_failure(evidence: dict) -> dict:
             or re.match(r"^\S+\.py:\d+", line) or re.search(r"\d+ (passed|failed)", line)]
     summary = "\n".join(dict.fromkeys(keep))[-3000:] or output[-1500:]
     return {"category": category, "exit_code": code, "summary": summary}
+
+
+STATIC_ACTION = ("Define or import every name you use, and import only names that exist in the module "
+                 "you import from. Return the complete corrected files.")
+
+
+def _module_names(source: str) -> set[str] | None:
+    """Top-level names a module defines; None when it cannot be determined (star import, __getattr__)."""
+    import ast
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    names = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+            if node.name == "__getattr__":
+                return None
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                names.update(item.id for item in ast.walk(target) if isinstance(item, ast.Name))
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.name == "*":
+                    return None
+                names.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, (ast.If, ast.Try, ast.With, ast.For, ast.While)):
+            names.update(item.id for item in ast.walk(node) if isinstance(item, ast.Name)
+                         and isinstance(item.ctx, ast.Store))
+            names.update((alias.asname or alias.name).split(".")[0] for item in ast.walk(node)
+                         if isinstance(item, (ast.Import, ast.ImportFrom)) for alias in item.names)
+    return names
+
+
+def static_issues(path: str, content: str, read_module) -> list[Diagnostic]:
+    """Deterministic static analysis for Python: undefined names (pyflakes) and names imported
+    from repository modules that those modules do not define. read_module(dotted) returns the
+    module's final source (proposal or workspace) or None for modules outside the repository."""
+    import ast
+    from pyflakes import checker, messages
+    try:
+        tree = ast.parse(content, filename=path)
+    except SyntaxError:
+        return []
+    found = []
+    for message in checker.Checker(tree, filename=path).messages:
+        if isinstance(message, (messages.UndefinedName, messages.UndefinedLocal, messages.UndefinedExport)):
+            found.append(Diagnostic("Undefined name", path, message.lineno,
+                                    (message.message % message.message_args)[:200], STATIC_ACTION))
+    package = path.split("/")[:-1]
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or any(alias.name == "*" for alias in node.names):
+            continue
+        base = package[:len(package) - (node.level - 1)] if node.level > 1 else (package if node.level else [])
+        module = ".".join(base + ([node.module] if node.module else []))
+        source = read_module(module) if module else None
+        if source is None:
+            continue
+        defined = _module_names(source)
+        if defined is None:
+            continue
+        for alias in node.names:
+            if alias.name not in defined and read_module(f"{module}.{alias.name}") is None:
+                found.append(Diagnostic("Missing import", path, node.lineno,
+                                        f"{module} does not define {alias.name}", STATIC_ACTION))
+    return found

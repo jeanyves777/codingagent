@@ -9,9 +9,11 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from . import accounting
 from .approvals import ApprovalRequired
 from .capabilities import TASK_CAPABILITIES, TASK_QUERY
 from .brains import is_unavailable
+from .completion import accept_requirement_tests, requirement_goal, run_requirement_checks
 from .contracts import Assignment, Delegation, Proposal, validate_graph
 from .intelligence import build_index, relevant_context
 from .orchestration import OrchestrationMixin
@@ -22,7 +24,7 @@ from .publishing import PublishingMixin
 from .supervised import SupervisionMixin, guidance_text
 from .intelligence import unresolved_imports
 from .validators import (Diagnostic, ProposalInvalid, classify_test_failure, mechanical_repair,
-                         validate_change)
+                         static_issues, validate_change)
 from .telemetry import Telemetry
 from .workspaces import WorkspaceManager
 
@@ -33,7 +35,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
     def __init__(self, repositories: Path, data: Path, model, image, reviewer=None,
                  coordinator=None, memory=None, queue=None, approvals=None, telemetry=None, workers=3,
                  supervision=None, max_free_attempts=3, validation_retries=2, knowledge=None, web=None,
-                 gates=True, review_mode="advisory"):
+                 gates=True, review_mode="advisory", requirement_checks=False):
         self.repositories, self.data = repositories.resolve(), data.resolve()
         if self.data.is_relative_to(self.repositories) or self.repositories.is_relative_to(self.data):
             raise ValueError("Repository and data directories must be separate")
@@ -51,6 +53,9 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             raise ValueError("review_mode must be advisory or gate")
         # advisory: a free reviewer's objection is recorded, but authoritative offline tests still run.
         self.review_mode = review_mode
+        # Completion verification: goal-derived checks written before implementation (never committed).
+        # The factory enables it (BRAIN_REQUIREMENT_CHECKS, default true).
+        self.requirement_checks = requirement_checks
         self.queue = queue
         self.approvals = approvals
         self.telemetry = telemetry or Telemetry(self.data / "telemetry.sqlite3")
@@ -187,13 +192,120 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             self.store.save_index(task["repository"], index)
             self._check_cancelled(task)
             guidance = await self.premium_plan(task, workspace, relevant_context(index, task["goal"]))
-            await self.plan(task, workspace, task["goal"] + guidance)
+            await self.write_requirement_checks(task, workspace, relevant_context(index, task["goal"]))
+            self._check_cancelled(task)
+            await self._initial_proposal(task, workspace, task["goal"] + guidance)
             self._check_cancelled(task)
         except Exception:
             task["status"] = "blocked"
             self.event(task, "blocked", "Workspace, index, or model planning failed")
             raise
         return task
+
+    async def write_requirement_checks(self, task: dict, workspace: Path, context: dict):
+        """Before implementing, have the free model write checks for what the goal states. It sees the
+        goal and the visible repository only. Failing to produce usable checks never blocks the task."""
+        if not self.requirement_checks or task.get("requirement_tests") is not None:
+            return
+        started, before = time.monotonic(), self.usage_counters()
+        try:
+            with self.telemetry.span(task["trace_id"], "model.requirements", task["id"]), \
+                    accounting.collect(task):
+                raw = await self.model.propose(workspace, requirement_goal(task), [], context)
+        except Exception as error:
+            self.record_usage(task, started, before)
+            self.event(task, "requirement_checks_skipped", f"{type(error).__name__}: {str(error)[:300]}")
+            return
+        self.record_usage(task, started, before)
+        checks = accept_requirement_tests(task, raw)
+        if checks and (workspace / checks["path"]).exists():
+            checks = None  # never shadow an existing file
+        if not checks:
+            task["requirement_tests"] = {}
+            self.event(task, "requirement_checks_skipped", "The model did not return one usable test file")
+            return
+        task["requirement_tests"] = checks
+        self.event(task, "requirement_checks_written", f"{checks['tests']} check(s) in {checks['path']}")
+
+    async def _verify_completion(self, task: dict, workspace: Path) -> dict | None:
+        """Run the requirement checks once the visible tests pass. Returns a failure for the repair
+        loop, or None when the work is verified or the checks cannot be used."""
+        checks = task.get("requirement_tests")
+        if not checks:
+            return None
+        evidence = await asyncio.to_thread(
+            run_requirement_checks, workspace, checks, run_tests, self.image,
+            lambda: self.store.get(task["id"]).get("cancel_requested", False))
+        if evidence.get("cancelled"):
+            self._check_cancelled(task)
+        if evidence["passed"]:
+            task["completion_verified"] = True
+            self.event(task, "completion_verified", f"{checks['tests']} requirement check(s) passed")
+            return None
+        failure = classify_test_failure(evidence)
+        if failure["category"] != "test_failure":
+            # Broken generated checks (collection errors) or sandbox problems: discard, never block.
+            task["requirement_tests"] = {}
+            task["completion_verified"] = None
+            self.event(task, "requirement_checks_discarded", f"{failure['category']}: {failure['summary'][:500]}")
+            return None
+        self.event(task, "requirement_checks_failed", failure["summary"][:1000])
+        return {**failure, "category": "requirement"}
+
+    def _keep_visible_pass(self, task: dict, workspace: Path):
+        """Remember the files that passed the visible tests, so a requirement repair can never leave
+        the task worse than it was."""
+        if task.get("visible_pass"):
+            return
+        files = {}
+        for path in task.get("applied_paths", []):
+            target = safe_path(workspace, path)
+            files[path] = target.read_text(encoding="utf-8") if target.is_file() else None
+        task["visible_pass"] = {"files": files, "proposal": task["proposal"], "digest": task.get("digest"),
+                                "test_evidence": task["test_evidence"]}
+
+    def _restore_visible_pass(self, task: dict) -> bool:
+        saved = task.pop("visible_pass", None)
+        if not saved:
+            return False
+        workspace = self.workspace(task["id"])
+        for path in task.get("applied_paths", []):
+            target = safe_path(workspace, path)
+            content = saved["files"].get(path)
+            if content is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.write_text(content, encoding="utf-8")
+        task["applied_paths"] = [path for path, content in saved["files"].items() if content is not None]
+        task["proposal"], task["digest"] = saved["proposal"], saved["digest"]
+        task["test_evidence"] = saved["test_evidence"]
+        task["status"], task["completion_verified"] = "passed", False
+        self.event(task, "completion_unverified", "Requirement checks still fail after the repair budget; "
+                   "restored the version that passed the visible tests and reported it as unverified")
+        return True
+
+    async def _initial_proposal(self, task: dict, workspace: Path, goal: str):
+        """The first proposal. If it fails repeatedly (every focused correction was rejected, or
+        the output was not a valid proposal), that counts as repeated failure: the supervision
+        policy may diagnose it within the same budget as execution failures."""
+        try:
+            return await self.plan(task, workspace, goal)
+        except ValueError as error:
+            proposals = self.validation_retries + 1
+            task.setdefault("failure_log", []).append({
+                "attempt": 0, "category": "proposal", "summary": str(error)[:1000], "proposals": proposals})
+            self.event(task, "proposal_failed", f"{proposals} rejected proposal(s): {str(error)[:500]}")
+            if not self.supervision or proposals < self.supervision.escalate_after:
+                raise
+            consultation = await self.diagnose(task, workspace, {
+                "stage": "initial_proposal", "failures": proposals,
+                "last_feedback": str(error)[:6000], "failure_log": task["failure_log"][-2:]})
+            if not consultation:
+                raise
+            takeover = self.takeover_proposal(task, consultation)
+            if takeover:
+                return self.store_proposal(task, workspace, takeover, "supervisor")
+            return await self.plan(task, workspace, goal + guidance_text(consultation))
 
     async def plan(self, task: dict, workspace: Path, goal: str):
         """Ask the free implementer for a proposal; give it bounded, focused chances to correct
@@ -236,7 +348,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         started, before = time.monotonic(), self.usage_counters()
         token, query_token = TASK_CAPABILITIES.set(tools), TASK_QUERY.set(goal)
         try:
-            with self.telemetry.span(task["trace_id"], "model.propose", task["id"]):
+            with self.telemetry.span(task["trace_id"], "model.propose", task["id"]), accounting.collect(task):
                 parameters = inspect.signature(self.model.propose).parameters.values()
                 supports_task = ("task_id" in inspect.signature(self.model.propose).parameters or
                                  any(item.kind == inspect.Parameter.VAR_KEYWORD
@@ -419,7 +531,8 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
     async def review(self, task):
         started, before = time.monotonic(), self.usage_counters()
         try:
-            verdict = await self.reviewer.review(self.review_goal(task), task["diff"])
+            with accounting.collect(task):
+                verdict = await self.reviewer.review(self.review_goal(task), task["diff"])
         finally:
             self.record_usage(task, started, before)
         if not isinstance(verdict, dict) or type(verdict.get("approved")) is not bool:
@@ -451,6 +564,9 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                                     "Import only modules that exist in the repository, or add the module "
                                     "in this proposal.")
                          for line, reason in unresolved_imports(workspace, change.path, change.content, new_files)]
+                if not found:
+                    found = static_issues(change.path, change.content,
+                                          self._module_reader(workspace, proposal))
             diagnostics += found
         if proposal.changes and not effective:
             diagnostics = validate_change(proposal.changes[0].path, proposal.changes[0].content,
@@ -459,8 +575,30 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             raise ProposalInvalid(diagnostics, {change.path: change.content for change in effective})
         return Proposal(plan=proposal.plan, changes=effective), repaired
 
+    @staticmethod
+    def _module_reader(workspace: Path, proposal: Proposal):
+        """Final source of a repository module: the proposal's version if it changes it."""
+        proposed = {change.path: change.content for change in proposal.changes}
+
+        def read(dotted: str) -> str | None:
+            relative = dotted.replace(".", "/")
+            for candidate in (relative + ".py", relative + "/__init__.py"):
+                if candidate in proposed:
+                    return proposed[candidate]
+                try:
+                    target = safe_path(workspace, candidate)
+                except ValueError:
+                    return None
+                if target.is_file():
+                    return target.read_text(encoding="utf-8", errors="replace")
+            return None
+        return read
+
     def apply(self, task: dict):
+        applied = task.setdefault("applied_paths", [])
         for change in task["proposal"]["changes"]:
+            if change["path"] not in applied:
+                applied.append(change["path"])
             target = safe_path(self.workspace(task["id"]), change["path"])
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(change["content"], encoding="utf-8")
@@ -516,11 +654,22 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                     self._check_cancelled(task)
                 task["test_evidence"] = evidence
                 self.event(task, "test_finished", json.dumps(evidence))
+                requirement = None
                 if evidence["passed"]:
+                    requirement = await self._verify_completion(task, workspace)
+                if requirement:
+                    self._keep_visible_pass(task, workspace)
+                    task.setdefault("failure_log", []).append({"attempt": attempt, **requirement})
+                    feedback = ("\nThe visible tests pass, but checks written from the goal's stated "
+                                "requirements fail. Fix the implementation so it does what the goal says; "
+                                "if a check contradicts the goal, follow the goal. Check output (untrusted):\n"
+                                + requirement["summary"])
+                elif evidence["passed"]:
                     verdict = await self.final_review(task)
                     if verdict is None or verdict.get("approved"):
                         task["status"] = "passed"
                         task["review_disputed"] = disputed
+                        task.pop("visible_pass", None)
                         if disputed:
                             self.event(task, "review_overruled_by_tests",
                                        "Tests passed despite the free reviewer's objection; it is shown to "
@@ -581,6 +730,8 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                         return failures, limit
                     guidance = guidance_text(consultation)
             if failures >= limit and not guidance:
+                if self._restore_visible_pass(task):
+                    return None
                 task["status"] = "failed"
                 self.event(task, "attempts_exhausted", f"{failures} unsuccessful attempts")
                 return None

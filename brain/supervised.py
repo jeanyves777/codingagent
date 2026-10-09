@@ -1,6 +1,7 @@
 """Phase 2 supervision workflow: premium planning, diagnosis after repeated failures, takeover,
 and human-granted escalation. The free implementer always does the routine work."""
 import json
+from . import accounting
 from .contracts import Proposal
 from .subscriptions import SubscriptionError
 from .supervision import SupervisorBudgetExceeded
@@ -26,7 +27,7 @@ class SupervisionMixin:
         if not self.supervision:
             return None
         try:
-            with self.telemetry.span(task["trace_id"], "supervisor." + kind, task["id"]):
+            with self.telemetry.span(task["trace_id"], "supervisor." + kind, task["id"]), accounting.collect(task):
                 consultation = await self.supervision.consult(task, kind, payload, workspace)
         except SupervisorBudgetExceeded as error:
             self.event(task, "supervisor_budget_exhausted",

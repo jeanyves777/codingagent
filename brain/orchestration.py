@@ -1,6 +1,7 @@
 """Dependency-graph planning and event-safe orchestration transitions."""
 import asyncio
 import uuid
+from . import accounting
 from .contracts import Delegation, validate_graph
 
 
@@ -23,15 +24,17 @@ class OrchestrationMixin:
         group = self.store.get(group_id)
         group["status"] = "planning"
         self.event(group, "coordinator", "Creating dependency graph")
-        graph = None
+        graph, entries = None, []
         if self.supervision and self.supervision.plan_orchestrations:
             consultation = await self._consult(group, "decompose", {"goal": group["goal"]})
             graph = consultation["result"] if consultation else None
         if graph is None:
-            graph = await self.coordinator.decompose(group["goal"])
+            with accounting.collect(entries):
+                graph = await self.coordinator.decompose(group["goal"])
         delegation = Delegation.model_validate(graph)
         validate_graph(delegation)
         group = self.store.get(group_id)
+        group.setdefault("inference_log", []).extend(entries)
         if group.get("cancel_requested"):
             group["status"] = "cancelled"
             self.event(group, "cancelled", "Stopped after dependency planning")

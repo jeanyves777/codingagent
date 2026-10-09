@@ -2,6 +2,7 @@
 import sqlite3
 import time
 import inspect
+from . import accounting
 from pathlib import Path
 
 
@@ -63,6 +64,7 @@ class RoutedModel:
         route = {"role": role, "model": getattr(model, "name", "unknown"),
                  "score": score, "strategy": strategy, "task_id": task_id}
         self.routes.append(route)
+        accounting.record("route", role=role, model=route["model"], strategy=strategy)
         del self.routes[:-self.history_limit]
         return route
 

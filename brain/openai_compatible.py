@@ -2,6 +2,7 @@
 Jan, or free hosted tiers. Same contract as OllamaModel."""
 import json
 import httpx
+from . import accounting
 from .capabilities import repository_capabilities
 from .model import SYSTEM, COORDINATOR, REVIEWER, json_object
 
@@ -26,6 +27,9 @@ class OpenAICompatibleModel:
         response.raise_for_status()
         payload = response.json()
         usage = payload.get("usage") or {}
+        accounting.record("inference", role=role, provider="openai", model=payload.get("model") or self.name,
+                          requested=self.name, prompt_tokens=usage.get("prompt_tokens"),
+                          output_tokens=usage.get("completion_tokens"))
         self.usage.append({"role": role, "model": self.name,
                            "prompt_tokens": usage.get("prompt_tokens"),
                            "output_tokens": usage.get("completion_tokens")})

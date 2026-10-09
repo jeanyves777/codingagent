@@ -1,5 +1,6 @@
 """Claude (Anthropic Messages API) adapter with the same contract as OllamaModel."""
 import json
+from . import accounting
 from .capabilities import repository_capabilities
 from .model import COORDINATOR, REVIEWER, SYSTEM, json_object
 
@@ -40,6 +41,10 @@ class AnthropicModel:
 
     def _record(self, response, role):
         usage = getattr(response, "usage", None)
+        # With server-side fallbacks the serving model can differ from the requested one.
+        accounting.record("inference", role=role, provider="anthropic", model=getattr(response, "model", self.name),
+                          requested=self.name, prompt_tokens=getattr(usage, "input_tokens", None),
+                          output_tokens=getattr(usage, "output_tokens", None))
         self.usage.append({"role": role, "model": getattr(response, "model", self.name),
                            "prompt_tokens": getattr(usage, "input_tokens", None),
                            "output_tokens": getattr(usage, "output_tokens", None)})

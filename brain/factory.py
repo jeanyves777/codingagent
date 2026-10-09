@@ -30,7 +30,7 @@ def build_knowledge(data: Path):
     path = Path(os.environ.get("BRAIN_KNOWLEDGE_DB", data / "knowledge.sqlite3"))
     library = KnowledgeLibrary(path) if path.exists() else None
     return KnowledgeRouter(library, int(os.environ.get("BRAIN_KNOWLEDGE_BUDGET", "6000")),
-                           int(os.environ.get("BRAIN_KNOWLEDGE_SKILLS", "3")))
+                           int(os.environ.get("BRAIN_KNOWLEDGE_SKILLS", "2")))
 
 
 def single_provider_config() -> dict:
@@ -117,6 +117,7 @@ def build_brain_from_env(require_queue=False) -> Brain:
         web=build_web_intelligence(data),
         validation_retries=int(os.environ.get("BRAIN_VALIDATION_RETRIES", "2")),
         review_mode=os.environ.get("BRAIN_REVIEW_MODE", "advisory"),
+        requirement_checks=enabled("BRAIN_REQUIREMENT_CHECKS", True),
         max_free_attempts=int(os.environ.get("BRAIN_MAX_FREE_ATTEMPTS", "3")),
         workers=max(1, min(8, int(os.environ.get("BRAIN_WORKERS", "3"))))
     )

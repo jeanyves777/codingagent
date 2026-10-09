@@ -11,6 +11,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
+from . import accounting
 from .model import json_object
 
 API_KEY_VARIABLES = {
@@ -132,6 +133,12 @@ class CLISupervisor:
             if code:
                 raise SubscriptionError(f"{self.name} exited {code}: {(err or out)[-500:]}")
             result = read_result(out)
+        # The CLI reports the models that actually served the session (Claude Code: modelUsage).
+        served = getattr(read_result, "served", None) or {self.model or "cli-default": {}}
+        for model, usage in served.items():
+            accounting.record("inference", role=kind, provider=self.provider, model=model,
+                              requested=self.model, prompt_tokens=usage.get("inputTokens"),
+                              output_tokens=usage.get("outputTokens"))
         self.usage.append({"role": kind, "model": self.name, "seconds": round(time.time() - started, 1)})
         del self.usage[:-200]
         return result
@@ -169,6 +176,9 @@ class ClaudeCodeSupervisor(CLISupervisor):
 
         def read(out: str) -> dict:
             data = json_object(out)
+            if isinstance(data.get("modelUsage"), dict):
+                read.served = {str(name): value if isinstance(value, dict) else {}
+                               for name, value in data["modelUsage"].items()}
             if data.get("is_error"):
                 raise SubscriptionError(f"{self.name} reported an error: {str(data.get('result'))[:500]}")
             structured = data.get("structured_output")
