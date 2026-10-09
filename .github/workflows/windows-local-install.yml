@@ -28,6 +28,9 @@ jobs:
         include:
           - { os: windows-2022, python: "3.11", shell: powershell }
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}  # the shell under test; other steps pin pwsh
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -45,7 +48,6 @@ jobs:
           $version = (Select-String -Path pyproject.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
           python scripts/build_release.py --out dist/new --version "$version.post1" --constraints dist/old/constraints.txt
       - name: Install, recognize, update, refuse bad updates, roll back, uninstall
-        shell: ${{ matrix.shell }}
         run: ./installer/windows/verify.ps1 -Old dist/old -New dist/new
       - uses: actions/upload-artifact@v4
         if: always()
