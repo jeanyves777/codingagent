@@ -28,6 +28,16 @@ This is an agent-runtime foundation, not a trained model or a multi-tenant servi
 | Final integration | Draft GitHub PR from verified work, with your approval |
 | PR checks fail or reviewers ask for changes | Follow-up task for the free worker updates the same PR |
 
+## Post-pilot corrections (v0.8.1)
+
+After Round One of the Gauntlet pilot, six targeted corrections were made: goal-derived
+requirement checks to catch false successes (never committed, never from hidden tests),
+premium diagnosis after repeated proposal failures, tighter skill retrieval, static
+undefined-name and missing-import checks, root-cause failure classification with separate
+orchestration and engineering scores, and a per-task log of the model that served each
+inference, fallback and escalation. See `CHANGELOG.md`, `tests/test_corrections.py` and
+`benchmarks/verify_corrections.py`.
+
 ## What v0.8 adds
 
 v0.8 makes Coding Brain do more of the analysis, code discovery, knowledge selection
@@ -667,6 +677,7 @@ source replacements and diffs, so protect exports like the repository itself.
 | BRAIN_EMBEDDING_URL | Ollama URL for embeddings; defaults to BRAIN_MODEL_URL for ollama |
 | BRAIN_SUPERVISORS | Optional; claude and/or codex, using the signed-in CLIs |
 | BRAIN_MAX_FREE_ATTEMPTS | 3; free attempts before failing without a supervisor |
+| BRAIN_REQUIREMENT_CHECKS | true; goal-derived requirement checks run after the visible tests pass |
 | GITHUB_TOKEN | Needed for publish and pr-feedback |
 | BRAIN_ANTHROPIC_EFFORT | high; low, medium, high, xhigh, or max |
 | BRAIN_ANTHROPIC_FALLBACKS | true; server-side refusal fallbacks for Claude |
@@ -708,7 +719,7 @@ execute a fixed command. Dependency installation does not occur during a task.
 
 ## Validation
 
-The release passed 106 automated tests covering path and data restrictions,
+The release passed 137 automated tests covering path and data restrictions,
 Tree-sitter Python and TypeScript indexing, graph cycle rejection, proposal
 approval, memory gating, worker limits, repository isolation, real worktree
 commits, dependency inheritance, downstream blocking, integration conflicts,
@@ -725,7 +736,9 @@ deterministic validation and bounded correction, mechanical repair, failure
 classification, knowledge import with license checks, packet budgets, task tools,
 failing-tool handling, MCP tool selection, structural search, and the comparison
 harness, supervised sandbox cancellation and timeout, call-graph extraction, and
-commit-pinning workspace cleanup.
+commit-pinning workspace cleanup, and the six post-pilot corrections (requirement
+checks, proposal-failure escalation, retrieval filtering, static checks, root-cause
+classification, and model-level accounting).
 
 Tests use a deterministic fake model and substitute the Docker invocation.
 Model responses from every provider are substituted in tests. An actual model,

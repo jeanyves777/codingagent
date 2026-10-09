@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.8.1 (post-pilot corrections)
+
+Six corrections authorized after Round One of the Gauntlet pilot, each with targeted
+regression tests in `tests/test_corrections.py`. `benchmarks/verify_corrections.py`
+disables each correction in a copy and shows its tests fail without it.
+
+1. **Completion verification.** Before implementing, the free model writes pytest
+   requirement checks from the goal and the visible repository only (never hidden
+   tests). After the visible tests pass, the checks run in a throwaway copy of the
+   workspace; failures feed the repair loop within the normal failure budget and can
+   trigger premium diagnosis. The checks are never committed. Broken checks are
+   discarded. If they still fail when the budget is spent, the version that passed
+   the visible tests is restored and reported as `completion_verified: false`.
+   `BRAIN_REQUIREMENT_CHECKS` (default true); off for Gauntlet condition A.
+2. **Escalation on proposal failures.** When every focused correction of the first
+   proposal is rejected, the supervision policy may diagnose it, within the same
+   per-task budget and ledger as test-failure escalation.
+3. **Relevant knowledge retrieval.** Skills are matched on name and description, must
+   share a term with the intent, and only one is taken per intent; reference passages
+   stay out of the packet (available through `search_knowledge`/`read_skill`).
+   Excerpts are capped at 700 characters; the default skill count is 2.
+4. **Static analysis.** Proposed Python is checked with pyflakes for undefined names,
+   and names imported from repository modules must exist there (the proposal's
+   version of a module counts).
+5. **Failure classification.** An upstream model failure (rejected proposals, spent
+   attempts) is the root cause; later orchestration events are recorded as
+   downstream effects. Reports score orchestration success and engineering success
+   separately, and runs record their mode.
+6. **Model-level accounting.** Each task keeps an `inference_log`: the model that
+   actually served each inference (including server-side fallbacks and the models a
+   CLI supervisor reports), tokens, routes, failovers between brains, and every
+   escalation attempt. Gauntlet records include a per-run model summary.
+
 ## 0.7.0
 
 - Added Phase 1 subscription connectors for the signed-in Claude Code and Codex CLIs:
