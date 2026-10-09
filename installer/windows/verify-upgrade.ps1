@@ -20,6 +20,8 @@ param(
   [string]$Repository = 'jeanyves777/codingagent'
 )
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 may not offer TLS 1.2, which GitHub requires.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $New = (Resolve-Path $New).Path
 $work = Join-Path ([IO.Path]::GetTempPath()) ("cb-upgrade-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $home_ = Join-Path $work 'CodingBrain'
@@ -58,7 +60,10 @@ try {
   $base = "https://github.com/$Repository/releases/download/$Published"
   $oldVersion = $Published.TrimStart('v')
   foreach ($name in @('SHA256SUMS', 'release.json', 'constraints.txt', 'install.ps1', 'uninstall.ps1', "coding_brain-$oldVersion-py3-none-any.whl")) {
-    Invoke-WebRequest -UseBasicParsing -Uri "$base/$name" -OutFile (Join-Path $published $name)
+    foreach ($attempt in 1..4) {
+      try { Invoke-WebRequest -UseBasicParsing -Uri "$base/$name" -OutFile (Join-Path $published $name); break }
+      catch { if ($attempt -eq 4) { throw }; Start-Sleep ([math]::Pow(2, $attempt)) }
+    }
   }
   $sumsOk = $true
   foreach ($line in Get-Content (Join-Path $published 'SHA256SUMS')) {
