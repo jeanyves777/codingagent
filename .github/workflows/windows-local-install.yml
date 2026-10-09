@@ -67,8 +67,18 @@ jobs:
           python-version: "3.12"
       - name: Build the sandbox images
         run: |
-          docker build -t coding-brain-sandbox:0.1 -f brain/local/assets/Dockerfile.sandbox brain/local/assets
-          docker build -t coding-brain-node-sandbox:0.1 -f brain/local/assets/Dockerfile.sandbox.node brain/local/assets
+          # Base images from Docker Hub's Google mirror, with retries: Docker Hub's token service
+          # intermittently times out on hosted runners.
+          for base in $(grep -h '^FROM' brain/local/assets/Dockerfile.sandbox brain/local/assets/Dockerfile.sandbox.node | awk '{print $2}' | sort -u); do
+            for attempt in 1 2 3 4; do
+              if docker pull "mirror.gcr.io/library/$base" && docker tag "mirror.gcr.io/library/$base" "$base"; then break; fi
+              if docker pull "$base"; then break; fi
+              [ "$attempt" = 4 ] && exit 1
+              sleep $((2 ** attempt))
+            done
+          done
+          docker build --pull=false -t coding-brain-sandbox:0.1 -f brain/local/assets/Dockerfile.sandbox brain/local/assets
+          docker build --pull=false -t coding-brain-node-sandbox:0.1 -f brain/local/assets/Dockerfile.sandbox.node brain/local/assets
       - name: Local installation tests with the real sandbox
         env:
           CODINGBRAIN_TEST_DOCKER: "1"
