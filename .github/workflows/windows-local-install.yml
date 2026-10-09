@@ -75,6 +75,7 @@ jobs:
     timeout-minutes: 60
     env:
       CODINGBRAIN_TEST_VISION_MODEL: qwen2.5vl:3b
+      CODINGBRAIN_TEST_CODING_MODEL: qwen2.5-coder:7b
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -91,6 +92,7 @@ jobs:
           (ollama serve > ollama.log 2>&1 &)
           sleep 5
           ollama pull "$CODINGBRAIN_TEST_VISION_MODEL"
+          ollama pull "$CODINGBRAIN_TEST_CODING_MODEL"
           curl -s http://localhost:11434/api/show -d "{\"model\": \"$CODINGBRAIN_TEST_VISION_MODEL\"}" | python -c "import json, sys; print('capabilities:', json.load(sys.stdin).get('capabilities'))"
       - name: Full test suite with real engines
         run: python -m pytest -q -p no:cacheprovider -rs -s tests 2>&1 | tee engines-test.log

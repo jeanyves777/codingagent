@@ -664,3 +664,104 @@ def test_cli_attach_preview_reports_and_refuses(tmp_path, files):
                              capture_output=True, text=True, env=env, cwd=str(project))
     assert refused.returncode == 1 and "programs are never accepted" in refused.stdout
     assert not any((tmp_path / "home").rglob("original*"))  # a preview keeps no copies
+
+
+# Acceptance: a controlled UI defect found, repaired and re-verified in a real browser -----------
+
+BROKEN_PAGE = ('<!doctype html><html lang="en"><head><title>Pricing</title>'
+               '<meta name="viewport" content="width=device-width, initial-scale=1">'
+               "<style>body{margin:0;font-family:sans-serif}.plans{display:flex;width:1100px}"
+               ".plan{flex:1;padding:24px;border:1px solid #444}</style></head><body><h1>Pricing</h1>"
+               '<div class="plans"><div class="plan">Free</div><div class="plan">Pro</div>'
+               '<div class="plan">Team</div></div></body></html>')
+FIXED_PAGE = BROKEN_PAGE.replace(".plans{display:flex;width:1100px}",
+                                 ".plans{display:flex;flex-wrap:wrap;max-width:100%}")
+
+
+def site_repository(tmp_path):
+    from tests.test_brain import git
+    repository = tmp_path / "repos" / "site"
+    repository.mkdir(parents=True)
+    (repository / "index.html").write_text(BROKEN_PAGE)
+    (repository / "test_site.py").write_text("def test_ok():\n    assert True\n")
+    git(repository, "init")
+    git(repository, "config", "user.name", "Test")
+    git(repository, "config", "user.email", "test@example.com")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "initial")
+    return repository
+
+
+class FrontendModel:
+    """Scripted implementer: the first proposal misses the defect; it repairs only when visual
+    verification feedback names it. Detection, feedback and re-verification are real."""
+
+    def __init__(self):
+        self.goals = []
+
+    async def propose(self, root, goal, memories, repository_context=None, **kwargs):
+        self.goals.append(goal)
+        if "horizontal_overflow" in goal and "index.html" in goal:
+            content = FIXED_PAGE
+        else:
+            content = BROKEN_PAGE.replace("<h1>Pricing</h1>", "<h1>Pricing plans</h1>")
+        return json.dumps({"plan": "p", "changes": [{"path": "index.html", "content": content}]})
+
+    async def review(self, goal, diff):
+        return {"approved": True, "reason": "ok"}
+
+
+def real_visual_brain(tmp_path, monkeypatch, model):
+    repository = site_repository(tmp_path)
+    brain = Brain(repository.parent, tmp_path / "data", model, "img")
+    brain.visual_verifier = lambda task: VisualVerifier([], task["goal"], settings={"viewports": ["mobile", "desktop"]}) \
+        if task.get("visual") else None
+    monkeypatch.setattr("brain.service.run_tests", lambda *a, **k: {"passed": True, "exit_code": 0, "output": "1 passed"})
+    return brain
+
+
+@needs_browser
+def test_controlled_ui_defect_is_found_repaired_and_verified_in_a_real_browser(tmp_path, monkeypatch):
+    model = FrontendModel()
+    brain = real_visual_brain(tmp_path, monkeypatch, model)
+
+    async def flow():
+        task = brain.submit("site", "Make the pricing page fit on phones", launch=False,
+                            visual={"enabled": True, "max_repairs": 2, "viewports": ["mobile", "desktop"]})
+        task = await brain.create(task)
+        return await brain.execute(task["id"], task["digest"])
+    task = asyncio.run(flow())
+    log = task["visual_log"]
+    assert [entry["status"] for entry in log] == ["defects", "passed"], log
+    assert task["status"] == "passed" and task["visual_repairs"] == 1
+    feedback_goal = model.goals[-1]
+    assert "[mobile] horizontal_overflow" in feedback_goal and "Likely responsible files: index.html" in feedback_goal
+    workspace = brain.workspace(task["id"])
+    assert "max-width:100%" in (workspace / "index.html").read_text()
+    shots = task["visual_verification"]["screenshots"]
+    assert len(shots) == 2 and all(Path(path).is_file() for path in shots)
+
+
+REAL_CODER = os.environ.get("CODINGBRAIN_TEST_CODING_MODEL")
+
+
+@needs_browser
+@pytest.mark.skipif(not REAL_CODER, reason="set CODINGBRAIN_TEST_CODING_MODEL to a pulled Ollama coding model to run "
+                    "the real-model repair test")
+def test_real_coding_model_repairs_a_ui_defect_within_the_visual_budget(tmp_path, monkeypatch):
+    from brain.model import OllamaModel
+    model = OllamaModel(OLLAMA, REAL_CODER, max_tool_rounds=3, max_output_tokens=2048)
+    brain = real_visual_brain(tmp_path, monkeypatch, model)
+
+    async def flow():
+        task = brain.submit("site", "index.html overflows horizontally on phones (390px wide): the .plans row is "
+                            "1100px wide. Make it fit the screen width, wrapping the plan cards, without "
+                            "changing their text.", launch=False,
+                            visual={"enabled": True, "max_repairs": 2, "viewports": ["mobile", "desktop"]})
+        task = await brain.create(task)
+        return await brain.execute(task["id"], task["digest"])
+    task = asyncio.run(flow())
+    print("REAL REPAIR", REAL_CODER, json.dumps(task.get("visual_log")), task["status"])
+    assert task["status"] == "passed"
+    assert task["visual_log"][-1]["status"] == "passed", task["visual_log"]
+    assert task["visual_repairs"] <= 2
