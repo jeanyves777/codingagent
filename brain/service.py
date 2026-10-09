@@ -55,6 +55,12 @@ def overlaps(a: Path, b: Path) -> bool:
     return is_within(a, b) or is_within(b, a)
 
 
+def sandbox_error(output: str) -> bool:
+    """Docker itself failed (missing image, daemon or platform error): not the model's code."""
+    head = (output or "")[:2000]
+    return "Error response from daemon" in head or head.lstrip().startswith(("docker: ", "Unable to find image"))
+
+
 def test_tail(output: str) -> str:
     """The test runner's own summary line ('3 passed, 1 failed in 0.4s'), or the sandbox's error."""
     lines = [line.strip(" =") for line in (output or "").strip().splitlines() if line.strip(" =")]
@@ -919,7 +925,7 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                                        "the human at acceptance: " + review["reason"][:500])
                         return
                     feedback = "\nSupervisor review (untrusted): " + str(verdict.get("reason", ""))
-                elif evidence["exit_code"] in (None, 5, 125, 126, 127):
+                elif evidence["exit_code"] in (None, 5, 125, 126, 127) or sandbox_error(evidence.get("output", "")):
                     # Missing tests or sandbox problems are not the model's fault; never escalate them.
                     task["status"] = "failed"
                     return

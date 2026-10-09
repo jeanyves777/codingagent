@@ -476,3 +476,20 @@ def test_real_ollama_request_is_journaled_with_heartbeats(tmp_path, monkeypatch)
     assert inference and all(event["model"] for event in inference)
     assert any("in," in event["summary"] or " in" in event["summary"] for event in inference)
     assert ("proposal", "COMPLETED") in kinds(events, "stage") or ("proposal", "FAILED") in kinds(events, "stage")
+
+
+def test_docker_errors_are_sandbox_problems_not_repairs(tmp_path, monkeypatch):
+    def broken_sandbox(workspace, image, **kwargs):
+        return {"passed": False, "exit_code": 1, "profile": "python",
+                "output": "docker: Error response from daemon: No such image: coding-brain-sandbox:0.1"}
+    monkeypatch.setattr("brain.service.run_tests", broken_sandbox)
+    model = ObservingModel([None])
+    brain = make_brain(tmp_path, model)
+    model.holder[0] = brain
+
+    async def flow():
+        task = await brain.create(brain.submit("demo", "Set x to 2", launch=False))
+        return await brain.execute(task["id"], task["digest"])
+    task = asyncio.run(flow())
+    assert task["status"] == "failed" and not task.get("failure_log")  # no repair spent on a Docker error
+    assert not [event for event in brain.telemetry.journal(limit=1000) if event["phase"] == "repair"]
