@@ -112,6 +112,52 @@ def normalize(findings: dict, schema: dict) -> dict:
     return clean
 
 
+def _key(text) -> str:
+    return " ".join(str(text or "").lower().split())
+
+
+COLOR_WORDS = ("red", "green", "blue", "yellow", "orange", "purple", "pink", "black", "white", "gray", "grey", "brown")
+
+
+def compare_descriptions(expected: dict, observed: dict) -> dict:
+    """Differences between two structured descriptions: text and labelled elements that are
+    missing or new, and elements whose appearance changed (a different color is major)."""
+    differences, matches = [], []
+    text_a = {_key(item): item for item in expected.get("visible_text", []) if _key(item)}
+    text_b = {_key(item): item for item in observed.get("visible_text", []) if _key(item)}
+    for key in text_a:
+        if key in text_b:
+            matches.append(f"text '{text_a[key]}'")
+        else:
+            differences.append({"area": "text", "expected": text_a[key], "actual": "missing", "severity": "major"})
+    for key in text_b:
+        if key not in text_a:
+            differences.append({"area": "text", "expected": "absent", "actual": text_b[key], "severity": "minor"})
+    elements_a = {_key(item.get("label")): item for item in expected.get("ui_elements", []) if _key(item.get("label"))}
+    elements_b = {_key(item.get("label")): item for item in observed.get("ui_elements", []) if _key(item.get("label"))}
+    for key, item in elements_a.items():
+        other = elements_b.get(key)
+        if other is None:
+            differences.append({"area": f"{item.get('type', 'element')} '{item.get('label')}'",
+                                "expected": item.get("appearance") or "present", "actual": "missing", "severity": "major"})
+            continue
+        colors_a = {word for word in COLOR_WORDS if word in _key(item.get("appearance"))}
+        colors_b = {word for word in COLOR_WORDS if word in _key(other.get("appearance"))}
+        if colors_a and colors_b and colors_a != colors_b:
+            differences.append({"area": f"{item.get('type', 'element')} '{item.get('label')}'",
+                                "expected": item.get("appearance"), "actual": other.get("appearance"), "severity": "major"})
+        else:
+            matches.append(f"{item.get('type', 'element')} '{item.get('label')}'")
+    for key, item in elements_b.items():
+        if key not in elements_a:
+            differences.append({"area": f"{item.get('type', 'element')} '{item.get('label')}'", "expected": "absent",
+                                "actual": item.get("appearance") or "present", "severity": "minor"})
+    overall = "major_differences" if any(item["severity"] == "major" for item in differences) else \
+        "minor_differences" if differences else "matches"
+    return {"overall": overall, "differences": differences[:40], "matches": matches[:40],
+            "uncertain": list(expected.get("uncertain", []))[:3] + list(observed.get("uncertain", []))[:3]}
+
+
 def consistent(findings: dict) -> dict:
     """Small models contradict themselves: listing 'expected red, actual red' as a difference, or
     a verdict of 'matches' next to major differences. Non-differences are dropped and the verdict
@@ -149,8 +195,20 @@ class VisionProvider:
         return await self._run("vision_describe", DESCRIBE.format(goal=goal[:1500]), [image], DESCRIBE_SCHEMA, loc)
 
     async def compare(self, reference: Path, actual: Path, goal: str, viewport: str = "desktop") -> dict:
-        result = await self._run("vision_compare", COMPARE.format(goal=goal[:1500], viewport=viewport),
-                                 [reference, actual], COMPARE_SCHEMA, viewport)
+        """Ask for the differences between two images. Small models often cannot answer a two-image
+        question in the requested structure; then each image is described on its own (which they do
+        reliably) and the two descriptions are compared deterministically."""
+        try:
+            result = await self._run("vision_compare", COMPARE.format(goal=goal[:1500], viewport=viewport),
+                                     [reference, actual], COMPARE_SCHEMA, viewport)
+        except VisionOutputInvalid as invalid:
+            expected = await self.describe(reference, goal, "reference")
+            observed = await self.describe(actual, goal, viewport)
+            findings = compare_descriptions(expected["findings"], observed["findings"])
+            findings["uncertain"].append(f"the two-image comparison failed ({invalid}); the differences come from "
+                                         "two separate descriptions compared by Coding Brain")
+            result = {**observed, "role": "vision_compare", "images": 2, "fallback": "separate_descriptions",
+                      "findings": findings}
         result["findings"] = consistent(result["findings"])
         return result
 
