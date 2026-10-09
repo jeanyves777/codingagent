@@ -3,6 +3,7 @@
 Credentials are never stored here. Free hosted providers name an environment variable that holds
 their key (api_key_env); Claude and Codex are used only through their own signed-in CLIs.
 """
+import copy
 import json
 import os
 from pathlib import Path
@@ -29,7 +30,7 @@ DEFAULTS = {
 
 
 def _merge(base: dict, override: dict) -> dict:
-    merged = dict(base)
+    merged = copy.deepcopy(base)  # never share (and later mutate) the nested defaults
     for key, value in override.items():
         merged[key] = _merge(base[key], value) if isinstance(base.get(key), dict) and isinstance(value, dict) else value
     return merged

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.1
+
+Fix: projects directly in the home folder (for example `C:\Users\me\my-app`) failed with
+"Repository and data directories must be separate", because Coding Brain's data lives in
+`C:\Users\me\AppData\Local\CodingBrain`.
+
+- The safety boundary is now checked per project on resolved paths:
+  - a project may sit next to Coding Brain's data, but never overlap it;
+  - symbolic links, Windows junctions, different letter case and 8.3 short names are resolved
+    before comparing;
+  - the data directory can never be served as a project, and projects can never be inside it.
+- A Git repository without commits gets clear instructions instead of a Git error. Coding Brain
+  never commits your files for you.
+- Opening a folder that overlaps Coding Brain's own data is refused with an explanation.
+- Settings no longer share (and mutate) the built-in defaults.
+- CI runs a home-folder project end to end in the real Docker sandbox on Linux, and adds Windows
+  tests for junctions, case and short-name aliases.
+
 ## 0.9.0
 
 Local installation for Windows (and Linux/macOS): install once, use `codingbrain` in any project,

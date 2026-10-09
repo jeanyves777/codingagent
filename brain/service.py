@@ -30,6 +30,30 @@ from .telemetry import Telemetry
 from .workspaces import WorkspaceManager
 
 
+def is_junction(path: Path) -> bool:
+    """Windows directory junctions are links too, though not symlinks to Path.is_symlink()."""
+    check = getattr(path, "is_junction", None)
+    if check:
+        return check()
+    try:
+        import os
+        import stat
+        return bool(getattr(os.lstat(path), "st_reparse_tag", 0) == getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", -1))
+    except OSError:
+        return False
+
+
+def is_within(path: Path, root: Path) -> bool:
+    """Containment on resolved paths, case-insensitively where the platform is (Windows)."""
+    import os
+    path, root = os.path.normcase(str(Path(path).resolve())), os.path.normcase(str(Path(root).resolve()))
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def overlaps(a: Path, b: Path) -> bool:
+    return is_within(a, b) or is_within(b, a)
+
+
 class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
     ACTIVE = {"queued", "planning", "running", "testing", "cancellation_requested"}
 
@@ -38,7 +62,11 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                  supervision=None, max_free_attempts=3, validation_retries=2, knowledge=None, web=None,
                  gates=True, review_mode="advisory", requirement_checks=False):
         self.repositories, self.data = repositories.resolve(), data.resolve()
-        if self.data.is_relative_to(self.repositories) or self.repositories.is_relative_to(self.data):
+        # The data directory may sit below the repositories root (a project directly in the user's
+        # home folder, with data in AppData), but a served repository never overlaps it: that is
+        # checked per repository on resolved paths (repository()). The roots themselves must differ,
+        # and repositories are never inside the data directory.
+        if is_within(self.repositories, self.data):
             raise ValueError("Repository and data directories must be separate")
         self.store = Store(self.data / "brain.sqlite3")
         self.model, self.reviewer = model, reviewer or model
@@ -76,8 +104,13 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         if not name or Path(name).name != name or name.startswith("."):
             raise ValueError("Repository must be the name of a direct child directory")
         source = self.repositories / name
-        if source.is_symlink() or not source.is_dir():
+        if source.is_symlink() or is_junction(source) or not source.is_dir():
             raise ValueError("Repository unavailable")
+        resolved = source.resolve(strict=True)  # follows links, Windows short names and drive aliases
+        if not is_within(resolved, self.repositories) or resolved == self.repositories:
+            raise ValueError("Repository unavailable: it resolves outside the repositories directory")
+        if overlaps(resolved, self.data):
+            raise ValueError("Repository unavailable: it overlaps Coding Brain's data directory")
         return source
 
     def task_lock(self, task_id):

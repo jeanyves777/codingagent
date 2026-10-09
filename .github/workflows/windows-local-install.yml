@@ -55,9 +55,30 @@ jobs:
           name: verify-report-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.shell }}
           path: verify-report.json
 
+  sandbox:
+    # Windows runners cannot run Linux containers: the real Docker sandbox is exercised here, with a
+    # project placed directly in a home folder that also holds Coding Brain's data.
+    name: real Docker sandbox (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the sandbox images
+        run: |
+          docker build -t coding-brain-sandbox:0.1 -f brain/local/assets/Dockerfile.sandbox brain/local/assets
+          docker build -t coding-brain-node-sandbox:0.1 -f brain/local/assets/Dockerfile.sandbox.node brain/local/assets
+      - name: Local installation tests with the real sandbox
+        env:
+          CODINGBRAIN_TEST_DOCKER: "1"
+        run: |
+          python -m pip install --disable-pip-version-check -e ".[dev]"
+          python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_brain.py
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: verify
+    needs: [verify, sandbox]
     runs-on: windows-latest
     permissions:
       contents: write

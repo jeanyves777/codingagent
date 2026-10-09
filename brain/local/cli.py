@@ -84,6 +84,14 @@ class Context:
             raise SystemExit(f"{self.root} is outside the directories you allowed "
                              f"({', '.join(self.config['permissions']['allowed_roots'])}). "
                              "Change this with `codingbrain setup`.")
+        from ..service import overlaps
+        if overlaps(self.root, self.layout.home):
+            raise SystemExit(f"{self.root} overlaps Coding Brain's own data folder ({self.layout.home}). "
+                             "Open a project folder instead.")
+        if self.project["git"] and not self.project.get("head"):
+            raise SystemExit("This Git repository has no commits yet. Coding Brain works from your last commit "
+                             "and never commits your files for you. Commit them first:\n"
+                             "  git add -A\n  git commit -m \"Initial commit\"")
         if not settings.configured(self.config):
             raise SystemExit("Coding Brain is not configured yet. Run `codingbrain setup` first.")
 
