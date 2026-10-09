@@ -253,7 +253,9 @@ def test_incomplete_vision_output_is_rejected_not_completed_with_defaults(tmp_pa
     with pytest.raises(ValueError, match="incomplete"):
         asyncio.run(vision.compare(fx.ui_image(files / "a.png"), fx.ui_image(files / "b.png"), "match"))
     assert truncated.chats[0]["options"]["num_ctx"] >= 8192
-    assert len(truncated.chats) == 2 and "previous answer was not usable" in truncated.chats[1]["messages"][1]["content"]
+    # two comparison attempts (the second corrective), then the fallback's first description, which fails too
+    assert len(truncated.chats) == 4 and "previous answer was not usable" in truncated.chats[1]["messages"][1]["content"]
+    assert [len(chat["messages"][1]["images"]) for chat in truncated.chats] == [2, 2, 1, 1]
     image = ingest(str(fx.ui_image(files / "ui.png")), tmp_path / "work")
     analyzer = Analyzer(vision=OllamaVision("http://ollama", "qwen2.5vl:7b", client_factory=truncated.factory()))
     asyncio.run(analyzer.analyze([image], "fix the UI"))
@@ -827,3 +829,30 @@ def test_one_corrective_retry_recovers_a_bad_vision_reply(files):
     vision = OllamaVision("http://ollama", "qwen2.5vl:3b", client_factory=server.factory())
     result = asyncio.run(vision.compare(fx.ui_image(files / "a.png"), fx.ui_image(files / "b.png"), "match"))
     assert result["attempt"] == 2 and result["findings"]["differences"][0]["area"] == "button"
+
+
+def test_comparison_falls_back_to_separate_descriptions_when_a_small_model_cannot_answer(files):
+    replies = iter([
+        {"summary": "two screens"}, {"summary": "two screens"},  # the two-image question fails twice
+        {"summary": "design", "content_type": "ui_design", "visible_text": ["Dashboard", "Pay now"], "defects": [],
+         "uncertain": [], "ui_elements": [{"type": "button", "label": "Pay now", "appearance": "green, white text"}]},
+        {"summary": "app", "content_type": "app_screenshot", "visible_text": ["Dashboard", "Submit"], "defects": [],
+         "uncertain": [], "ui_elements": [{"type": "button", "label": "Submit", "appearance": "red, white text"}]},
+    ])
+
+    class Scripted(FakeOllama):
+        def handler(self, request):
+            if request.url.path == "/api/chat":
+                self.reply = next(replies)
+            return super().handler(request)
+    server = Scripted()
+    vision = OllamaVision("http://ollama", "qwen2.5vl:3b", client_factory=server.factory())
+    result = asyncio.run(vision.compare(fx.ui_image(files / "a.png"), fx.ui_image(files / "b.png"), "match"))
+    findings = result["findings"]
+    assert result["fallback"] == "separate_descriptions" and len(server.chats) == 4
+    assert [len(chat["messages"][1]["images"]) for chat in server.chats] == [2, 2, 1, 1]
+    assert findings["overall"] == "major_differences"
+    areas = {(item["area"], item["actual"]) for item in findings["differences"]}
+    assert ("text", "missing") in areas and ("button 'Pay now'", "missing") in areas
+    assert "text 'Dashboard'" in findings["matches"]
+    assert any("separate descriptions" in note for note in findings["uncertain"])
