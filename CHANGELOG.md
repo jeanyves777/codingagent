@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.9.0
+
+Local installation for Windows (and Linux/macOS): install once, use `codingbrain` in any project,
+update from verified GitHub releases.
+
+- `codingbrain` command (`brain.local`):
+  - **Commands:** interactive goals in the current project, plus `run`, `init`, `status`, `tasks`,
+    `resume`, `accept`, `doctor`, `setup`, `update`, `rollback` and `--version`.
+  - **Reuse:** it drives the existing service, so planning, orchestration, validation, sandboxed
+    tests, repair, budgeted supervision, memory and approvals are unchanged.
+  - **Branches:** accepted results become new `codingbrain/...` branches; the checked-out branch and
+    working files are never modified.
+- **Project recognition:** repository root, branch and status, languages, frameworks, dependency
+  managers, docs, and existing build and test commands. Read-only. Each project has its own memory
+  and sessions outside the project.
+- **Settings:** set with `codingbrain setup` and stored outside the application. Covers local models
+  (Ollama or OpenAI-compatible), Claude and Codex as actually signed in (API-key sign-ins refused),
+  budgets (with a daily limit shared across projects), approval mode, allowed folders and the
+  sandbox. No credentials are stored.
+- **Updates:**
+  - versions are installed side by side and downloads are checked against `SHA256SUMS`;
+  - updates are refused during an active session or task;
+  - the release's compatibility metadata is checked;
+  - state is backed up, then migrated, then health-checked;
+  - the launcher switches only on success, and a failure restores the backup;
+  - `rollback` (optionally with `--restore-state`);
+  - stable channel by default, with tagged pre-releases on the dev channel.
+- **Windows packaging:** `install.ps1` (checksum-verified, user scope, PATH) and `uninstall.ps1`
+  (keeps data unless `-RemoveData`; never touches projects).
+- **Release tooling:** `scripts/build_release.py` (wheel, Windows-resolved constraints,
+  `release.json`, `SHA256SUMS`), a Windows CI workflow that runs `installer/windows/verify.ps1`, and
+  tag-triggered publishing with build provenance.
+- **Migration from earlier versions:** source checkouts keep working as before. To use the local
+  CLI, install 0.9.0 with `install.ps1`; existing `brain-data` directories are not imported
+  automatically.
+
 ## 0.8.1 (post-pilot corrections)
 
 Six corrections authorized after Round One of the Gauntlet pilot, each with targeted

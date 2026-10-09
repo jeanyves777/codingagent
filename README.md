@@ -28,6 +28,12 @@ This is an agent-runtime foundation, not a trained model or a multi-tenant servi
 | Final integration | Draft GitHub PR from verified work, with your approval |
 | PR checks fail or reviewers ask for changes | Follow-up task for the free worker updates the same PR |
 
+## Install on your computer (v0.9)
+
+Install once and use `codingbrain` in any project; update with `codingbrain update`. Windows
+instructions: [docs/windows-install.md](docs/windows-install.md). Release process:
+[RELEASING.md](RELEASING.md).
+
 ## Post-pilot corrections (v0.8.1)
 
 After Round One of the Gauntlet pilot, six targeted corrections were made: goal-derived
