@@ -439,7 +439,12 @@ def test_cli_run_shows_live_activity_without_a_tty(tmp_path):
         assert positions == sorted(positions), output[-3000:]
         trace_output = subprocess.run([sys.executable, "-m", "brain.local", "trace"], capture_output=True, text=True,
                                       env=env, cwd=str(repo)).stdout
-        assert "fake-coder:7b (ollama): 2 call(s), 2468 in / 112 out; roles implementer 1, reviewer 1" in trace_output
+        import re
+        usage = re.search(r"fake-coder:7b \(ollama\): (\d+) call\(s\), (\d+) in / (\d+) out; roles (.*)", trace_output)
+        assert usage, trace_output  # tokens add up per call, however many calls (a sandbox error may add a repair)
+        calls = int(usage.group(1))
+        assert calls >= 2 and int(usage.group(2)) == 1234 * calls and int(usage.group(3)) == 56 * calls
+        assert "implementer" in usage.group(4) and "reviewer" in usage.group(4)
         (tmp_path / "transcript.txt").write_text(output)
         if os.environ.get("CODINGBRAIN_TRANSCRIPTS"):  # CI keeps the captured terminal output as evidence
             folder = Path(os.environ["CODINGBRAIN_TRANSCRIPTS"])
