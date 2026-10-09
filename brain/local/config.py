@@ -3,6 +3,7 @@
 Credentials are never stored here. Free hosted providers name an environment variable that holds
 their key (api_key_env); Claude and Codex are used only through their own signed-in CLIs.
 """
+import copy
 import json
 import os
 from pathlib import Path
@@ -25,11 +26,22 @@ DEFAULTS = {
     "permissions": {"allowed_roots": []},
     "update": {"channel": "stable"},
     "sandbox": {"python_image": "coding-brain-sandbox:0.1", "node_image": "coding-brain-node-sandbox:0.1"},
+    # Multimodal (0.11): a vision model is separate from the coding model. Empty url = models.url.
+    # premium: "off", "claude" or "codex"; even when set, each task needs --allow-premium-vision.
+    "vision": {"provider": "ollama", "url": "", "model": "", "supports_images": False, "api_key_env": "",
+               "premium": "off"},
+    "ocr": {"engine": "tesseract", "command": "", "languages": "eng"},
+    # retention of attachment copies: "task" (until the task is accepted or purged), "keep", "none".
+    "attachments": {"retention": "task", "allowed_roots": [], "limits": {}, "remember": True},
+    "visual": {"enabled": True, "viewports": ["desktop", "tablet", "mobile"], "max_repairs": 2,
+               "browser_channel": "", "browser_executable": "", "accessibility_blocking": ["critical"],
+               "pixel_threshold": 0.35},
+    "multimodal_budgets": {"max_ocr_images": 12, "max_vision_images": 6, "max_premium_vision_calls": 2},
 }
 
 
 def _merge(base: dict, override: dict) -> dict:
-    merged = dict(base)
+    merged = copy.deepcopy(base)  # never share (and later mutate) the nested defaults
     for key, value in override.items():
         merged[key] = _merge(base[key], value) if isinstance(base.get(key), dict) and isinstance(value, dict) else value
     return merged
@@ -101,3 +113,11 @@ def project_environment(layout: Layout, config: dict, project_root: Path, projec
 def permitted(config: dict, project_root: Path) -> bool:
     roots = [Path(root).expanduser().resolve() for root in config["permissions"].get("allowed_roots") or []]
     return not roots or any(project_root.resolve().is_relative_to(root) for root in roots)
+
+
+def vision_settings(config: dict) -> dict:
+    vision = dict(config["vision"])
+    if not vision.get("url"):
+        vision["url"] = config["models"]["url"] if vision.get("provider", "ollama") == config["models"]["provider"] \
+            else "http://localhost:11434"
+    return vision

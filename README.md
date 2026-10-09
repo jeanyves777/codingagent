@@ -34,6 +34,15 @@ Install once and use `codingbrain` in any project; update with `codingbrain upda
 instructions: [docs/windows-install.md](docs/windows-install.md). Release process:
 [RELEASING.md](RELEASING.md).
 
+## Images, screenshots and documents (v0.11)
+
+`codingbrain run "Recreate this interface" --attach C:\Designs\dashboard.png` reads screenshots,
+designs, diagrams, PDFs, Word and Excel files (OCR for scans, a separate vision model for
+images), plans and implements from them, then renders the result at desktop, tablet and mobile
+sizes, measures layout and accessibility, compares it with the design, and repairs what differs:
+[docs/multimodal.md](docs/multimodal.md). Cross-agent project memory (v0.10):
+[docs/project-memory.md](docs/project-memory.md).
+
 ## Post-pilot corrections (v0.8.1)
 
 After Round One of the Gauntlet pilot, six targeted corrections were made: goal-derived

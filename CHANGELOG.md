@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.11.0
+
+Images, screenshots and documents, plus a visual development loop (see docs/multimodal.md).
+
+- **Attachments:** `codingbrain run "goal" --attach FILE` (repeatable) accepts PNG, JPEG, WebP,
+  GIF (frame selection), PDF, DOCX, XLSX, CSV, text, Markdown, JSON, YAML, XML and source files.
+  - Formats are detected from content.
+  - Files are parsed in an isolated process with time, size, pixel and decompression limits.
+  - Links, secrets, programs, archives and legacy Office formats are refused.
+  - Provenance (origin, SHA-256, page, cell, paragraph, frame) is kept, and macros, scripts and
+    external links are never executed.
+- **OCR:** local Tesseract for screenshots and scanned pages, with word boxes and confidence.
+  Documents that contain real text are not OCRed.
+- **Vision:** a separate vision model (Ollama, e.g. qwen2.5vl), used only when Ollama reports
+  that it accepts images. OpenAI-compatible servers need an explicit `supports_images`
+  declaration. Premium vision through the Claude/Codex CLIs needs approval per task and counts
+  against the premium daily limit. Findings are structured and labelled as model judgments.
+- **Routing:** parsers, OCR and vision run only for tasks with attachments. The coding model and
+  the three-phase architecture are unchanged. The provider, model, time and tokens of every call
+  are logged.
+- **Visual development loop:** after tests pass, the frontend is built in the offline sandbox and
+  served on 127.0.0.1 to a locked-down headless browser (Microsoft Edge on Windows). At desktop,
+  tablet and mobile sizes it:
+  - takes screenshots;
+  - measures the layout (overflow, off-screen elements, overlapping controls, clipped text,
+    broken images);
+  - runs accessibility and keyboard checks;
+  - collects console errors;
+  - compares with the reference image, using both pixel measurements and the vision model.
+
+  Blocking findings drive bounded repairs aimed at the likely components. Results are never
+  declared pixel-perfect from model judgment.
+- **Commands:**
+  - `codingbrain attachments preview|list|show|approve|reprocess|purge`;
+  - `codingbrain inspect-ui URL [--compare design.png]`;
+  - `run --inspect-url URL` to capture the running app as evidence.
+- **Memory:**
+  - Requirements from documents, design references, diagrams and defect screenshots are stored
+    as unverified records with provenance. Accepted design references and visual corrections are
+    stored as verified history.
+  - Design tokens are discovered from CSS variables, Tailwind and token files.
+  - Re-extraction never overwrites approved records.
+  - Retention is configurable, and `--sensitive` keeps only checksums.
+- **Doctor:** reports coding, vision, OCR, document parsing, browser, Docker and premium
+  readiness separately. Document parsing is part of the update health check.
+- **Update:** `codingbrain update` from 0.9.0 and 0.10.0 keeps settings, memory and sessions and
+  registers the new settings. Vision model weights are never downloaded without asking.
+- **Fixes:**
+  - Re-recording a memory record no longer downgrades an approved or verified record.
+  - Loading settings no longer shares (and mutates) the built-in defaults.
+
 ## 0.10.0
 
 Durable cross-agent project memory (see docs/project-memory.md).

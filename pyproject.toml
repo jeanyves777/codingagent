@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coding-brain"
-version = "0.10.0"
+version = "0.11.0"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
@@ -21,6 +21,11 @@ dependencies = [
   "pyyaml>=6,<7",
   "packaging>=23",
   "pyflakes>=3,<4",
+  "pillow>=10.1,<13",
+  "pypdfium2>=4.30,<6",
+  "openpyxl>=3.1,<4",
+  "defusedxml>=0.7,<1",
+  "playwright>=1.45,<2",
 ]
 
 [project.scripts]
@@ -36,7 +41,7 @@ dev = ["pytest>=8,<10", "anthropic>=1.12,<2"]
 include = ["brain*"]
 
 [tool.setuptools.package-data]
-brain = ["data/*.json", "local/assets/*"]
+brain = ["data/*.json", "data/*.js", "local/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

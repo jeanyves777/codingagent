@@ -3,6 +3,9 @@
     cd C:\\Projects\\MyApplication
     codingbrain                 # recognize the project, then ask for engineering goals
     codingbrain run "goal"      # one goal (add --orchestrate for multi-agent delegation)
+    codingbrain run "goal" --attach design.png --attach spec.pdf   # with screenshots and documents
+    codingbrain attachments preview|list|show|approve|reprocess|purge   # what was extracted, retention
+    codingbrain inspect-ui http://localhost:3000   # screenshots, layout and accessibility of a running app
     codingbrain init | status | tasks | resume [id] | accept <id> | doctor | setup
     codingbrain update [--check] [--channel dev] | rollback | --version
 
@@ -96,7 +99,24 @@ class Context:
             from ..factory import build_brain_from_env
             self._brain = build_brain_from_env()
             self._brain.project_knowledge = self.memory.context_for
+            self._brain.visual_verifier = self.visual_verifier
         return self._brain
+
+    def visual_verifier(self, task: dict):
+        """Visual verification for tasks that carry reference images and a visual goal."""
+        visual = task.get("visual") or {}
+        if not visual.get("enabled") or not self.config["visual"].get("enabled", True):
+            return None
+        from ..vision import local_provider
+        from ..visual import VisualVerifier
+        references = [Path(path) for path in visual.get("references", []) if Path(path).is_file()]
+        if visual.get("references") and not references:
+            print("Visual verification: the reference images were purged; checking layout and accessibility only.")
+        vision = local_provider(settings.vision_settings(self.config))
+        return VisualVerifier(references, task["goal"], vision=vision,
+                              settings={**self.config["visual"], **{key: visual[key] for key in ("viewports",)
+                                                                     if visual.get(key)}},
+                              sandbox_images=self._brain.image)
 
     @property
     def memory(self):
@@ -194,6 +214,8 @@ async def handle(context: Context, task: dict, auto: bool) -> dict:
                   f"requirement checks: {completion}.")
             if task.get("review_disputed"):
                 print("Note: the reviewer objected; its reason is in `codingbrain status`.")
+            if task.get("visual_verification"):
+                print(visual_report(task["visual_verification"], task.get("visual_repairs", 0)))
             if not ask("Accept this result and create a branch with it?"):
                 print(f"Not accepted. Accept later with `codingbrain accept {task['id'][:8]}`.")
                 return task
@@ -220,6 +242,13 @@ async def accept(context: Context, task: dict) -> dict:
         context.brain.store.save(task)
         print(f"Accepted. New branch {name} (your current branch is unchanged). Review it with "
               f"`git log {name}` and merge when ready.")
+    if task["status"] == "accepted" and task.get("attachments"):
+        from .evidence import remember_outcome
+        remember_outcome(context, task)
+        if task.get("attachments_sensitive"):
+            task["attachments"] = {"redacted": "sensitive attachments: only checksums are kept",
+                                   "sha256": [item["sha256"] for item in task["attachments"].get("attachments", [])]}
+            context.brain.store.save(task)
     if task["status"] == "accepted":
         # Tested in the sandbox and accepted by the user: a verified fact about the project.
         plan = (task.get("proposal") or {}).get("plan", "")[:300]
@@ -229,9 +258,31 @@ async def accept(context: Context, task: dict) -> dict:
     return task
 
 
-async def orchestrate(context: Context, goal: str, auto: bool) -> dict:
+def visual_report(result: dict, repairs: int = 0) -> str:
+    if result.get("status") == "inconclusive":
+        return f"Visual verification: inconclusive ({str(result.get('reason', ''))[:400]})"
+    lines = [f"Visual verification at {', '.join(result.get('viewports') or [])}: {result.get('statement')}"
+             + (f" ({repairs} visual repair round(s))" if repairs else "")]
+    for item in [finding for finding in result.get("findings", []) if finding.get("blocking")][:8]:
+        lines.append(f"  - [{item.get('viewport')}] {item.get('kind')}: "
+                     f"{item.get('detail') or item.get('area', '')} ({item.get('source')})")
+    advisory = [finding for finding in result.get("findings", []) if not finding.get("blocking")]
+    if advisory:
+        lines.append(f"  {len(advisory)} non-blocking finding(s) (accessibility, minor differences).")
+    for comparison in result.get("comparisons", [])[:2]:
+        pixels = comparison["pixels"]
+        lines.append(f"  Compared with {comparison['reference']}: {pixels['changed_fraction']:.0%} of pixels differ"
+                     + (f"; vision model: {comparison['vision']['findings']['overall']}" if comparison.get("vision") else ""))
+    for note in result.get("uncertainty", [])[:4]:
+        lines.append(f"  uncertainty: {note}")
+    if result.get("screenshots"):
+        lines.append("  Screenshots: " + ", ".join(result["screenshots"][:3]))
+    return "\n".join(lines)
+
+
+async def orchestrate(context: Context, goal: str, auto: bool, attachments=None) -> dict:
     brain = context.brain
-    group = brain.delegate(context.root.name, goal)
+    group = brain.delegate(context.root.name, goal, attachments=attachments)
     for _ in range(200):
         await drain(brain)
         group = brain.store.get(group["id"])
@@ -255,7 +306,8 @@ async def orchestrate(context: Context, goal: str, auto: bool) -> dict:
     return group
 
 
-def run_goal(context: Context, goal: str, orchestrate_goal: bool = False, auto: bool | None = None):
+def run_goal(context: Context, goal: str, orchestrate_goal: bool = False, auto: bool | None = None,
+             attachments=None, visual=None, on_task=None):
     from .session import session
     auto = context.config["autonomy"]["execution"] == "auto" if auto is None else auto
     if context.project["tracked_changes"]:
@@ -264,10 +316,13 @@ def run_goal(context: Context, goal: str, orchestrate_goal: bool = False, auto: 
     with session(context.layout, context.project["id"], goal[:80]):
         try:
             if orchestrate_goal:
-                return asyncio.run(orchestrate(context, goal, auto))
+                return asyncio.run(orchestrate(context, goal, auto, attachments))
 
             async def single():
-                task = context.brain.submit(context.root.name, goal, launch=False)
+                task = context.brain.submit(context.root.name, goal, launch=False, attachments=attachments,
+                                            visual=visual)
+                if on_task:
+                    on_task(task)
                 task = await context.brain.create(task)
                 return await handle(context, task, auto)
             return asyncio.run(single())
@@ -384,7 +439,174 @@ def cmd_run(args, layout):
     context.check()
     print(describe(context.project))
     onboard(context, interactive=sys.stdin.isatty())
-    run_goal(context, " ".join(args.goal), args.orchestrate, True if args.yes else None)
+    goal = " ".join(args.goal)
+    packet, visual, attachments = None, None, []
+    if args.attach or args.inspect_url:
+        prepared = attach_for_goal(context, goal, args)
+        if prepared is None:
+            return 1
+        attachments, packet, visual = prepared
+
+    def link(task):
+        if attachments:
+            from .evidence import AttachmentStore
+            store = AttachmentStore(context.data / "attachments.sqlite3")
+            for attachment in attachments:
+                store.link(attachment.sha256, task["id"], goal)
+            if args.sensitive:
+                task["attachments_sensitive"] = True
+                context.brain.store.save(task)
+    try:
+        run_goal(context, goal, args.orchestrate, True if args.yes else None, packet, visual, on_task=link)
+    finally:
+        if args.sensitive and attachments:
+            from .evidence import discard_private_copies
+            discard_private_copies(context, attachments)
+    return 0
+
+
+def attach_for_goal(context: Context, goal: str, args):
+    """Ingest, analyze and preview the attachments; returns (attachments, evidence, visual) or
+    None when the user stops."""
+    from ..attachments import AttachmentError, summary
+    from ..multimodal import is_visual_goal
+    from .evidence import prepare, retain
+    paths = list(args.attach or [])
+    page_findings = None
+    if args.inspect_url:
+        shots, page_findings = inspect_running_app(context, args.inspect_url, args.viewport)
+        paths += shots
+    if paths:
+        print(f"\nReading {len(paths)} attachment(s) locally...")
+    try:
+        attachments, packet, processing = prepare(context, paths, goal, args.allow_premium_vision, args.sensitive)
+    except AttachmentError as error:
+        print(f"Attachment refused: {error}")
+        return None
+    for attachment in attachments:
+        print(summary(attachment))
+    used = sorted({f"{item['capability']} {item['provider']}{' ' + item['model'] if item.get('model') else ''}"
+                   for item in processing if item["outcome"] == "ok"})
+    if used:
+        print("Processed with: " + ", ".join(used))
+    if page_findings:
+        packet["running_app"] = page_findings
+    if any(attachment.flags for attachment in attachments):
+        print("Caution: some attachments contain instruction-like text. It is passed to the models as content only.")
+    if sys.stdin.isatty() and not args.yes and not ask("Continue with these attachments?", True):
+        return None
+    retain(context, attachments, processing, args.sensitive)
+    visual = None
+    references = [image["path"] for attachment in attachments if attachment.kind == "image" and
+                  not attachment.origin.startswith(str(context.data)) for image in attachment.images[:1]]
+    if (references or args.inspect_url) and not args.no_visual_check and (args.visual_check or is_visual_goal(goal, attachments)):
+        visual = {"enabled": True, "references": references, "max_repairs": context.config["visual"]["max_repairs"],
+                  "viewports": args.viewport or context.config["visual"]["viewports"]}
+        print("Visual verification is on: after the tests pass, the result is rendered at "
+              f"{', '.join(visual['viewports'])} and compared with the reference.")
+    return attachments, packet, visual
+
+
+def inspect_running_app(context: Context, url: str, viewports=None):
+    """Screenshots and measurements of an app the user is running on this computer."""
+    from ..visual import capture
+    folder = context.data / "attachments" / f"inspect-{int(time.time())}"
+    shots = asyncio.run(capture(url, folder, viewports or context.config["visual"]["viewports"], context.config["visual"]))
+    findings = [{"viewport": shot["viewport"], "issues": shot.get("issues", [])[:15],
+                 "accessibility": shot.get("accessibility", [])[:15], "console": shot.get("console", [])[:10],
+                 "error": shot.get("error")} for shot in shots]
+    print(f"Captured {url} at {', '.join(shot['viewport'] for shot in shots)}.")
+    return [shot["screenshot"] for shot in shots if shot.get("screenshot")], findings
+
+
+def cmd_inspect_ui(args, layout):
+    """Look at a running app: screenshots, layout problems, accessibility, and (with a vision
+    model) what it looks like or how it differs from a design."""
+    context = Context(layout, Path.cwd())
+    context.register()
+    from ..visual import VisualVerifier, capture
+    from ..vision import local_provider
+    folder = context.data / "attachments" / f"inspect-{int(time.time())}"
+    shots = asyncio.run(capture(args.url, folder, args.viewport or context.config["visual"]["viewports"],
+                                context.config["visual"]))
+    references = []
+    for raw in args.compare or []:
+        from ..attachments import ingest
+        attachment = ingest(raw, context.data / "attachments", context.config["attachments"].get("limits"),
+                            context.config["attachments"].get("allowed_roots") or (), (layout.home,))
+        references += [image["path"] for image in attachment.images[:1]]
+    vision = local_provider(settings.vision_settings(context.config))
+    verifier = VisualVerifier(references, args.goal or "inspect the page", vision=vision, settings=context.config["visual"])
+    result = asyncio.run(verifier.assess(shots, context.root))
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(visual_report(result))
+        for item in [finding for finding in result["findings"] if not finding.get("blocking")][:12]:
+            print(f"  · [{item.get('viewport')}] {item.get('kind')}: {item.get('detail') or item.get('area', '')}")
+    return 0 if result["status"] != "defects" else 2
+
+
+def cmd_attachments(args, layout):
+    from ..attachments import AttachmentError, summary
+    from .evidence import AttachmentStore, prepare, remember_findings
+    context = Context(layout, Path.cwd())
+    context.register()
+    store = AttachmentStore(context.data / "attachments.sqlite3")
+    action = args.action
+    if action == "preview":
+        if not args.items:
+            raise SystemExit("Name the files: codingbrain attachments preview <file> [...]")
+        try:
+            attachments, packet, processing = prepare(context, args.items, args.goal or "describe the attachment",
+                                                      args.allow_premium_vision)
+        except AttachmentError as error:
+            print(f"Attachment refused: {error}")
+            return 1
+        from .evidence import discard_private_copies
+        discard_private_copies(context, attachments)  # a preview keeps nothing
+        if args.json:
+            print(json.dumps({"evidence": packet, "processing": processing}, indent=2, default=str))
+        else:
+            for attachment in attachments:
+                print(summary(attachment))
+                print("  " + attachment.text(1500).replace("\n", "\n  "))
+            print("\nProcessed with: " + ", ".join(sorted({f"{item['capability']} ({item['outcome']})" for item in processing})))
+        return 0
+    if action == "list":
+        for item in store.entries():
+            print(f"{item['sha256'][:12]}  {item['kind']:<6} {item['retention']:<5} "
+                  f"{'kept' if item['retained_path'] else 'not kept':<9} tasks {item['tasks']:<3} {item['name']}")
+        return 0
+    target = store.get(args.items[0]) if args.items else None
+    if action in {"show", "approve", "reprocess"} and not target:
+        raise SystemExit("Unknown attachment; see `codingbrain attachments list`.")
+    if action == "show":
+        extractions = store.extractions(target["sha256"])
+        data = json.loads(extractions[-1]["data"]) if extractions else {}
+        print(json.dumps({"attachment": target, "extractions": len(extractions), "tasks": store.tasks(target["sha256"]),
+                          "latest": data if args.json else {key: data.get(key) for key in
+                                                            ("kind", "metadata", "warnings", "flags", "vision")}},
+                         indent=2, default=str))
+    elif action == "approve":
+        store.approve(target["sha256"])
+        print(f"Approved the latest extraction of {target['name']}; its records keep their history.")
+    elif action == "reprocess":
+        original = next(Path(target["retained_path"]).glob("original*"), None) if target.get("retained_path") else None
+        if not original:
+            raise SystemExit("The original copy was not kept (retention policy); attach the file again.")
+        attachments, packet, processing = prepare(context, [str(original)], args.goal or "describe the attachment",
+                                                  args.allow_premium_vision)
+        attachment = attachments[0]
+        attachment.name, attachment.origin = target["name"], target["origin"]
+        store.record(attachment, target["retention"], Path(target["retained_path"]), bool(target["sensitive"]), processing)
+        added = 0 if target["sensitive"] else remember_findings(context, attachment)
+        print(f"Re-extracted {target['name']} (extraction {len(store.extractions(target['sha256']))}); "
+              f"{added} finding(s) recorded as unverified. Approved records are unchanged.")
+    elif action == "purge":
+        count = store.purge(target["sha256"] if target else None)
+        print(f"Removed {count} kept copy(ies); checksums, provenance and findings remain.")
+    return 0
 
 
 def cmd_shell(args, layout):
@@ -457,6 +679,9 @@ def doctor_report(layout: Layout, offline: bool) -> dict:
     if current:
         check("installed version", True, f"active {current.get('version')}, rollback to "
               f"{', '.join(current.get('previous', [])) or 'none'}", core=False)
+    multimodal = multimodal_status(config or settings.DEFAULTS, offline)
+    for name, ok, detail in multimodal:
+        check(name, ok, detail, core=name == "documents")  # parsers ship with the app; the rest is optional
     if not offline:
         docker = shutil.which("docker")
         images = []
@@ -486,6 +711,53 @@ def doctor_report(layout: Layout, offline: bool) -> dict:
         for name, detail in premium_status().items():
             check(f"premium: {name}", detail["usable"], detail["detail"], core=False)
     return {"ok": all(item["ok"] for item in checks if item["core"]), "version": version(), "checks": checks}
+
+
+def multimodal_status(config: dict, offline: bool = False) -> list[tuple[str, bool, str]]:
+    """Coding, vision, OCR, document parsing and browser readiness, reported separately."""
+    import importlib
+    found = []
+    try:
+        import tempfile
+        from ..attachments import ingest
+        with tempfile.TemporaryDirectory() as scratch:
+            sample = Path(scratch) / "sample.csv"
+            sample.write_text("name,value\nprobe,1\n", encoding="utf-8")
+            parsed = ingest(str(sample), Path(scratch) / "work")
+            for module in ("PIL", "pypdfium2", "openpyxl", "defusedxml"):  # image, PDF, spreadsheet, XML
+                importlib.import_module(module)
+        found.append(("documents", parsed.segments != [], "PDF, Word, Excel, CSV, text and image parsers ready "
+                      "(isolated parser process works)"))
+    except Exception as error:
+        found.append(("documents", False, f"{type(error).__name__}: {str(error)[:200]}"))
+    from ..ocr import TesseractOCR
+    ocr = TesseractOCR(config["ocr"].get("command") or None)
+    found.append(("ocr", ocr.available, ocr.version() if ocr.available else
+                  "Tesseract not found: winget install UB-Mannheim.TesseractOCR (screenshots and scans then get OCR)"))
+    from ..vision import local_provider
+    vision = local_provider(settings.vision_settings(config))
+    if offline:
+        found.append(("vision", bool(vision), f"{config['vision']['model']} configured (not contacted offline)"
+                      if vision else "no vision model chosen"))
+    elif vision is None:
+        found.append(("vision", False, "no vision model chosen: codingbrain setup --vision-model qwen2.5vl:7b "
+                      "(the coding model cannot see images)"))
+    else:
+        usable, reason = asyncio.run(vision.capability())
+        found.append(("vision", usable, reason))
+    premium = config["vision"].get("premium", "off")
+    found.append(("premium vision", premium != "off", f"{premium}: used only with --allow-premium-vision per task"
+                  if premium != "off" else "off (optional: codingbrain setup --premium-vision claude)"))
+    try:
+        importlib.import_module("playwright")
+        from ..visual import browser_launch_options
+        options = browser_launch_options(config["visual"])
+        found.append(("browser", True, "Playwright ready; " + (f"uses {options.get('channel') or options.get('executable_path')}"
+                                                              if len(options) > 1 else "uses Playwright's Chromium "
+                                                              "(codingbrain setup --browser if it is missing)")))
+    except ImportError:
+        found.append(("browser", False, "Playwright not installed: visual verification is unavailable"))
+    return found
 
 
 def premium_status() -> dict:
@@ -569,6 +841,7 @@ def cmd_setup(args, layout):
         roots = prompt("Allowed project roots, separated by ';' (blank = any folder)",
                        ";".join(config["permissions"]["allowed_roots"]))
         config["permissions"]["allowed_roots"] = [item.strip() for item in roots.split(";") if item.strip()]
+    setup_multimodal(config, args, interactive)
     if args.execution:
         config["autonomy"]["execution"] = args.execution
     if args.allowed_root:
@@ -587,6 +860,52 @@ def cmd_setup(args, layout):
         os.environ["BRAIN_KNOWLEDGE_DB"] = str(layout.data / "knowledge.sqlite3")
         subprocess.run([sys.executable, "-m", "brain.knowledge", "sync", str(manifest)], check=False)
     return 0
+
+
+VISION_SUGGESTIONS = [("qwen2.5vl:3b", "about 3 GB, 8 GB RAM"), ("qwen2.5vl:7b", "about 6 GB, 16 GB RAM or a GPU"),
+                      ("gemma3:12b", "about 8 GB, a GPU recommended")]
+
+
+def setup_multimodal(config: dict, args, interactive: bool):
+    """Vision model, OCR, premium vision and the browser. Large downloads are always asked first."""
+    vision = config["vision"]
+    if args.vision_model is not None:
+        vision["model"] = args.vision_model
+    if args.premium_vision:
+        vision["premium"] = args.premium_vision
+    if args.ocr_command is not None:
+        config["ocr"]["command"] = args.ocr_command
+    if interactive and (args.vision or not vision["model"]) and ask("Set up image understanding (screenshots, "
+                                                                     "designs, diagrams) now?", bool(args.vision)):
+        print("A vision model is separate from the coding model (the coding model cannot see images). Options:")
+        for name, size in VISION_SUGGESTIONS:
+            print(f"  {name:<14} {size}")
+        vision["model"] = prompt("Vision model", vision["model"] or VISION_SUGGESTIONS[0][0])
+    if vision["model"] and vision.get("provider", "ollama") == "ollama" and shutil.which("ollama"):
+        from ..vision import OllamaVision
+        usable, reason = asyncio.run(OllamaVision(settings.vision_settings(config)["url"], vision["model"]).capability())
+        if not usable and "not pulled" in reason:
+            if interactive and ask(f"Download {vision['model']} with Ollama now (several GB)?", False):
+                subprocess.run(["ollama", "pull", vision["model"]], check=False)
+            else:
+                print(f"Not downloaded. When ready: ollama pull {vision['model']}")
+        elif not usable:
+            print(f"Warning: {reason}")
+    if args.browser or (interactive and args.vision):
+        install_browser(config, interactive)
+
+
+def install_browser(config: dict, interactive: bool):
+    from ..visual import browser_launch_options
+    options = browser_launch_options(config["visual"])
+    if options.get("channel") == "msedge":
+        print("Visual checks use Microsoft Edge, which comes with Windows; nothing to download.")
+        return
+    if options.get("executable_path"):
+        print(f"Visual checks use {options['executable_path']}.")
+        return
+    if not interactive or ask("Download Playwright's Chromium for visual checks (about 150 MB)?", False):
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
 
 
 def build_sandbox(config: dict):
@@ -749,6 +1068,16 @@ def main(argv=None) -> int:
     run.add_argument("goal", nargs="+")
     run.add_argument("--orchestrate", action="store_true", help="split into dependent assignments")
     run.add_argument("--yes", action="store_true", help="run plans without asking (acceptance still asks)")
+    run.add_argument("--attach", action="append", metavar="FILE",
+                     help="an image, screenshot, PDF, Word, Excel, CSV or text file (repeatable)")
+    run.add_argument("--inspect-url", metavar="URL", help="also capture your running app (localhost) as evidence")
+    run.add_argument("--allow-premium-vision", action="store_true",
+                     help="allow the configured premium vision (Claude/Codex) for this task's images")
+    run.add_argument("--sensitive", action="store_true",
+                     help="keep nothing from the attachments after the task but their checksums; local models only")
+    run.add_argument("--visual-check", action="store_true", help="always verify the rendered result visually")
+    run.add_argument("--no-visual-check", action="store_true", help="never verify the rendered result visually")
+    run.add_argument("--viewport", action="append", choices=["desktop", "tablet", "mobile"])
     doctor = commands.add_parser("doctor", help="check the installation, models and premium CLIs")
     doctor.add_argument("--offline", action="store_true", help="only local checks")
     doctor.add_argument("--json", action="store_true")
@@ -765,6 +1094,24 @@ def main(argv=None) -> int:
     setup.add_argument("--channel", choices=["stable", "dev"])
     setup.add_argument("--sandbox", action="store_true", help="build the Docker test sandbox images")
     setup.add_argument("--knowledge", action="store_true", help="import the engineering knowledge library")
+    setup.add_argument("--vision", action="store_true", help="choose a vision model and the browser for visual checks")
+    setup.add_argument("--vision-model", help="Ollama vision model, e.g. qwen2.5vl:7b ('' to turn vision off)")
+    setup.add_argument("--premium-vision", choices=["off", "claude", "codex"])
+    setup.add_argument("--ocr-command", help="path to tesseract if it is not on PATH")
+    setup.add_argument("--browser", action="store_true", help="set up the browser for visual checks")
+    attachments_parser = commands.add_parser("attachments", help="attachments: preview, list, show, approve, "
+                                             "reprocess, purge")
+    attachments_parser.add_argument("action", choices=["preview", "list", "show", "approve", "reprocess", "purge"])
+    attachments_parser.add_argument("items", nargs="*", help="files (preview) or an attachment id")
+    attachments_parser.add_argument("--goal", help="what the attachment is for (guides the vision model)")
+    attachments_parser.add_argument("--allow-premium-vision", action="store_true")
+    attachments_parser.add_argument("--json", action="store_true")
+    inspect_parser = commands.add_parser("inspect-ui", help="screenshots, layout and accessibility of a running app")
+    inspect_parser.add_argument("url", help="a page served on this computer, e.g. http://localhost:3000")
+    inspect_parser.add_argument("--compare", action="append", metavar="IMAGE", help="a design to compare with")
+    inspect_parser.add_argument("--goal", help="what to look for")
+    inspect_parser.add_argument("--viewport", action="append", choices=["desktop", "tablet", "mobile"])
+    inspect_parser.add_argument("--json", action="store_true")
     update = commands.add_parser("update", help="install the latest release (stable by default)")
     update.add_argument("--check", action="store_true", help="only report whether an update exists")
     update.add_argument("--channel", choices=["stable", "dev"])
@@ -805,5 +1152,6 @@ def main(argv=None) -> int:
                 "accept": cmd_accept, "run": cmd_run, "doctor": cmd_doctor, "setup": cmd_setup,
                 "update": cmd_update, "rollback": cmd_rollback, "migrate": cmd_migrate,
                 "post-install": cmd_post_install, "memory": cmd_memory, None: cmd_shell,
+                "attachments": cmd_attachments, "inspect-ui": cmd_inspect_ui,
                 "version": lambda args, layout: print(f"codingbrain {version()}")}
     return handlers[args.command](args, layout) or 0
