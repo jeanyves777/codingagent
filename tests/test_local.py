@@ -628,3 +628,18 @@ def test_inspecting_tasks_from_another_terminal_never_interrupts_a_running_task(
     restarted = Brain(repo.parent, context.data, None, "img")
     task = restarted.store.get(running["id"])
     assert task["status"] == "blocked" and task["events"][-1]["kind"] == "interrupted"
+
+
+def test_prompts_take_the_default_at_end_of_input(monkeypatch):
+    """Windows reports a stdin redirected from NUL as a terminal; input() then hits end of file."""
+    from brain.local import cli
+
+    class EndOfInput:
+        def isatty(self):
+            return True
+
+        def readline(self, *args):
+            return ""
+    monkeypatch.setattr(sys, "stdin", EndOfInput())
+    assert cli.ask("Proceed?") is False and cli.ask("Proceed?", True) is True
+    assert cli.prompt("Model", "qwen2.5-coder:7b") == "qwen2.5-coder:7b"

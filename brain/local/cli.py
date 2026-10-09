@@ -47,14 +47,22 @@ def version() -> str:
 def ask(question: str, default: bool = False) -> bool:
     if not sys.stdin.isatty():
         return default
-    answer = input(f"{question} [{'Y/n' if default else 'y/N'}] ").strip().lower()
+    try:
+        answer = input(f"{question} [{'Y/n' if default else 'y/N'}] ").strip().lower()
+    except EOFError:  # Windows reports a NUL stdin as a terminal; end of input means the default
+        print()
+        return default
     return default if not answer else answer in {"y", "yes"}
 
 
 def prompt(question: str, default: str = "") -> str:
     if not sys.stdin.isatty():
         return default
-    answer = input(f"{question}{f' [{default}]' if default else ''}: ").strip()
+    try:
+        answer = input(f"{question}{f' [{default}]' if default else ''}: ").strip()
+    except EOFError:
+        print()
+        return default
     return answer or default
 
 
