@@ -212,6 +212,8 @@ def test_update_installs_side_by_side_and_preserves_state(installed, tmp_path):
     assert current["version"] == "0.9.1" and current["previous"] == ["0.9.0"]
     assert layout.venv_python("0.9.0").exists()  # the old version stays for rollback
     launcher = (layout.bin / ("codingbrain.cmd" if sys.platform == "win32" else "codingbrain")).read_text()
+    # On Windows the launcher refers to %LOCALAPPDATA% rather than spelling out the user folder.
+    launcher = launcher.replace("%LOCALAPPDATA%", os.environ.get("LOCALAPPDATA", "%LOCALAPPDATA%"))
     assert str(layout.venv_python("0.9.1")) in launcher
     assert settings.load(layout)["models"]["model"] == "mine" and memory_rows(layout) == [("t1",)]
     backup = Path(result["backup"])
