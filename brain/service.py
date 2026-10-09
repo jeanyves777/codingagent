@@ -91,14 +91,26 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         self.manager = WorkspaceManager()
         self.locks, self.jobs = {}, {}
         self.slots = asyncio.Semaphore(workers)
+        import os
+        import socket
+        # Which process runs a task: another live process on this computer (a second terminal)
+        # keeps its tasks; only tasks whose process is gone are marked interrupted.
+        self.owner = {"pid": os.getpid(), "host": socket.gethostname()}
         with self.store.connect() as db:
             rows = db.execute("SELECT body FROM tasks").fetchall()
         for row in rows:
             task = json.loads(row[0])
             interrupted = self.ACTIVE - ({"queued"} if self.queue else set())
-            if task["status"] in interrupted:
+            if task["status"] in interrupted and not self.owned_elsewhere(task):
                 task["status"] = "blocked"
                 self.event(task, "interrupted", "Server restarted; retry is required")
+
+    def owned_elsewhere(self, task: dict) -> bool:
+        owner = task.get("owner") or {}
+        if owner.get("host") != self.owner["host"] or owner.get("pid") in (None, self.owner["pid"]):
+            return False
+        from .local.session import pid_alive
+        return pid_alive(int(owner["pid"]))
 
     def repository(self, name: str) -> Path:
         if not name or Path(name).name != name or name.startswith("."):
@@ -118,6 +130,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
 
     def event(self, task: dict, kind: str, detail: str):
         trace_id = task.setdefault("trace_id", uuid.uuid4().hex)
+        task["owner"] = self.owner
         event_id = self.telemetry.publish(task["id"], trace_id, kind, detail)
         task.setdefault("events", []).append({"id": event_id,
             "time": datetime.now(timezone.utc).isoformat(), "kind": kind, "detail": detail,

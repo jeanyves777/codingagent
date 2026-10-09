@@ -14,6 +14,8 @@ Fix: projects directly in the home folder (for example `C:\Users\me\my-app`) fai
 - A Git repository without commits gets clear instructions instead of a Git error. Coding Brain
   never commits your files for you.
 - Opening a folder that overlaps Coding Brain's own data is refused with an explanation.
+- `codingbrain status`, `tasks` and other read-only commands no longer mark a task that another
+  terminal is running as interrupted; on startup only tasks whose process has ended are.
 - Settings no longer share (and mutate) the built-in defaults.
 - CI runs a home-folder project end to end in the real Docker sandbox on Linux, and adds Windows
   tests for junctions, case and short-name aliases.

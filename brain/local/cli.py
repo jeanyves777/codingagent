@@ -106,9 +106,13 @@ class Context:
         return self._brain
 
     def tasks(self) -> list[dict]:
+        """Read-only: listing tasks never starts the service, so it cannot disturb a task that
+        another terminal is running."""
         if not (self.data / "brain.sqlite3").exists():
             return []
-        return sorted((task for task in self.brain.store.tasks() if task.get("repository") == self.root.name),
+        from ..store import Store
+        store = self._brain.store if self._brain is not None else Store(self.data / "brain.sqlite3")
+        return sorted((task for task in store.tasks() if task.get("repository") == self.root.name),
                       key=lambda task: task["events"][0]["time"] if task.get("events") else "", reverse=True)
 
 

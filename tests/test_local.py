@@ -601,3 +601,30 @@ def test_home_folder_project_end_to_end_in_the_real_sandbox(tmp_path, monkeypatc
     accepted = asyncio.run(cli.accept(context, task))
     assert git(repo, "show", f"{accepted['branch']}:calculator.py") == "def add(a, b):\n    return a + b\n"
     assert snapshot(repo) == before  # the user's files and branch are unchanged
+
+
+def test_inspecting_tasks_from_another_terminal_never_interrupts_a_running_task(tmp_path, monkeypatch):
+    from brain.local import cli
+    from brain.service import Brain
+    user, layout = home_layout(tmp_path, monkeypatch)
+    repo = make_repo(user / "app", {"main.py": "x = 1\n"})
+    context = cli.Context(layout, repo)
+    running = context.brain.submit("app", "Long task", launch=False)
+    running["status"] = "running"
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])  # the terminal running it
+    try:
+        running["owner"] = {"pid": other.pid, "host": context.brain.owner["host"]}
+        context.brain.store.save(running)
+        # `codingbrain status` / `tasks` in a second terminal: read-only, no service start.
+        viewer = cli.Context(layout, repo)
+        assert [task["status"] for task in viewer.tasks()] == ["running"] and viewer._brain is None
+        # Even a second service instance leaves a task owned by a live process alone.
+        Brain(repo.parent, context.data, None, "img")
+        assert context.brain.store.get(running["id"])["status"] == "running"
+    finally:
+        other.kill()
+        other.wait()
+    # Once that process is gone, a restart marks the task interrupted, as before.
+    restarted = Brain(repo.parent, context.data, None, "img")
+    task = restarted.store.get(running["id"])
+    assert task["status"] == "blocked" and task["events"][-1]["kind"] == "interrupted"
