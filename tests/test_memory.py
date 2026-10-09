@@ -276,6 +276,10 @@ def test_continuation_after_restart_and_survival_across_update_and_rollback(worl
     knowledge = json.dumps(restarted.memory.profile())
     assert "Accepted: Set x to 2" in knowledge and "Keep x small" in knowledge
     before = sorted(texts(restarted.memory))
+    # Updates run in their own process with no session open: release this process's databases.
+    import gc
+    context._brain = None
+    gc.collect()
     # Updates and rollbacks back up and restore every memory store with the rest of the state.
     installed = []
 
