@@ -17,12 +17,14 @@
 param(
   [Parameter(Mandatory = $true)][string]$New,
   [string]$Published = 'v0.9.0',
-  [string]$Repository = 'jeanyves777/codingagent'
+  [string]$Repository = 'jeanyves777/codingagent',
+  [string]$PublishedDir = ''  # the published assets, already downloaded (CI uses gh release download)
 )
 $ErrorActionPreference = 'Stop'
 # Windows PowerShell 5.1 may not offer TLS 1.2, which GitHub requires.
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $New = (Resolve-Path $New).Path
+if ($PublishedDir) { $PublishedDir = (Resolve-Path $PublishedDir).Path }
 $work = Join-Path ([IO.Path]::GetTempPath()) ("cb-upgrade-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $home_ = Join-Path $work 'CodingBrain'
 $results = [ordered]@{}
@@ -60,9 +62,14 @@ try {
   $base = "https://github.com/$Repository/releases/download/$Published"
   $oldVersion = $Published.TrimStart('v')
   foreach ($name in @('SHA256SUMS', 'release.json', 'constraints.txt', 'install.ps1', 'uninstall.ps1', "coding_brain-$oldVersion-py3-none-any.whl")) {
+    $target = Join-Path $published $name
+    if ($PublishedDir) { Copy-Item (Join-Path $PublishedDir $name) $target; continue }
     foreach ($attempt in 1..4) {
-      try { Invoke-WebRequest -UseBasicParsing -Uri "$base/$name" -OutFile (Join-Path $published $name); break }
-      catch { if ($attempt -eq 4) { throw }; Start-Sleep ([math]::Pow(2, $attempt)) }
+      try { Invoke-WebRequest -UseBasicParsing -Uri "$base/$name" -OutFile $target; break }
+      catch {
+        if ($attempt -eq 4) { throw "download of $base/$name failed: $($_.Exception.Message)" }
+        Start-Sleep ([math]::Pow(2, $attempt))
+      }
     }
   }
   $sumsOk = $true

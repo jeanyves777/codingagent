@@ -57,8 +57,13 @@ jobs:
           python scripts/build_release.py --out dist/new --version "$version.post1" --constraints dist/old/constraints.txt
       - name: Install, recognize, update, refuse bad updates, roll back, uninstall
         run: ./installer/windows/verify.ps1 -Old dist/old -New dist/new
+      - name: Download the published v0.9.0 release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download v0.9.0 --repo "${{ github.repository }}" --dir dist/published-0.9.0
       - name: Upgrade from the published v0.9.0 release with codingbrain update
-        run: ./installer/windows/verify-upgrade.ps1 -New dist/new
+        run: ./installer/windows/verify-upgrade.ps1 -New dist/new -PublishedDir dist/published-0.9.0
       - uses: actions/upload-artifact@v4
         if: always()
         with:
