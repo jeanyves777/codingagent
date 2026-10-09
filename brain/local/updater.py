@@ -240,20 +240,49 @@ def backup_state(layout: Layout, version: str, reason: str) -> Path:
     return target
 
 
+def _release_database(path: Path):
+    """Fold a database's write-ahead log back into the file so it can be replaced safely. SQLite
+    refuses while another connection has it open; then the restore stops before changing anything
+    (deleting a live log would lose committed data, and Windows cannot delete an open file)."""
+    if not path.exists():
+        return
+    try:
+        connection = sqlite3.connect(path, timeout=5)
+        try:
+            mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+        finally:
+            connection.close()
+    except sqlite3.Error as error:
+        raise UpdateError(f"{path.name} is in use ({error}); close Coding Brain everywhere and try again") from error
+    leftovers = [Path(str(path) + suffix) for suffix in SQLITE_SIDE_FILES if Path(str(path) + suffix).exists()]
+    if str(mode).lower() != "delete" or any(item.name.endswith("-wal") for item in leftovers):
+        raise UpdateError(f"{path.name} is in use; close Coding Brain everywhere and try again")
+    for item in leftovers:  # an idle -shm or -journal left behind
+        try:
+            item.unlink()
+        except OSError as error:
+            raise UpdateError(f"{item.name} is in use; close Coding Brain everywhere and try again") from error
+
+
 def restore_state(layout: Layout, backup: Path):
     manifest = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
-    for path, relative in list(_state_files(layout)):
+    # 1. Check the whole backup before changing anything.
+    for relative, digest in manifest["files"].items():
+        if sha256(backup / relative) != digest:
+            raise UpdateError(f"Backup file {relative} is damaged; nothing was restored")
+    # 2. Make sure no database is in use, folding idle write-ahead logs into their files.
+    current = list(_state_files(layout))
+    for path, _ in current:
+        if path.suffix in {".sqlite3", ".db"}:
+            _release_database(path)
+    # 3. Restore.
+    for path, relative in current:
         if relative.as_posix() not in manifest["files"]:
             path.unlink()  # created after the backup (e.g. by a failed migration)
-    for relative, digest in manifest["files"].items():
-        source = backup / relative
-        if sha256(source) != digest:
-            raise UpdateError(f"Backup file {relative} is damaged")
+    for relative in manifest["files"]:
         destination = layout.home / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
-        for suffix in SQLITE_SIDE_FILES:  # a stale write-ahead log must not replay onto the restored database
-            Path(str(destination) + suffix).unlink(missing_ok=True)
-        shutil.copy2(source, destination)
+        shutil.copy2(backup / relative, destination)
 
 
 def _run(python: Path, layout: Layout, *arguments: str, timeout=900) -> subprocess.CompletedProcess:
