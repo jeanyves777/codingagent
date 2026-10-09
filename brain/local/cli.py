@@ -67,6 +67,9 @@ def ask(question: str, default: bool = False) -> bool:
     quiet_live()
     try:
         answer = input(f"{question} [{'Y/n' if default else 'y/N'}] ").strip().lower()
+    except EOFError:  # Windows reports a NUL stdin as a terminal; end of input means the default
+        print()
+        return default
     finally:
         resume_live()
     return default if not answer else answer in {"y", "yes"}
@@ -75,7 +78,11 @@ def ask(question: str, default: bool = False) -> bool:
 def prompt(question: str, default: str = "") -> str:
     if not sys.stdin.isatty():
         return default
-    answer = input(f"{question}{f' [{default}]' if default else ''}: ").strip()
+    try:
+        answer = input(f"{question}{f' [{default}]' if default else ''}: ").strip()
+    except EOFError:
+        print()
+        return default
     return answer or default
 
 
