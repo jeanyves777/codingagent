@@ -12,6 +12,91 @@
   let startedAt = 0;
   let expanded = new Set();
   let activityCount = 0;
+  let submitting = false;
+  let polling = false;
+  let typingRow = null;
+  let controlLoad = null;
+  let activeMaintenance = null;
+  let maintenancePoll = null;
+  let feedbackTimer = null;
+  const busyButtons = new WeakMap();
+
+  function busyButton(button, working) {
+    if (!button) return;
+    if (working) {
+      if (busyButtons.has(button)) return;
+      busyButtons.set(button, button.disabled);
+      button.classList.add('is-loading');
+      button.setAttribute('aria-busy', 'true');
+      button.disabled = true;
+    } else if (busyButtons.has(button)) {
+      const wasDisabled = busyButtons.get(button);
+      busyButtons.delete(button);
+      button.classList.remove('is-loading');
+      button.removeAttribute('aria-busy');
+      button.disabled = wasDisabled;
+    }
+  }
+
+  function feedback(state, title, detail = '') {
+    const box = $('control-feedback');
+    if (!box.hidden && state && box.dataset.state === state &&
+        $('control-feedback-title').textContent === title &&
+        $('control-feedback-detail').textContent === detail) return;
+    clearInterval(feedbackTimer);
+    feedbackTimer = null;
+    if (!state) { box.hidden = true; return; }
+    box.hidden = false;
+    box.dataset.state = state;
+    $('control-feedback-title').textContent = title;
+    $('control-feedback-detail').textContent = detail;
+    const elapsed = $('control-feedback-elapsed');
+    elapsed.hidden = state !== 'busy';
+    if (state === 'busy') {
+      const start = Date.now();
+      const tick = () => { elapsed.textContent = `${Math.floor((Date.now() - start) / 1000)}s elapsed`; };
+      tick();
+      feedbackTimer = setInterval(tick, 1000);
+    }
+  }
+
+  function loadingComponents() {
+    const grid = $('setup-components');
+    grid.setAttribute('aria-busy', 'true');
+    $('full-setup').disabled = true;
+    $('full-setup').title = 'Checking whether the official full installer is available';
+    grid.replaceChildren();
+    for (let index = 0; index < 6; index++) {
+      const card = document.createElement('div'); card.className = 'component-card skeleton-card';
+      const icon = document.createElement('span'); icon.className = 'skeleton-icon';
+      const copy = document.createElement('div'); copy.className = 'skeleton-copy';
+      const first = document.createElement('span'); first.className = 'skeleton-line';
+      const second = document.createElement('span'); second.className = 'skeleton-line short';
+      copy.append(first, second); card.append(icon, copy); grid.append(card);
+    }
+  }
+
+  function showTyping() {
+    if (typingRow) return;
+    const bubble = message('CODING BRAIN', 'Thinking…', 'assistant');
+    typingRow = bubble.closest('.message');
+    typingRow.classList.add('typing-row');
+    typingRow.setAttribute('role','status');
+    typingRow.setAttribute('aria-label','Coding Brain is working');
+    const dots = document.createElement('span'); dots.className = 'typing-dots'; dots.setAttribute('aria-hidden','true');
+    for (let index=0;index<3;index++) dots.append(document.createElement('span'));
+    bubble.append(dots);
+  }
+
+  function hideTyping() {
+    if (typingRow) typingRow.remove();
+    typingRow = null;
+  }
+
+  function busySend(working) {
+    busyButton($('send'), working);
+    $('send').setAttribute('aria-label', working ? 'Coding Brain is working' : 'Send message');
+  }
 
   async function api(path, method = 'GET', body) {
     const options = {method, headers: {'X-CodingBrain-Token': token || ''}};
@@ -307,7 +392,8 @@
   }
 
   async function poll() {
-    if (!activeJob) return;
+    if (!activeJob || polling) return;
+    polling = true;
     try {
       const response = await api(`/api/jobs/${activeJob}?after=${cursor}`);
       const job = response.job;
@@ -321,12 +407,12 @@
         displayedEvents.add(event.seq);
         activityEntry(event);
         if (event.kind === 'approval') approval(job.id, job.approval || {summary: event.message});
-        if (event.kind === 'output') message(job.kind === 'chat' ? 'CODING BRAIN' : 'CODING BRAIN · ACTIVITY', event.message, 'assistant');
-        if (event.kind === 'error') message('CODING BRAIN · ERROR', event.message, 'system');
+        if (event.kind === 'output') { hideTyping(); message(job.kind === 'chat' ? 'CODING BRAIN' : 'CODING BRAIN · ACTIVITY', event.message, 'assistant'); }
+        if (event.kind === 'error') { hideTyping(); message('CODING BRAIN · ERROR', event.message, 'system'); }
       }
       const running = ['starting','running','approval_required'].includes(job.status);
       $('run-status').hidden = !running;
-      $('send').disabled = running;
+      busySend(running);
       $('status-label').textContent = job.status === 'approval_required' ? 'Awaiting your approval' : `Running ${job.kind} — waiting for engine output`;
       $('footer-status').textContent = `Task ${job.status}`;
       tickTime();
@@ -334,7 +420,8 @@
         if (pollTimer) clearInterval(pollTimer);
         pollTimer = null;
         $('run-status').hidden = true;
-        $('send').disabled = false;
+        busySend(false);
+        hideTyping();
         // A chat reply already appears as an output event; don't add a redundant
         // 'Session finished' bubble after every conversational answer.
         if (job.kind !== 'chat' || job.status !== 'completed') {
@@ -345,12 +432,13 @@
         return;
       }
     } catch(e) { $('footer-status').textContent = 'Connection lost'; toast(e.message); }
+    finally { polling = false; }
   }
 
   async function submit() {
     const text = $('prompt').value.trim();
     if (!text) return;
-    if (activeJob) { toast('Finish or stop the current session first.'); return; }
+    if (activeJob || submitting) { toast('Finish or stop the current session first.'); return; }
     if (mode === 'run' && (!currentProject || !currentProject.git)) {
       toast('Open an existing Git repository before running a coding task.');
       openDialog();
@@ -358,6 +446,11 @@
     }
     message('YOU', text, 'user');
     $('prompt').value = '';
+    submitting = true;
+    busySend(true);
+    showTyping();
+    $('run-status').hidden = false;
+    $('status-label').textContent = 'Connecting to Coding Brain…';
     try {
       const job = await api('/api/start', 'POST', {message: text, mode});
       activeJob = job.id;
@@ -365,12 +458,15 @@
       displayedEvents = new Set();
       startedAt = job.started;
       $('run-status').hidden = false;
-      $('send').disabled = true;
       await poll();
-      pollTimer = setInterval(poll, 750);
+      if (activeJob && !pollTimer) pollTimer = setInterval(poll, 750);
     } catch(e) {
+      hideTyping();
       message('CODING BRAIN · CONNECTION', e.message, 'system');
       toast(e.message);
+    } finally {
+      submitting = false;
+      if (!activeJob) { busySend(false); $('run-status').hidden = true; }
     }
   }
 
@@ -468,7 +564,6 @@
   $('repair-install').addEventListener('click', () => systemAction('repair'));
   $('new-project-empty').addEventListener('click', () => { setMode('new'); $('prompt').focus(); });
   let setupCache = null;
-  let maintenancePoll = null;
 
   function showControl(tab) {
     const headings={setup:['Set up your coding workspace','Check your local engine, install requirements and connect optional providers.'],providers:['Manage your AI providers','Connect subscriptions, inspect provider support and choose authorized supervisors.'],updates:['Installation and updates','Check verified releases, diagnose readiness and repair the coding environment.']};
@@ -493,6 +588,7 @@
     $('setup-message').textContent = `${installed} of ${all} key tools were detected. ` + readiness.full_installer_note;
     $('full-setup').disabled = !readiness.full_installer_available;
     $('full-setup').title = readiness.full_installer_available ? 'Run official guided full installation' : readiness.full_installer_note;
+    $('setup-components').setAttribute('aria-busy', 'false');
     $('setup-components').replaceChildren();
     for (const entry of readiness.components) {
       const row = document.createElement('div');
@@ -532,8 +628,14 @@
         const sign = document.createElement('button'); sign.textContent = 'Sign in / reconnect';
         sign.addEventListener('click', async () => {
           if (!confirm(`Open the official ${provider.name} CLI sign-in?`)) return;
-          try { const response = await api(`/api/providers/${provider.id}/signin`, 'POST', {confirmed:true}); toast(response.message); }
-          catch(e) { toast(e.message); }
+          busyButton(sign, true);
+          feedback('busy', `Opening ${provider.name} sign-in`, 'Launching the official provider CLI. Account sign-in takes place outside Coding Brain.');
+          try {
+            const response = await api(`/api/providers/${provider.id}/signin`, 'POST', {confirmed:true});
+            feedback('info', `${provider.name} sign-in launched`, 'Complete sign-in in the official terminal and refresh provider status afterward.');
+            toast(response.message);
+          } catch(e) { feedback('error', 'Could not start sign-in', e.message); toast(e.message); }
+          finally { busyButton(sign, false); }
         }); actions.append(sign);
       }
       if (['claude','codex'].includes(provider.id)) {
@@ -541,8 +643,15 @@
         toggle.addEventListener('click', async () => {
           const enabling = !provider.supervisor_enabled;
           if (!confirm(`${enabling ? 'Enable' : 'Disable'} ${provider.name} as a governed Coding Brain supervisor? Existing budget limits remain in effect.`)) return;
-          try { const res=await api(`/api/providers/${provider.id}/configure`,'POST',{enabled:enabling}); toast(res.message); await reloadControl(); }
-          catch(e) { toast(e.message); }
+          busyButton(toggle, true);
+          feedback('busy', `Saving ${provider.name} routing`, 'Applying the supervisor setting through the existing Coding Brain backend.');
+          try {
+            const res=await api(`/api/providers/${provider.id}/configure`,'POST',{enabled:enabling});
+            await reloadControl();
+            feedback('success', `${provider.name} supervisor setting saved`, 'The configured usage and approval limits remain in effect.');
+            toast(res.message);
+          } catch(e) { feedback('error', 'Provider setting failed', e.message); toast(e.message); }
+          finally { busyButton(toggle, false); }
         }); actions.append(toggle);
       }
       if (provider.docs) {
@@ -553,12 +662,42 @@
   }
 
   async function reloadControl() {
-    try {
-      setupCache = await api('/api/setup');
-      renderSetup(setupCache.readiness);
-      renderProviders(setupCache.providers);
-    } catch(e) { $('setup-message').textContent = 'Cannot check the local engine: ' + e.message; }
+    // Share a pending request: opening Setup and the first-run check must not race.
+    if (controlLoad) return controlLoad;
+    if (!setupCache) loadingComponents();
+    if (!activeMaintenance) feedback('busy', 'Checking your environment', 'Detecting installed tools and provider readiness. No changes are being made.');
+    busyButton($('setup-check'), true);
+    controlLoad = (async () => {
+      try {
+        setupCache = await api('/api/setup');
+        renderSetup(setupCache.readiness);
+        renderProviders(setupCache.providers);
+        if (!activeMaintenance) feedback('success', 'Environment check finished', 'These are detected tools, not a guarantee that every model or sandbox is ready. Use Deep system test for verification.');
+        return setupCache;
+      } catch(e) {
+        $('setup-components').setAttribute('aria-busy', 'false');
+        if (!setupCache) $('setup-components').replaceChildren();
+        $('setup-message').textContent = 'Could not check the local engine: ' + e.message;
+        if (!activeMaintenance) feedback('error', 'Environment check failed', e.message + '. Use Refresh checks to retry.');
+        return null;
+      } finally {
+        controlLoad = null;
+        busyButton($('setup-check'), false);
+        // renderSetup may have changed this availability while Refresh checks ran.
+        if (setupCache) $('full-setup').disabled = !setupCache.readiness.full_installer_available;
+      }
+    })();
+    return controlLoad;
   }
+
+  const maintenanceButtons = {
+    install_full:'full-setup', update_engine:'apply-update', repair:'repair-install',
+    check_updates:'check-updates', doctor:'deep-check'
+  };
+  const maintenanceNames = {
+    install_full:'Full system installation', update_engine:'Stable update', repair:'Installation repair',
+    check_updates:'Update check', doctor:'Deep system test'
+  };
 
   async function systemAction(action) {
     const explanations = {
@@ -568,40 +707,93 @@
       check_updates:'Check GitHub for a newer verified stable Coding Brain release?',
       doctor:'Run deep checks of your local model, Docker sandbox and providers? This can take a minute.'
     };
+    if (activeMaintenance) { toast('A setup or update operation is already running.'); return; }
     if (!confirm(explanations[action] || 'Continue?')) return;
+    activeMaintenance = action;
+    const name = maintenanceNames[action] || 'System operation';
+    const button = $(maintenanceButtons[action]);
+    busyButton(button, true);
+    feedback('busy', `${name} starting`, 'Waiting for the official Coding Brain backend.');
+    if (action === 'doctor' || action === 'check_updates' || action === 'repair' || action === 'update_engine') showControl('updates');
+    if (action === 'doctor' || action === 'check_updates') $('maintenance-log').textContent = 'Connecting to Coding Brain…';
     try {
       const data = await api(`/api/system/action?action=${encodeURIComponent(action)}`,'POST',{confirmed:true});
       if (data.opened_terminal) {
-        $('maintenance-log').textContent = data.message;
+        $('maintenance-log').textContent = data.message || `${name} opened in a separate terminal.`;
+        feedback('info', `${name} launched`, 'Continue in the official terminal. Completion cannot be verified from this window; refresh checks after it finishes.');
         toast('Official Coding Brain console opened');
-      } else if (data.job) {
-        $('maintenance-log').textContent = 'Checking…';
-        if (maintenancePoll) clearInterval(maintenancePoll);
-        let seen=0;
-        const fetchLog=async () => {
-          try {
-            const update=await api(`/api/jobs/${data.job.id}?after=${seen}`);
-            for (const event of update.events) {
-              seen=Math.max(seen,event.seq);
-              if (event.kind==='output' || event.kind==='error') $('maintenance-log').textContent += '\n' + event.message;
-            }
-            $('maintenance-log').scrollTop=$('maintenance-log').scrollHeight;
-            if (!['starting','running','approval_required'].includes(update.job.status)) {
-              clearInterval(maintenancePoll); maintenancePoll=null;
-            }
-          } catch(e) { clearInterval(maintenancePoll); maintenancePoll=null; toast(e.message); }
-        };
-        await fetchLog();
-        if (maintenancePoll === null && !['completed','failed','cancelled'].includes((await api(`/api/jobs/${data.job.id}?after=${seen}`)).job.status)) maintenancePoll = setInterval(fetchLog,650);
+        return;
       }
-    } catch(e) { toast(e.message); $('maintenance-log').textContent = e.message; }
+      if (!data.job || !data.job.id) throw new Error('Backend did not return an operation or an official terminal.');
+      const jobId = data.job.id;
+      let seen = 0;
+      let requestPending = false;
+      let errors = 0;
+      $('maintenance-log').textContent = `${name} started. Waiting for verified output…`;
+      feedback('busy', `${name} running`, 'Live output appears below. Elapsed time is shown; no completion percentage is estimated.');
+      const stopPolling = () => {
+        clearInterval(maintenancePoll); maintenancePoll = null;
+        activeMaintenance = null;
+        busyButton(button, false);
+      };
+      const fetchLog = async () => {
+        if (requestPending || activeMaintenance !== action) return;
+        requestPending = true;
+        try {
+          const update = await api(`/api/jobs/${jobId}?after=${seen}`);
+          errors = 0;
+          for (const event of update.events || []) {
+            seen = Math.max(seen, event.seq);
+            if (event.kind === 'output' || event.kind === 'error') {
+              const existing = $('maintenance-log').textContent;
+              $('maintenance-log').textContent = (existing + '\n' + event.message).slice(-65000);
+            }
+          }
+          $('maintenance-log').scrollTop = $('maintenance-log').scrollHeight;
+          const status = update.job.status;
+          if (!['starting', 'running', 'approval_required'].includes(status)) {
+            stopPolling();
+            if (status === 'completed') {
+              if (action === 'doctor' || action === 'check_updates') await reloadControl();
+              feedback('success', `${name} completed`, 'The backend operation finished. Review its output below.');
+            } else {
+              feedback('error', `${name} ${status}`, update.job.error || 'See the operation output below. You can retry.');
+            }
+          } else if (status === 'approval_required') {
+            feedback('busy', `${name} awaiting approval`, 'Complete the required confirmation in the official Coding Brain workflow.');
+          }
+        } catch(e) {
+          errors++;
+          if (errors >= 3) {
+            stopPolling();
+            feedback('error', `${name} connection interrupted`, 'The backend status could not be retrieved. Do not assume the operation stopped: check again before retrying. ' + e.message);
+          } else {
+            feedback('busy', `${name} reconnecting`, 'Waiting for the local engine to respond.');
+          }
+        } finally { requestPending = false; }
+      };
+      maintenancePoll = setInterval(fetchLog, 750);
+      await fetchLog();
+      // This asynchronous job holds activeMaintenance until a terminal status arrives.
+      return;
+    } catch(e) {
+      feedback('error', `${name} could not start`, e.message);
+      $('maintenance-log').textContent = e.message;
+      toast(e.message);
+    } finally {
+      // An explicit external terminal launch is a handoff, not a completed installation.
+      // Keep the button spinning only for an actual polled job still running.
+      if (!maintenancePoll) {
+        activeMaintenance = null;
+        busyButton(button, false);
+      }
+    }
   }
 
   async function firstRun() {
     try {
-      const data=await api('/api/setup');
-      setupCache=data;
-      if (!data.readiness.onboarding_completed) {
+      const data = await reloadControl();
+      if (data && !data.readiness.onboarding_completed) {
         // Never automatically install; only show the guided setup panel.
         renderSetup(data.readiness); renderProviders(data.providers);
         showControl('setup'); $('control-dialog').showModal();

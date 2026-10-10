@@ -132,3 +132,15 @@ For the core/backend agent, see **[`docs/backend-integration-handoff.md`](backen
 It defines the remaining clean-machine installation/bootstrap, stable updater, true global
 conversation, multi-provider backend adapters, typed activity and task lifecycle, and
 Windows end-to-end verification contracts. Those gaps are **not claimed implemented in the UI**.
+
+## Truthful async loading and progress (desktop UI)
+
+The setup window, provider actions, updater, and chat composer expose async states. The UI does **not** invent percentages, fake stages, or mark launched external terminals as completed installations.
+
+- First-run/readiness probe: `control-feedback` announces the probe and elapsed time, plus accessible skeletons in the component grid. Refresh is disabled while its request is pending. The full-install button is unavailable until capability discovery confirms it is supported.
+- System actions: only explicitly confirmed operations launch. While an API-backed operation is pending, the corresponding button is disabled and displays a spinner. The UI polls the backend job, shows real output, and releases the button on success or failure. When an official terminal opens, the UI states **launched**, not **completed**, and directs users to finish in that terminal.
+- Provider sign-in: opens official CLI after approval, shows a temporary launching state, and asks the user to refresh authentication status afterward. No password/token/session content is captured.
+- Chat: a typing message and spinner appear only while a request or task is outstanding, and are removed when a backend output arrives or execution ends. Repeated Enter/send cannot start duplicate work.
+- Failures: connectivity errors expose an error state; after three polling failures the UI warns the operation might still be active rather than claiming cancellation. No automatic retry initiates a second installer or coding task.
+
+Regressions: `python tests/smoke_loading_browser.py` simulates deliberately unresolved API requests in Chromium and verifies live loading, resolution, failure, retry, duplicate-submit prevention, and zero JavaScript exceptions. It runs alongside `tests/smoke_browser.py` in `.github/workflows/desktop-windows.yml`.

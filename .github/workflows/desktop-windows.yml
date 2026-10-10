@@ -124,6 +124,10 @@ jobs:
         env:
           CB_DESKTOP_SCREENSHOT: ${{ runner.temp }}/CodingBrain-Desktop-Workspace.png
         run: python tests/smoke_browser.py
+      - name: Verify asynchronous loading feedback, retries and duplicate-action guards
+        env:
+          CB_DESKTOP_LOADING_SCREENSHOT: ${{ runner.temp }}/CodingBrain-Desktop-Loading.png
+        run: python tests/smoke_loading_browser.py
       - uses: actions/upload-artifact@v4
         with:
           name: CodingBrainDesktop-UI-Screenshots
