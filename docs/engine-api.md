@@ -118,5 +118,11 @@ installed does not mean a provider is ready.
   sandbox (CI: Ubuntu with Ollama and Docker). The contract checks are a gate; whether the model's
   fix passes its tests is reported separately (exit status 2).
 
+Known limit on Windows: Git refuses a task worktree whose repository directory path comes close
+to the Windows MAX_PATH limit (260 characters), with `'$GIT_DIR' too big` (reported as
+`refused`). CI hit it with paths of about 230 characters. Typical paths
+(`C:\Users\<name>\Projects\<app>`, data in `%LOCALAPPDATA%\CodingBrain`) are far shorter;
+very deeply nested projects may hit it until the engine shortens its worktree paths.
+
 Not covered yet: the desktop app itself driving the engine on a real Windows PC, and a real task
 on Windows (GitHub's Windows runners have no Linux containers for the sandbox).

@@ -34,11 +34,17 @@ class InProcess:
 
 
 @pytest.fixture
-def tmp_path(tmp_path):
-    """As in production, every path in its long form: Windows runners give tmp_path with 8.3
-    short names (RUNNER~1) while the desktop resolves the chosen folder (runneradmin); on a real
-    PC both the data folder (LOCALAPPDATA) and a picked project folder are long paths."""
-    return tmp_path.resolve()
+def tmp_path():
+    """A short temporary root. Git on Windows refuses a $GIT_DIR close to MAX_PATH (260), and
+    pytest's per-test folders under the runner's temp directory, plus the engine's data layout,
+    reach it (CI: '$GIT_DIR' too big at about 230 characters). This is a real limit for very deep project
+    folders on Windows too (documented in docs/engine-api.md); these tests are about the desktop
+    and the engine working together, not about path length."""
+    import shutil
+    import tempfile
+    root = Path(tempfile.mkdtemp(prefix="cbd-")).resolve()
+    yield root
+    shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.fixture
