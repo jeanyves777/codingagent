@@ -75,7 +75,7 @@ def test_schema_and_info():
     assert schema["api_version"] == "1.0" and set(schema["operations"]) == set(OPERATIONS)
     assert {op for op, item in schema["operations"].items() if item["kind"] == "action"} == {
         "projects.register", "projects.create", "tasks.start", "tasks.approve", "tasks.accept", "tasks.stop",
-        "tasks.resume"}
+        "tasks.resume", "tasks.tool_decision"}
     assert schema["operations"]["conversation.send"]["kind"] == "read"
 
 
@@ -372,3 +372,26 @@ def test_child_processes_never_touch_the_protocol_pipes(tmp_path):
     out, err = process.communicate("request-1\n", timeout=60)
     assert out.splitlines() == ["{\"echo\": 'request-1'}"]  # the child did not consume the request
     assert "child-out" in err and "stray print" in err and "stdin: ''" in err
+
+
+def test_tool_decision_is_bound_to_the_pending_request(world, monkeypatch):
+    engine, pid = world["engine"], world["project"]["id"]
+    with_fake_brain(world, monkeypatch)
+    task = engine.call("tasks.start", {"project_id": pid, "goal": "Fix x"})
+    with pytest.raises(ApiError) as error:  # the task is not waiting on a tool request
+        engine.call("tasks.tool_decision", {"project_id": pid, "task_id": task["id"], "request_id": "r1",
+                                            "decision": "approve"})
+    assert error.value.code == "refused"
+    brain = engine.brain(pid)
+    stored = brain.store.get(task["id"])
+    stored.update(status="awaiting_tool_approval", pending_approval_id="r1")
+    brain.store.save(stored)
+    assert engine.call("tasks.get", {"project_id": pid, "task_id": task["id"]})["pending_tool_approval"] == "r1"
+    with pytest.raises(ApiError) as error:  # another request id is refused
+        engine.call("tasks.tool_decision", {"project_id": pid, "task_id": task["id"], "request_id": "r2",
+                                            "decision": "approve"})
+    assert error.value.code == "refused"
+    with pytest.raises(ApiError) as error:
+        engine.call("tasks.tool_decision", {"project_id": pid, "task_id": task["id"], "request_id": "r1",
+                                            "decision": "maybe"})
+    assert error.value.code == "bad_params"

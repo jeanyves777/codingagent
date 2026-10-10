@@ -24,7 +24,7 @@ The same operations are available in-process as `brain.local.engine.Engine(...).
   - `refused`: a safety rule or the task state said no
   - `engine_error`
 - **Events:** `{"event": {...journal event...}, "op_id": 7}`. While a long operation runs
-  (`tasks.start`, `tasks.approve` or `tasks.resume`), the server streams the activity-journal
+  (`tasks.start`, `tasks.approve`, `tasks.tool_decision` or `tasks.resume`), the server streams the activity-journal
   events of **that operation's task** (and its subtasks) as they happen. Each event carries its
   `task_id`; other tasks in the same project never appear in this feed. To follow a task you did
   not start in this session, poll `tasks.events` with `after_seq`. These are the same events
@@ -71,6 +71,7 @@ The same operations are available in-process as `brain.local.engine.Engine(...).
 | `tasks.start {project_id, goal, new_project}` | Plans the goal. Returns the proposal, the files and the diff, and the **digest**. Nothing is applied. |
 | `tasks.approve {project_id, task_id, digest, decision}` | `approve` reviews the proposal, applies it in the isolated worktree and tests it in the sandbox, repairing or escalating within the budgets. Only the current digest is accepted, so an approval cannot be replayed once the task moves on. `decline` cancels. |
 | `tasks.accept {project_id, task_id}` | Accepts a tested result as a **new branch**. The checked-out branch is unchanged. |
+| `tasks.tool_decision {project_id, task_id, request_id, decision}` | Approves or declines the protected tool request the task is waiting on (`pending_tool_approval`); any other request id is refused. The task then continues or stops. |
 | `tasks.stop {project_id, task_id}` | Requests cancellation; returns at once. A running task stops at its next safe boundary. |
 | `tasks.resume {project_id, task_id}` | Continues an unfinished task. |
 
