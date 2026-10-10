@@ -95,6 +95,7 @@ def test_run_is_explicit_and_cannot_run_outside_git(client):
 
 def test_chat_never_falls_back_to_engineering_task(client):
     api, w = client
+    w.use_core = False  # exercise unavailable CLI, not an installed Brain
     result = api.post("/api/start", headers=headers(w), json={"mode":"chat","message":"hello"})
     assert result.status_code == 200
     job = w.jobs[result.json()["id"]]
@@ -117,6 +118,7 @@ def test_acceptance_requires_actual_prompt(client):
 def test_two_sessions_not_allowed_simultaneously(tmp_path):
     # Verify deterministic in-memory coordination without launching outside commands.
     w = Workspace(home=tmp_path, executable=sys.executable)
+    w.use_core = False  # deliberately use the command-array fallback
     fake = w.start(StartRequest(mode="chat", message="hello"))
     if fake.status in {"starting", "running", "approval_required"}:
         with pytest.raises(ValueError):
