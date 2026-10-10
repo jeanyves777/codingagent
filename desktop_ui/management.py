@@ -64,9 +64,10 @@ IS_WINDOWS = os.name == "nt"
 def installed_cli(name: str) -> str | None:
     """Find official CLI launchers even when Windows Desktop inherited a stale PATH.
 
-    npm installs Codex / Claude shims in the user's roaming npm directory; the
-    process may have been started before npm added that folder to PATH. Only
-    inspect fixed per-user launcher locations. Never run a provider to discover it.
+    Different official installers create launchers in different per-user
+    directories. The desktop may have inherited an older PATH than PowerShell.
+    Inspect only known user-owned launcher locations and never execute a
+    provider while searching for its executable.
     """
     found = shutil.which(name)
     if found:
@@ -80,6 +81,10 @@ def installed_cli(name: str) -> str | None:
         candidates.extend((Path(roaming) / "npm" / (name + suffix) for suffix in (".cmd", ".exe")))
     if local:
         candidates.append(Path(local) / "Microsoft" / "WinGet" / "Links" / (name + ".exe"))
+        if name == "codex":
+            # Official standalone Codex Windows installer (no Node/npm required).
+            # Example: %LOCALAPPDATA%\\Programs\\OpenAI\\Codex\\bin\\codex.exe
+            candidates.append(Path(local) / "Programs" / "OpenAI" / "Codex" / "bin" / "codex.exe")
     return next((str(candidate) for candidate in candidates if candidate.is_file()), None)
 
 
@@ -111,7 +116,7 @@ def providers_snapshot(probe: Callable[[list[str]], bool | None] = safe_probe) -
         elif provider.id == "codex":
             result = auth.get("codex")
             status = "authenticated" if result is True else "sign-in-needed" if result is False else "auth-unverified" if binary else "not-installed"
-            detail = "Official Codex CLI confirmed ChatGPT sign-in" if result is True else "Sign in with ChatGPT through Codex" if result is False else "Auth check did not complete" if binary else "Codex CLI not found in desktop PATH or user launcher folders. Restart this desktop after installing it."
+            detail = "Official Codex CLI confirmed ChatGPT sign-in" if result is True else "Sign in with ChatGPT through Codex" if result is False else "Auth check did not complete" if binary else "Codex CLI not found in PATH, roaming npm, WinGet links, or the official OpenAI Codex user directory. Recheck connections after installation."
         elif provider.id == "gemini":
             status = "installed" if binary else "not-installed"
             detail = "Sign in within Gemini CLI; autonomous core routing not implemented" if binary else "Gemini CLI not installed"
