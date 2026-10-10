@@ -745,6 +745,15 @@ def create_app(state: Workspace | None = None) -> FastAPI:
         except Exception as e:
             raise HTTPException(503, "Native folder picker unavailable; enter a path instead") from e
 
+    @app.get("/api/git/snapshot", dependencies=[Depends(auth)])
+    def git_snapshot():
+        """Read-only fresh Git state for the selected project; no path input accepted."""
+        from .git_inspection import git_snapshot as inspect_git
+        try:
+            return inspect_git(state.project)
+        except (ValueError, OSError) as error:
+            raise HTTPException(503, "Local Git state unavailable; retry the live refresh") from error
+
     @app.get("/api/tree", dependencies=[Depends(auth)])
     def tree(path: str = ""):
         try:
