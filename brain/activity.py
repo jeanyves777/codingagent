@@ -24,6 +24,12 @@ PHASES = {
     "repair": "Diagnosis and repair", "retest": "Retesting", "completion_verification": "Completion verification",
     "visual_verification": "Visual verification", "acceptance": "Acceptance and Git integration",
 }
+# Installer steps (brain.local.installer), shown by the same live view.
+PHASES.update({"install": "Installation", "install:preflight": "Preflight", "install:verify": "Readiness verification",
+               "install:python": "Python", "install:git": "Git", "install:wsl": "WSL 2", "install:docker": "Docker Desktop",
+               "install:ollama": "Ollama", "install:model": "Local coding model", "install:claude": "Claude Code",
+               "install:codex": "Codex CLI", "install:sandbox": "Sandbox images", "install:knowledge": "Knowledge library",
+               "install:ocr": "Tesseract OCR", "install:vision": "Vision model", "install:browser": "Browser"})
 STATES = ("PENDING", "RUNNING", "COMPLETED", "FAILED", "BLOCKED", "RETRYING", "WAITING_APPROVAL", "CANCELLED")
 PHASE: contextvars.ContextVar = contextvars.ContextVar("coding_brain_phase", default=None)
 
