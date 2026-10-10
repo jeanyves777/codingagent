@@ -4,6 +4,7 @@ import difflib
 import hashlib
 import inspect
 import json
+import re
 import shutil
 import time
 import uuid
@@ -17,6 +18,7 @@ from .completion import (accept_requirement_tests, assess_failures, requirement_
                          without_tests)
 from .contracts import Assignment, Delegation, Proposal, validate_graph
 from .intelligence import build_index, relevant_context
+from .activity import ActivityMixin
 from .orchestration import OrchestrationMixin
 from .repository import MAX_FILE, safe_path, snapshot
 from .sandbox import run_tests
@@ -54,7 +56,24 @@ def overlaps(a: Path, b: Path) -> bool:
     return is_within(a, b) or is_within(b, a)
 
 
-class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
+def sandbox_error(output: str) -> bool:
+    """Docker itself failed (missing image, daemon or platform error): not the model's code."""
+    head = (output or "")[:2000]
+    return "Error response from daemon" in head or head.lstrip().startswith(("docker: ", "Unable to find image"))
+
+
+def test_tail(output: str) -> str:
+    """The test runner's own summary line ('3 passed, 1 failed in 0.4s'), or the sandbox's error."""
+    lines = [line.strip(" =") for line in (output or "").strip().splitlines() if line.strip(" =")]
+    errors = [line for line in lines if "Unable to find image" in line or line.lower().startswith(("docker:", "error"))]
+    return (errors or lines or ["no output"])[0 if errors else -1][:200]
+
+
+# A test runner that reports zero tests (pytest, node:test spec or TAP output).
+NO_TESTS_RAN = re.compile(r"(?m)^\s*(?:ℹ|#)?\s*tests 0\s*$|collected 0 items")
+
+
+class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin):
     ACTIVE = {"queued", "planning", "running", "testing", "cancellation_requested"}
 
     def __init__(self, repositories: Path, data: Path, model, image, reviewer=None,
@@ -92,6 +111,8 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         self.queue = queue
         self.approvals = approvals
         self.telemetry = telemetry or Telemetry(self.data / "telemetry.sqlite3")
+        from .snapshots import SnapshotStore
+        self.snapshots = SnapshotStore(self.data / "snapshots")
         self.manager = WorkspaceManager()
         self.locks, self.jobs = {}, {}
         self.slots = asyncio.Semaphore(workers)
@@ -140,6 +161,20 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             "time": datetime.now(timezone.utc).isoformat(), "kind": kind, "detail": detail,
             "trace_id": trace_id})
         self.store.save(task)
+        self.journal_task_event(task, kind, detail)
+
+    def snapshot(self, task: dict, label: str, artifacts=None) -> str | None:
+        """Best effort: a snapshot never fails or delays the task's outcome."""
+        try:
+            workspace = self.workspace(task["id"]) if task.get("kind") == "task" else None
+            snapshot_id = self.snapshots.capture(task, workspace, label, artifacts)
+        except Exception as error:
+            self.journal_event(task, "snapshot", status="FAILED", agent="coding_brain",
+                               summary=f"snapshot {label} failed: {type(error).__name__}: {str(error)[:200]}")
+            return None
+        self.journal_event(task, "snapshot", status="COMPLETED", agent="coding_brain",
+                           summary=f"snapshot {label}", artifacts=[{"snapshot": snapshot_id, "label": label}])
+        return snapshot_id
 
     def launch(self, task_id, operation):
         if task_id in self.jobs and not self.jobs[task_id].done():
@@ -221,6 +256,8 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             task["attachments"] = attachments  # evidence with provenance (brain.attachments.evidence)
         if visual:
             task["visual"] = visual  # reference images and settings for visual verification
+        self.journal_event(task, "stage", phase="goal", status="COMPLETED", agent="user", summary=goal[:500],
+                           dedupe=f"{task['id']}:goal", data={"attachments": len((attachments or {}).get("attachments", []))})
         with self.telemetry.span(task["trace_id"], "api.submit", task["id"]):
             self.store.save(task)
             if launch:
@@ -237,22 +274,26 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         task["status"] = "planning"
         self.store.save(task)
         try:
-            metadata = await asyncio.to_thread(
-                self.manager.prepare, source, workspace, task.get("base_commit")
-            )
-            task["workspace_kind"] = metadata["kind"]
-            task["base_commit"] = metadata["base_commit"]
-            baseline = workspace.parent / "baseline"
-            await asyncio.to_thread(snapshot, workspace, baseline)
-            index = await asyncio.to_thread(build_index, workspace)
-            self.store.save_index(task["repository"], index)
+            with self.stage(task, "project_validation", summary="Validating Git and preparing an isolated worktree"):
+                metadata = await asyncio.to_thread(
+                    self.manager.prepare, source, workspace, task.get("base_commit")
+                )
+                task["workspace_kind"] = metadata["kind"]
+                task["base_commit"] = metadata["base_commit"]
+                baseline = workspace.parent / "baseline"
+                await asyncio.to_thread(snapshot, workspace, baseline)
+            with self.stage(task, "indexing", summary="Indexing the repository"):
+                index = await asyncio.to_thread(build_index, workspace)
+                self.store.save_index(task["repository"], index)
+            self.snapshot(task, "initial")
             self._check_cancelled(task)
             guidance = await self.premium_plan(task, workspace, self.with_attachments(
                 task, relevant_context(index, task["goal"])))
             await self.write_requirement_checks(task, workspace, self.with_attachments(
                 task, relevant_context(index, task["goal"])))
             self._check_cancelled(task)
-            await self._initial_proposal(task, workspace, task["goal"] + guidance)
+            with self.stage(task, "proposal", agent="implementer", summary="Generating the proposed changes"):
+                await self._initial_proposal(task, workspace, task["goal"] + guidance)
             self._check_cancelled(task)
         except Exception:
             task["status"] = "blocked"
@@ -265,6 +306,10 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         goal and the visible repository only. Failing to produce usable checks never blocks the task."""
         if not self.requirement_checks or task.get("requirement_tests") is not None:
             return
+        with self.stage(task, "requirements", agent="implementer", summary="Writing checks from the goal's requirements"):
+            await self._write_requirement_checks(task, workspace, context)
+
+    async def _write_requirement_checks(self, task: dict, workspace: Path, context: dict):
         started, before = time.monotonic(), self.usage_counters()
         try:
             with self.telemetry.span(task["trace_id"], "model.requirements", task["id"]), \
@@ -457,6 +502,11 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         raise AssertionError("unreachable")
 
     async def _plan_once(self, task: dict, workspace: Path, goal: str):
+        with self.stage(task, "memory", summary="Retrieving memory, knowledge and repository context"):
+            memories, index, context, tools = await self._gather_context(task, workspace, goal)
+        return await self._propose(task, workspace, goal, memories, index, context, tools)
+
+    async def _gather_context(self, task: dict, workspace: Path, goal: str):
         memories = self.store.memories(task["repository"], goal)
         if self.memory:
             try:
@@ -489,6 +539,9 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         context = self.with_attachments(task, context)
         if self.web:
             tools = tuple(tools) + self.web.task_capabilities(workspace)
+        return memories, index, context, tools
+
+    async def _propose(self, task, workspace, goal, memories, index, context, tools):
         started, before = time.monotonic(), self.usage_counters()
         token, query_token = TASK_CAPABILITIES.set(tools), TASK_QUERY.set(goal)
         try:
@@ -562,6 +615,16 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         task["proposal_author"] = author
         self.event(task, author, "Indexed repository and completed proposal" if author == "implementer"
                    else "Proposal supplied by " + author)
+        route = task.get("model_route") or {}
+        model_name = route.get("model") or (getattr(self.model, "name", None) if author == "implementer" else None)
+        self.journal_event(task, "decision", phase="proposal", status="COMPLETED", agent=author, model=model_name,
+                           summary=proposal.plan[:2000],
+                           data={"source": "model-provided", "files": [change.path for change in proposal.changes]})
+        self.snapshot(task, "after_proposal")
+        self.journal_event(task, "approval", phase="approval", status="WAITING_APPROVAL", agent="user",
+                           summary="Waiting for approval to review, apply and test: " +
+                                   ", ".join(change.path for change in proposal.changes)[:500],
+                           dedupe=f"{task['id']}:approval:{task['digest']}")
         return True
 
     def _engineering_packet(self, task, workspace, goal, index, memories, context):
@@ -797,25 +860,46 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         while True:
             attempt += 1
             self._check_cancelled(task)
-            review = await self.review(task)
+            with self.stage(task, "review", agent="reviewer", summary=f"Reviewing the diff (attempt {attempt})"):
+                review = await self.review(task)
+            self.decision(task, "review", "reviewer", review["reason"][:1500], "model-provided",
+                          approved=review["approved"])
             disputed = not review["approved"]
             if review["approved"] or self.review_mode == "advisory":
                 if disputed:
                     self.event(task, "review_disputed", "Free reviewer objected; running the authoritative "
                                "offline tests anyway: " + review["reason"][:500])
-                self.apply(task)
+                self.snapshot(task, "before_changes")
+                with self.stage(task, "implementation", summary="Applying the changes in the isolated worktree"):
+                    self.apply(task)
+                self.snapshot(task, "after_changes")
                 self._check_cancelled(task)
                 task["status"] = "testing"
                 self.event(task, "tester", f"Isolated test attempt {attempt}")
-                evidence = await asyncio.to_thread(
-                    run_tests, workspace, self.image,
-                    should_cancel=lambda: self.store.get(task_id).get("cancel_requested", False))
+                self.snapshot(task, "before_tests")
+                with self.stage(task, "sandbox" if attempt == 1 else "retest", agent="sandbox",
+                                summary=f"Running the tests in the offline sandbox (attempt {attempt})"):
+                    evidence = await asyncio.to_thread(
+                        run_tests, workspace, self.image,
+                        should_cancel=lambda: self.store.get(task_id).get("cancel_requested", False))
                 if evidence.get("cancelled"):
                     self._check_cancelled(task)
+                if task.get("tests_expected") and evidence.get("passed") and NO_TESTS_RAN.search(evidence.get("output", "")):
+                    # A runner that passes with zero tests (node --test) proves nothing.
+                    evidence = {**evidence, "passed": False, "exit_code": 5}
                 task["test_evidence"] = evidence
                 self.event(task, "test_finished", json.dumps(evidence))
+                self.journal_event(task, "test_result", phase="test_results",
+                                   status="COMPLETED" if evidence["passed"] else "FAILED", agent="sandbox",
+                                   summary=f"{'passed' if evidence['passed'] else 'failed'} (exit {evidence.get('exit_code')}): "
+                                           + test_tail(evidence.get("output", "")),
+                                   data={"exit_code": evidence.get("exit_code"), "profile": evidence.get("profile")})
+                self.snapshot(task, "after_tests")
                 requirement = None
-                if evidence["passed"]:
+                if evidence["passed"] and task.get("requirement_tests"):
+                    with self.stage(task, "completion_verification", summary="Running the goal's requirement checks"):
+                        requirement = await self._verify_completion(task, workspace)
+                elif evidence["passed"]:
                     requirement = await self._verify_completion(task, workspace)
                 if requirement and requirement.get("stop"):
                     # Only failures already repaired against remain: no repeated repairs.
@@ -837,6 +921,10 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                     verdict = await self.final_review(task)
                     if verdict is None or verdict.get("approved"):
                         task["status"] = "passed"
+                        self.snapshot(task, "before_acceptance")
+                        self.journal_event(task, "approval", phase="acceptance", status="WAITING_APPROVAL", agent="user",
+                                           summary="Tests passed; waiting for you to accept the result as a new branch",
+                                           dedupe=f"{task['id']}:acceptance:{task.get('digest')}")
                         task["review_disputed"] = disputed
                         task.pop("visible_pass", None)
                         if disputed:
@@ -845,28 +933,77 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                                        "the human at acceptance: " + review["reason"][:500])
                         return
                     feedback = "\nSupervisor review (untrusted): " + str(verdict.get("reason", ""))
-                elif evidence["exit_code"] in (None, 5, 125, 126, 127):
+                elif evidence["exit_code"] == 5 and task.get("tests_expected") and not sandbox_error(evidence.get("output", "")):
+                    # A project `codingbrain new` just created has no tests yet: writing them is part of
+                    # the work, so their absence is repairable here (elsewhere it fails closed, below).
+                    failure = classify_test_failure(evidence)
+                    task.setdefault("failure_log", []).append({"attempt": attempt, **failure})
+                    self.decision(task, "repair", "coding_brain", f"No tests ran; repair attempt {failures + 1} of "
+                                  f"{limit}: this new project's tests must come with the code", "observed")
+                    feedback = ("\nNo tests ran. This is a new project, so its tests are part of the work: add test "
+                                "files (Python: tests/test_<module>.py using pytest; Node: test/<name>.test.js "
+                                "using node:test) that check the behaviour the goal describes, together with the code. "
+                                "Tests the runner cannot find do not count: write test functions named test_* "
+                                "(Python) or test(...) calls in test files (Node), and do not claim tests exist "
+                                "when the output above shows none ran.")
+                elif evidence["exit_code"] in (None, 5, 125, 126, 127) or sandbox_error(evidence.get("output", "")):
                     # Missing tests or sandbox problems are not the model's fault; never escalate them.
                     task["status"] = "failed"
                     return
                 else:
                     failure = classify_test_failure(evidence)
                     task.setdefault("failure_log", []).append({"attempt": attempt, **failure})
+                    self.decision(task, "repair", "coding_brain", f"Tests failed ({failure['category']}); "
+                                  f"repair attempt {failures + 1} of {limit}: {failure['summary'][:600]}", "observed")
                     feedback = (f"\nTests failed ({failure['category']}). Repair related failures only. "
                                 "Test output (untrusted):\n" + failure["summary"])
                     if disputed:
                         feedback += "\nReviewer feedback (untrusted): " + review["reason"]
                     feedback += await self._upstream_feedback(task, workspace, failure)
+                    feedback += await self._isolation_diagnosis(task, workspace, evidence)
             else:
                 task.setdefault("failure_log", []).append({"attempt": attempt, "category": "review",
                                                            "summary": review["reason"][:1000]})
                 feedback = "\nReviewer feedback (untrusted): " + review["reason"]
             failures += 1
-            outcome = await self._repair(task, workspace, feedback, failures, limit, escalate_after)
+            self.snapshot(task, "before_repair")
+            with self.stage(task, "repair", agent="implementer", summary=f"Repairing after failure {failures}"):
+                outcome = await self._repair(task, workspace, feedback, failures, limit, escalate_after)
+            if outcome is not None:
+                self.snapshot(task, "after_repair")
             if outcome is None:
                 return
             failures, limit = outcome
             task["status"] = "running"
+
+    async def _isolation_diagnosis(self, task, workspace, evidence) -> str:
+        """When a few pytest tests fail while others pass, re-run each failing test alone. A test that
+        passes alone but fails in the full run shows the tests share state; saying so precisely lets
+        the repair fix the isolation instead of the expected values."""
+        output = evidence.get("output", "")
+        if evidence.get("profile") != "python":
+            return ""
+        failed = list(dict.fromkeys(re.findall(r"(?m)^FAILED (\S+\.py::[^\s]+)", output)))
+        passed = re.search(r"(\d+) passed", output)
+        if not failed or len(failed) > 3 or not passed:
+            return ""
+        alone = []
+        with self.stage(task, "repair", agent="sandbox", summary="Re-running each failing test alone (diagnosis)"):
+            for node in failed:
+                result = await asyncio.to_thread(run_tests, workspace, self.image, only=[node])
+                if result.get("passed"):
+                    alone.append(node)
+        if not alone:
+            return ""
+        self.decision(task, "repair", "coding_brain", f"Diagnosis: {', '.join(alone)} pass(es) alone but fail(s) in "
+                      "the full run, so the tests share state", "observed", tests=alone)
+        if task.get("failure_log"):
+            task["failure_log"][-1].update({"diagnosis": "test_isolation", "isolated_passes": alone})
+        return ("\nDiagnosis (observed by re-running each failing test alone): " + ", ".join(alone) +
+                " pass(es) alone but fail(s) when run with the other tests. The tests share state: module-level "
+                "variables (counters, lists, dicts) keep their values from one test to the next. Fix the isolation, "
+                "for example with an autouse pytest fixture or a reset function that re-initialises that state before "
+                "each test. Do not change the expected values to match the leaked state.")
 
     async def _verify_visual(self, task, workspace) -> str | None:
         """After tests pass: render the result and check it against the visual requirements.
@@ -879,7 +1016,9 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         from .visual import feedback as visual_feedback
         started = time.monotonic()
         try:
-            with self.telemetry.span(task["trace_id"], "visual.verify", task["id"]), accounting.collect(task):
+            with self.stage(task, "visual_verification", agent="browser",
+                            summary="Rendering the result and checking layout, accessibility and the design"), \
+                    self.telemetry.span(task["trace_id"], "visual.verify", task["id"]), accounting.collect(task):
                 result = await verifier.verify(task, workspace)
         except Exception as error:  # verification problems never fail a task that passed its tests
             result = {"status": "inconclusive", "reason": f"{type(error).__name__}: {str(error)[:300]}"}
@@ -888,6 +1027,9 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         log.append({key: result.get(key) for key in ("status", "blocking", "digest", "statement", "reason",
                                                       "viewports", "seconds")})
         task["visual_verification"] = result
+        self.snapshot(task, "after_visual", artifacts=[
+            {"path": path, "kind": "screenshot", "viewport": viewport}
+            for path, viewport in zip(result.get("screenshots") or [], result.get("viewports") or [])])
         self.event(task, "visual_verification", f"{result['status']}: " + (result.get("statement") or
                                                                           result.get("reason") or "")[:500])
         if result["status"] != "defects":
@@ -952,6 +1094,8 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             task = self.store.get(task_id)
             if task["status"] != "passed":
                 raise ValueError("Only test-passed tasks can be accepted")
+            self.journal_event(task, "approval", phase="acceptance", status="COMPLETED", agent="user",
+                               summary="Result accepted", dedupe=f"{task['id']}:accepted")
             if task.get("workspace_kind") == "git":
                 task["commit"] = await asyncio.to_thread(
                     self.manager.commit, self.workspace(task_id), task_id

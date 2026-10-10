@@ -34,6 +34,35 @@ Install once and use `codingbrain` in any project; update with `codingbrain upda
 instructions: [docs/windows-install.md](docs/windows-install.md). Release process:
 [RELEASING.md](RELEASING.md).
 
+## Talk to it
+
+Run `codingbrain` from any folder and talk naturally. A greeting gets a greeting, and a question
+gets an answer. "Create a task manager app" starts a new project, and "fix the calculator bug"
+proposes a task in the right project. Work starts only after you confirm. See
+[docs/assistant.md](docs/assistant.md).
+
+## Start a new application from one sentence
+
+```powershell
+codingbrain new "Build a task manager with due dates and priorities"
+```
+
+This creates a new folder in your Projects folder, sets up Git (with an empty baseline commit) and
+a tested scaffold. It then builds your goal with live activity, tests in the offline sandbox and
+waits for your acceptance. See [docs/new-project.md](docs/new-project.md).
+
+## Complete installation and readiness
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -Full   # or -Local; -PlanOnly changes nothing
+codingbrain doctor --full                                     # Core / Sandbox / Hybrid / Full ready, Degraded or Blocked
+```
+
+The installer prepares Git, WSL 2, Docker Desktop, Ollama and a model sized for your computer, the
+test sandbox, and, optionally, Claude Code and Codex (your subscriptions), the knowledge library
+and the multimodal extras. It asks before every change, resumes after restarts and verifies with
+real checks. See [docs/installation.md](docs/installation.md).
+
 ## Images, screenshots and documents (v0.11)
 
 `codingbrain run "Recreate this interface" --attach C:\Designs\dashboard.png` reads screenshots,

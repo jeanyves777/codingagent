@@ -27,10 +27,62 @@ class Telemetry:
                        "name TEXT NOT NULL, status TEXT NOT NULL, attributes TEXT NOT NULL, "
                        "started_at REAL NOT NULL, ended_at REAL, error TEXT)")
             db.execute("CREATE INDEX IF NOT EXISTS events_trace ON events(trace_id,id)")
+            # The activity journal: append-only, persisted as events happen, ordered by seq.
+            db.execute("CREATE TABLE IF NOT EXISTS journal ("
+                       "seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, dedupe TEXT UNIQUE, "
+                       "at REAL NOT NULL, task_id TEXT, parent_task_id TEXT, trace_id TEXT, agent TEXT, provider TEXT, "
+                       "model TEXT, phase TEXT, event_type TEXT NOT NULL, status TEXT, duration REAL, summary TEXT, "
+                       "artifacts TEXT, data TEXT, pid INTEGER)")
+            db.execute("CREATE INDEX IF NOT EXISTS journal_task ON journal(task_id,seq)")
             db.execute("CREATE INDEX IF NOT EXISTS spans_trace ON spans(trace_id,started_at)")
 
     def connect(self):
         return sqlite3.connect(self.path, timeout=10)
+
+    JOURNAL_FIELDS = ("seq", "event_id", "at", "task_id", "parent_task_id", "trace_id", "agent", "provider", "model",
+                      "phase", "event_type", "status", "duration", "summary", "artifacts", "data", "pid")
+
+    def append(self, event_type: str, *, task_id=None, parent_task_id=None, trace_id=None, agent=None,
+               provider=None, model=None, phase=None, status=None, duration=None, summary="", artifacts=None,
+               data=None, dedupe=None) -> int | None:
+        """Write one journal event now. Summaries and data are redacted; a repeated dedupe key
+        (the same stage outcome replayed after a resume) is ignored. Returns seq, or None."""
+        import os
+        from .redaction import redact_value
+        with self.connect() as db:
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO journal (event_id, dedupe, at, task_id, parent_task_id, trace_id, agent, provider, "
+                "model, phase, event_type, status, duration, summary, artifacts, data, pid) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (uuid.uuid4().hex, dedupe, time.time(), task_id, parent_task_id, trace_id, agent, provider, model, phase,
+                 event_type, status, round(duration, 3) if duration is not None else None,
+                 redact_value(str(summary or ""))[:4000], json.dumps(artifacts or [])[:20000],
+                 json.dumps(redact_value(data or {}), default=str)[:20000], os.getpid()))
+            return cursor.lastrowid if cursor.rowcount else None
+
+    def journal(self, task_ids=None, after=0, limit=1000) -> list[dict]:
+        clauses, values = ["seq>?"], [after]
+        if task_ids:
+            clauses.append(f"task_id IN ({','.join('?' * len(task_ids))})")
+            values += list(task_ids)
+        with self.connect() as db:
+            rows = db.execute(f"SELECT {','.join(self.JOURNAL_FIELDS)} FROM journal WHERE {' AND '.join(clauses)} "
+                              "ORDER BY seq LIMIT ?", values + [limit]).fetchall()
+        events = []
+        for row in rows:
+            item = dict(zip(self.JOURNAL_FIELDS, row))
+            item["artifacts"] = json.loads(item["artifacts"] or "[]")
+            item["data"] = json.loads(item["data"] or "{}")
+            events.append(item)
+        return events
+
+    def last_seq(self) -> int:
+        with self.connect() as db:
+            return db.execute("SELECT COALESCE(MAX(seq), 0) FROM journal").fetchone()[0]
+
+    def purge_journal(self, older_than: float) -> int:
+        with self.connect() as db:
+            return db.execute("DELETE FROM journal WHERE at < ?", (older_than,)).rowcount
 
     def publish(self, task_id: str, trace_id: str, kind: str, detail: str) -> int:
         with self.connect() as db:

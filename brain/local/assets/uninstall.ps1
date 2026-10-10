@@ -50,3 +50,4 @@ if ($RemoveData) {
 } else {
   Write-Host "Coding Brain was removed. Configuration and project memory remain in $InstallDir (delete with -RemoveData)."
 }
+Write-Host 'WSL, Docker Desktop and its images, Ollama and its models, Claude Code, Codex, Git and Python were not changed; remove them separately if you no longer need them.'

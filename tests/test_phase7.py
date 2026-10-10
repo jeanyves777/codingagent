@@ -294,3 +294,45 @@ def test_publish_feedback_and_follow_up_update_the_same_pull_request(tmp_path, m
         assert git(remote, "rev-parse", task["pull_request"]["branch"]) == follow["commit"]
     asyncio.run(flow())
     assert sum(1 for method, path, _ in log if method == "POST") == 1
+
+
+def shared_state_suite(workspace, image, only=None, **kwargs):
+    """A suite whose test passes alone but fails with the others (leaked module state)."""
+    fixed = (workspace / "main.py").read_text() == "x = 2\n"
+    if fixed or only:
+        return {"passed": True, "exit_code": 0, "profile": "python", "output": "1 passed"}
+    return {"passed": False, "exit_code": 1, "profile": "python",
+            "output": "FAILED tasks.py::test_list - assert [{'id': 3}] == [{'id': 1}]\n1 failed, 2 passed in 0.02s"}
+
+
+def test_shared_state_is_diagnosed_and_reaches_the_supervisor(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr("brain.service.run_tests", lambda *a, **k: calls.append(k.get("only")) or shared_state_suite(*a, **k))
+    supervisor = FakeSupervisor("claude", reply=DIAGNOSIS)
+    brain = supervised_brain(tmp_path, supervisor, plan_complex_tasks=False)
+
+    async def flow():
+        task = brain.submit("demo", "Fix x", launch=False)
+        task["tests_expected"] = True  # a project created by `codingbrain new`
+        task = await brain.create(task)
+        return await brain.execute(task["id"], task["digest"])
+    task = asyncio.run(flow())
+    assert ["tasks.py::test_list"] in calls  # the failing test was re-run alone
+    assert any("pass(es) alone but fail(s)" in goal for goal in brain.model.goals)  # the free model was told
+    diagnosis = supervisor.calls[0][1]["evidence"]
+    assert "share state" in diagnosis["last_feedback"]  # and so was the stronger supervisor
+    assert task["failure_log"][0]["diagnosis"] == "test_isolation"
+    assert task["status"] == "passed"
+
+
+def test_single_test_runs_accept_only_pytest_node_ids(tmp_path, monkeypatch):
+    from brain.sandbox import run_tests
+    (tmp_path / "coding-brain.json").write_text('{"test_profile": "python"}')
+    launched = []
+    monkeypatch.setattr("brain.sandbox.subprocess.run", lambda command, **k: launched.append(command) or
+                        type("R", (), {"returncode": 0})())
+    for bad in (["--rootdir=/"], ["tasks.py::test_x; rm -rf /"], ["-p", "evil"]):
+        assert run_tests(tmp_path, "img", only=bad)["exit_code"] is None
+    assert launched == []
+    run_tests(tmp_path, "img", only=["tests/test_tasks.py::test_list[case-1]"])
+    assert launched[0][-1] == "tests/test_tasks.py::test_list[case-1]" and "--network=none" in launched[0]
