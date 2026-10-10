@@ -75,8 +75,8 @@ def probe(python: str, expected_version: str | None = None, timeout: float = 50)
                 continue
             if response is None:
                 return False, f"engine output closed before response (code {process.poll()})"
-            if response.get("invalid"):
-                return False, "engine output was not JSON"
+            if not isinstance(response, dict) or response.get("invalid"):
+                return False, "engine output was not a JSON object"
             if not ready:
                 event = response.get("event") or {}
                 if event.get("event_type") != "ready":
