@@ -89,3 +89,34 @@ def test_found_off_path_codex_is_run_by_its_full_path(windows, monkeypatch):
     status = Codex().check(env)
     assert ran and all(arguments[0] == launcher for arguments in ran)  # not the bare name, which is not on PATH
     assert status.data["path"] == launcher
+
+
+@pytest.mark.parametrize("enabled,readiness", [(False, "disabled"), (True, "ready")])
+def test_standalone_codex_for_windows_without_npm_or_path(windows, monkeypatch, enabled, readiness):
+    """The owner's machine: the standalone Codex at %LOCALAPPDATA%\\Programs\\OpenAI\\Codex\\bin, not
+    on the desktop's PATH, no npm at all, signed in with ChatGPT, no API key. Found, authenticated,
+    and usable only when enabled as a supervisor; nothing to reinstall."""
+    from brain.local import config as settings
+    from brain.local import providers
+    from brain.local.components import Codex, Env, Status
+    from brain.local.paths import Layout
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    launcher = place(windows["local"] / "Programs" / "OpenAI" / "Codex" / "bin", "codex.exe")
+    replies = {"--version": "codex-cli 0.162.1", "status": "Logged in using ChatGPT"}
+    ran = []
+    monkeypatch.setattr(System, "run", lambda self, arguments, **kw: ran.append(arguments) or (0, replies[arguments[-1]]))
+    layout = Layout(windows["tmp"] / "cb").ensure()
+    config = settings.load(layout)
+    config["supervisors"].setdefault("codex", {})["enabled"] = enabled
+    env = Env(layout=layout, config=config, system=System())
+    assert System().locate("codex")[0] == launcher
+    monkeypatch.setattr(providers, "check_all", lambda env, ids, deep=False: {
+        "ollama": Status("missing", "not here"), "model": Status("missing", "not here"),
+        "claude": Status("missing", "claude CLI not found", data={"auth": "not_installed"}),
+        "codex": Codex().check(env)})
+    codex = next(item for item in providers.descriptors(env) if item["id"] == "codex")
+    assert codex["installed"] and codex["cli_path"] == launcher
+    assert codex["authentication"] == "signed_in" and codex["enabled"] is enabled
+    assert codex["readiness"] == readiness and codex["billing_type"] == "subscription"
+    assert all(arguments[0] == launcher for arguments in ran)  # the found launcher, not a PATH lookup
+    assert not any("npm" in " ".join(arguments) for arguments in ran)
