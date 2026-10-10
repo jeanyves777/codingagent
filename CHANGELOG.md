@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased: typed engine API
+
+See docs/engine-api.md.
+
+- **`codingbrain api --describe | --stdio`:** a versioned (1.0) API that the desktop app and other
+  programs use instead of parsing CLI output. It covers:
+  - engine information and the schema;
+  - doctor, install status and the install plan;
+  - provider descriptors;
+  - projects (list, register, create);
+  - conversation, which only proposes;
+  - tasks, with digest-bound, single-use approval, acceptance as a new branch, stop and resume;
+  - activity-journal events streamed live while tasks run.
+- **Provider registry (issue #14):** each provider reports separately whether it is installed,
+  how it is authenticated, whether it is enabled and ready, how it is billed and its cost gate.
+  Providers without a reviewed adapter (Gemini, Grok, Muse) are never reported as connected.
+
 ## Unreleased: conversational by default
 
 See docs/assistant.md.
