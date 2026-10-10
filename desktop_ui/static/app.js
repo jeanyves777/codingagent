@@ -956,7 +956,7 @@
   async function systemAction(action) {
     const explanations = {
       install_full:'Run the official full installer? It may download software, require administrator approval and ask for subscription sign-in.',
-      update_engine:'Update Coding Brain to the latest verified stable release? The desktop should be restarted afterward.',
+      update_engine:'Update both the installed Coding Brain engine and native desktop from the same published stable version? The official updater opens a PowerShell window; close the desktop and follow its instructions. Older engine-only releases cannot update the desktop EXE.',
       repair:'Open the official installer to diagnose and repair your current setup?',
       check_updates:'Check GitHub for a newer verified stable Coding Brain release?',
       doctor:'Run deep checks of your local model, Docker sandbox and providers? This can take a minute.'
@@ -976,6 +976,22 @@
     if (action === 'doctor' || action === 'check_updates' || action === 'repair' || action === 'update_engine') showControl('updates');
     if (action === 'doctor' || action === 'check_updates') $('maintenance-log').textContent = 'Connecting to Coding Brain…';
     try {
+      if (action === 'check_updates') {
+        const info = await api('/api/updates/status');
+        const lines = [
+          `Latest published stable: ${info.tag}`,
+          `Installed engine: ${info.engine}  (${info.engine_update_available ? 'update available' : 'current'})`,
+          `Installed desktop: ${info.desktop}  (${info.desktop_update_available ? 'update available' : info.desktop_in_release ? 'current' : 'no desktop installer in this release'})`
+        ];
+        if (info.engine_only) lines.push('This release updates the engine only. A packaged desktop update is NOT available.');
+        $('maintenance-log').textContent = lines.join('\n');
+        $('apply-update').disabled = !info.any_update_available;
+        feedback(info.any_update_available ? 'info' : 'success',
+          info.any_update_available ? 'Verified stable update available' : 'No newer supported release',
+          info.engine_only ? 'GitHub has no matching desktop installer in this release; the update can only change the backend.' :
+            'Both components are checked independently against the latest published GitHub release.');
+        return;
+      }
       const data = await api(`/api/system/action?action=${encodeURIComponent(action)}`,'POST',{confirmed:true});
       // The backend decides the actual supported diagnostic level, not an optimistic UI assumption.
       if (action === 'doctor' && data.diagnostic_level === 'basic') {
