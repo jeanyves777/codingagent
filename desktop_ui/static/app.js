@@ -218,6 +218,11 @@
     const available = info.engine?.available === true;
     const chat = info.chat_available === true;
     const model = info.model || {};
+    const canCreateProject = info.engine?.new_project === true;
+    const newProjectButton = $('mode-new');
+    newProjectButton.setAttribute('aria-disabled', String(!canCreateProject));
+    newProjectButton.title = canCreateProject ? 'Create a new project after your approval' :
+      'Requires a newer installed Coding Brain release with goal-first project creation';
     const modelName = model.name || (model.provider === 'ollama' ? 'Local model not configured' : 'Model not configured');
     $('model-label').textContent = `◈  ${modelName}  ⌄`;
     $('model-label').title = `Primary worker: ${modelName}. Ollama model detected: ${model.ready ? 'yes' : 'no'}. Claude and Codex are separate optional supervisors; inspect them in AI Providers.`;
@@ -263,6 +268,10 @@
   }
 
   function setMode(value) {
+    if (value === 'new' && engineInfo && engineInfo.engine?.new_project !== true) {
+      toast('New project is not available in the installed Coding Brain engine. No task started. You can browse existing project folders.');
+      return;
+    }
     mode = value;
     for (const kind of ['chat', 'run', 'new']) {
       const button = $('mode-' + kind);
@@ -522,6 +531,10 @@
       toast('Open an existing Git repository before running a coding task.');
       openDialog();
       return;
+    }
+    if (mode === 'new' && engineInfo && engineInfo.engine?.new_project !== true) {
+      toast('The installed engine does not support new-project creation yet. Nothing was started. Please upgrade when the verified goal-first release is available.');
+      return; // Preserve the unsent request for when the correct engine is installed.
     }
     message('YOU', text, 'user');
     $('prompt').value = '';
