@@ -1,5 +1,6 @@
 """Fixed container runner with user-selected, model-inaccessible profiles."""
 import json
+import re
 import subprocess
 import tempfile
 import time
@@ -62,8 +63,19 @@ def _supervise(command: list[str], name: str, output, should_cancel) -> int | st
         raise
 
 
-def run_tests(workspace: Path, images: str | dict, should_cancel=None) -> dict:
+NODE_ID = re.compile(r"[\w./-]+\.py::[\w.\[\]-]+")
+
+
+def run_tests(workspace: Path, images: str | dict, should_cancel=None, only=None) -> dict:
+    """Run the project's tests offline. `only` (pytest node ids such as test_x.py::test_y) runs
+    just those tests with the same command, for diagnosis."""
     selected = profile(workspace)
+    if only:
+        if selected["name"] != "python" or "pytest" not in selected["command"] or \
+                not all(isinstance(node, str) and NODE_ID.fullmatch(node) for node in only):
+            return {"passed": False, "exit_code": None, "profile": selected["name"],
+                    "output": "Running single tests is supported for pytest node ids only"}
+        selected = {**selected, "command": [*selected["command"], *only]}
     image = images if isinstance(images, str) else images.get(selected["name"])
     if not image:
         return {"passed": False, "exit_code": None, "profile": selected["name"],

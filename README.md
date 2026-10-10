@@ -34,6 +34,16 @@ Install once and use `codingbrain` in any project; update with `codingbrain upda
 instructions: [docs/windows-install.md](docs/windows-install.md). Release process:
 [RELEASING.md](RELEASING.md).
 
+## Start a new application from one sentence
+
+```powershell
+codingbrain new "Build a task manager with due dates and priorities"
+```
+
+This creates a new folder in your Projects folder, sets up Git (with an empty baseline commit) and
+a tested scaffold. It then builds your goal with live activity, tests in the offline sandbox and
+waits for your acceptance. See [docs/new-project.md](docs/new-project.md).
+
 ## Complete installation and readiness
 
 ```powershell

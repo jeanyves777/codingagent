@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased: goal-first project creation
+
+See docs/new-project.md.
+
+- **`codingbrain new "<goal>"`** creates a new application from a sentence. It:
+  1. checks readiness (nothing is created if Git, the model, Docker or the sandbox are missing);
+  2. creates a new folder in your Projects folder, with path safety checks: it never reuses a
+     folder, never overlaps Coding Brain's data, respects your allowed roots, and refuses nesting
+     in other repositories and linked folders;
+  3. runs `git init` and makes an empty baseline commit authored by you;
+  4. makes a listed scaffold commit for the python, node or web stack;
+  5. records the goal in project memory;
+  6. builds and tests the goal through the normal lifecycle, with live activity and visual
+     checks for web projects.
+- **Git identity:** a missing identity is asked for and stored only in the new repository, never
+  globally.
+- **Dependencies:** stacks are dependency-free for the offline sandbox. Missing third-party
+  packages are reported from the sandbox output, and network access is never granted quietly.
+
 ## Unreleased: complete installation and readiness
 
 See docs/installation.md. This is a separate installer improvement on top of 0.12.0, waiting for

@@ -4,6 +4,7 @@ import difflib
 import hashlib
 import inspect
 import json
+import re
 import shutil
 import time
 import uuid
@@ -66,6 +67,10 @@ def test_tail(output: str) -> str:
     lines = [line.strip(" =") for line in (output or "").strip().splitlines() if line.strip(" =")]
     errors = [line for line in lines if "Unable to find image" in line or line.lower().startswith(("docker:", "error"))]
     return (errors or lines or ["no output"])[0 if errors else -1][:200]
+
+
+# A test runner that reports zero tests (pytest, node:test spec or TAP output).
+NO_TESTS_RAN = re.compile(r"(?m)^\s*(?:ℹ|#)?\s*tests 0\s*$|collected 0 items")
 
 
 class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin):
@@ -879,6 +884,9 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                         should_cancel=lambda: self.store.get(task_id).get("cancel_requested", False))
                 if evidence.get("cancelled"):
                     self._check_cancelled(task)
+                if task.get("tests_expected") and evidence.get("passed") and NO_TESTS_RAN.search(evidence.get("output", "")):
+                    # A runner that passes with zero tests (node --test) proves nothing.
+                    evidence = {**evidence, "passed": False, "exit_code": 5}
                 task["test_evidence"] = evidence
                 self.event(task, "test_finished", json.dumps(evidence))
                 self.journal_event(task, "test_result", phase="test_results",
@@ -925,6 +933,19 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                                        "the human at acceptance: " + review["reason"][:500])
                         return
                     feedback = "\nSupervisor review (untrusted): " + str(verdict.get("reason", ""))
+                elif evidence["exit_code"] == 5 and task.get("tests_expected") and not sandbox_error(evidence.get("output", "")):
+                    # A project `codingbrain new` just created has no tests yet: writing them is part of
+                    # the work, so their absence is repairable here (elsewhere it fails closed, below).
+                    failure = classify_test_failure(evidence)
+                    task.setdefault("failure_log", []).append({"attempt": attempt, **failure})
+                    self.decision(task, "repair", "coding_brain", f"No tests ran; repair attempt {failures + 1} of "
+                                  f"{limit}: this new project's tests must come with the code", "observed")
+                    feedback = ("\nNo tests ran. This is a new project, so its tests are part of the work: add test "
+                                "files (Python: tests/test_<module>.py using pytest; Node: test/<name>.test.js "
+                                "using node:test) that check the behaviour the goal describes, together with the code. "
+                                "Tests the runner cannot find do not count: write test functions named test_* "
+                                "(Python) or test(...) calls in test files (Node), and do not claim tests exist "
+                                "when the output above shows none ran.")
                 elif evidence["exit_code"] in (None, 5, 125, 126, 127) or sandbox_error(evidence.get("output", "")):
                     # Missing tests or sandbox problems are not the model's fault; never escalate them.
                     task["status"] = "failed"
@@ -939,6 +960,7 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                     if disputed:
                         feedback += "\nReviewer feedback (untrusted): " + review["reason"]
                     feedback += await self._upstream_feedback(task, workspace, failure)
+                    feedback += await self._isolation_diagnosis(task, workspace, evidence)
             else:
                 task.setdefault("failure_log", []).append({"attempt": attempt, "category": "review",
                                                            "summary": review["reason"][:1000]})
@@ -953,6 +975,35 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                 return
             failures, limit = outcome
             task["status"] = "running"
+
+    async def _isolation_diagnosis(self, task, workspace, evidence) -> str:
+        """When a few pytest tests fail while others pass, re-run each failing test alone. A test that
+        passes alone but fails in the full run shows the tests share state; saying so precisely lets
+        the repair fix the isolation instead of the expected values."""
+        output = evidence.get("output", "")
+        if evidence.get("profile") != "python":
+            return ""
+        failed = list(dict.fromkeys(re.findall(r"(?m)^FAILED (\S+\.py::[^\s]+)", output)))
+        passed = re.search(r"(\d+) passed", output)
+        if not failed or len(failed) > 3 or not passed:
+            return ""
+        alone = []
+        with self.stage(task, "repair", agent="sandbox", summary="Re-running each failing test alone (diagnosis)"):
+            for node in failed:
+                result = await asyncio.to_thread(run_tests, workspace, self.image, only=[node])
+                if result.get("passed"):
+                    alone.append(node)
+        if not alone:
+            return ""
+        self.decision(task, "repair", "coding_brain", f"Diagnosis: {', '.join(alone)} pass(es) alone but fail(s) in "
+                      "the full run, so the tests share state", "observed", tests=alone)
+        if task.get("failure_log"):
+            task["failure_log"][-1].update({"diagnosis": "test_isolation", "isolated_passes": alone})
+        return ("\nDiagnosis (observed by re-running each failing test alone): " + ", ".join(alone) +
+                " pass(es) alone but fail(s) when run with the other tests. The tests share state: module-level "
+                "variables (counters, lists, dicts) keep their values from one test to the next. Fix the isolation, "
+                "for example with an autouse pytest fixture or a reset function that re-initialises that state before "
+                "each test. Do not change the expected values to match the leaked state.")
 
     async def _verify_visual(self, task, workspace) -> str | None:
         """After tests pass: render the result and check it against the visual requirements.

@@ -1106,6 +1106,27 @@ def run_selftest(layout, quiet=False) -> dict:
     return result
 
 
+def cmd_new(args, layout):
+    """Create a new application from a sentence (brain.local.create)."""
+    from .create import Blocked, build, create_project, report
+    identity = {"name": args.git_name, "email": args.git_email} if args.git_name or args.git_email else None
+    if identity and not (identity["name"] and identity["email"]):
+        raise SystemExit("--git-name and --git-email go together")
+    try:
+        record = create_project(layout, " ".join(args.goal), name=args.name, root=args.in_, stack=args.stack,
+                                yes=args.yes, identity=identity, check_ready=not args.skip_readiness_check)
+    except Blocked as error:
+        print(f"Not created: {error}")
+        return 1
+    print(f"\nCreated {record['path']} ({record['stack']}); building your goal now. Live activity follows.")
+    if args.create_only:
+        print(report(record, {}))
+        return 0
+    task = build(layout, record, args.orchestrate, True if args.yes else None, view_mode(args))
+    print(report(record, task))
+    return 0 if task.get("status") in {"accepted", "passed", "completed"} else 1
+
+
 def cmd_selftest(args, layout):
     result = run_selftest(layout, args.json)
     if args.json:
@@ -1436,6 +1457,23 @@ def main(argv=None) -> int:
     install_output = install_parser.add_mutually_exclusive_group()
     for flag in ("--verbose", "--quiet", "--plain", "--json"):
         install_output.add_argument(flag, action="store_true")
+    new_parser = commands.add_parser("new", help="create a new application from a sentence: a new folder, Git, "
+                                     "a tested scaffold, then your goal built and tested")
+    new_parser.add_argument("goal", nargs="+", help='what to build, e.g. "a task manager with due dates"')
+    new_parser.add_argument("--name", help="folder name (default: from the goal)")
+    new_parser.add_argument("--in", dest="in_", metavar="FOLDER",
+                            help="where to create it (default: your Projects folder, e.g. C:\\Users\\you\\Projects)")
+    new_parser.add_argument("--stack", choices=["python", "node", "web"], help="default: chosen from the goal")
+    new_parser.add_argument("--yes", action="store_true", help="create and run plans without asking "
+                            "(accepting the result still asks)")
+    new_parser.add_argument("--orchestrate", action="store_true", help="split the goal into dependent assignments")
+    new_parser.add_argument("--create-only", action="store_true", help="create the project; do not start building")
+    new_parser.add_argument("--git-name", help="author name for this repository only (if Git has none)")
+    new_parser.add_argument("--git-email", help="author email for this repository only (if Git has none)")
+    new_parser.add_argument("--skip-readiness-check", action="store_true", help=argparse.SUPPRESS)
+    new_output = new_parser.add_mutually_exclusive_group()
+    for flag in ("--verbose", "--quiet", "--plain", "--json"):
+        new_output.add_argument(flag, action="store_true")
     selftest_parser = commands.add_parser("selftest", help="a throwaway end-to-end task: model, sandbox and tests")
     selftest_parser.add_argument("--json", action="store_true")
     setup = commands.add_parser("setup", help="configure models, premium supervisors, budgets and approvals")
@@ -1537,6 +1575,6 @@ def main(argv=None) -> int:
                 "post-install": cmd_post_install, "memory": cmd_memory, None: cmd_shell,
                 "attachments": cmd_attachments, "inspect-ui": cmd_inspect_ui, "activity": cmd_activity,
                 "watch": cmd_watch, "trace": cmd_trace, "snapshots": cmd_snapshots, "snapshot": cmd_snapshot,
-                "install": cmd_install, "selftest": cmd_selftest,
+                "install": cmd_install, "selftest": cmd_selftest, "new": cmd_new,
                 "version": lambda args, layout: print(f"codingbrain {version()}")}
     return handlers[args.command](args, layout) or 0
