@@ -104,11 +104,24 @@
   async function api(path, method = 'GET', body) {
     const options = {method, headers: {'X-CodingBrain-Token': token || ''}};
     if (body !== undefined) { options.headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(body); }
-    const response = await fetch(path, options);
-    let result;
-    try { result = await response.json(); } catch { throw new Error('Could not reach the Coding Brain UI bridge'); }
-    if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'Request failed');
-    return result;
+    // Status checks are read-only, so a timeout cannot accidentally duplicate a task.
+    // Never automatically timeout or retry mutating requests: they may have taken effect.
+    const readOnlyStatus = method === 'GET' && path.startsWith('/api/engine/status');
+    const controller = readOnlyStatus ? new AbortController() : null;
+    if (controller) options.signal = controller.signal;
+    const deadline = controller ? setTimeout(() => controller.abort(), 35000) : null;
+    try {
+      const response = await fetch(path, options);
+      let result;
+      try { result = await response.json(); } catch { throw new Error('Could not reach the Coding Brain UI bridge'); }
+      if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'Request failed');
+      return result;
+    } catch (error) {
+      if (error?.name === 'AbortError') throw new Error('Engine readiness check timed out. Open Setup to diagnose the installed engine, then retry.');
+      throw error;
+    } finally {
+      if (deadline !== null) clearTimeout(deadline);
+    }
   }
 
   // Every privileged action uses a Coding Brain dialog, never a browser-native
@@ -532,24 +545,40 @@
       openDialog();
       return;
     }
-    if (mode === 'new' && engineInfo && engineInfo.engine?.new_project !== true) {
-      toast('The installed engine does not support new-project creation yet. Nothing was started. Please upgrade when the verified goal-first release is available.');
-      return; // Preserve the unsent request for when the correct engine is installed.
-    }
-    message('YOU', text, 'user');
-    $('prompt').value = '';
     submitting = true;
     busySend(true);
-    showTyping();
-    $('run-status').hidden = false;
-    $('status-label').textContent = 'Connecting to Coding Brain…';
     try {
+      // A new desktop can start before the local engine has answered its
+      // readiness probe. Do not draw a "Thinking" bubble or clear the user's
+      // message until the INSTALLED engine confirms this operation exists.
+      if (mode === 'chat' || mode === 'new') {
+        $('run-status').hidden = false;
+        $('status-label').textContent = 'Checking installed Coding Brain engine…';
+        const info = engineInfo || await refreshEngine({force:true});
+        if (!info || info.engine?.available !== true) {
+          const detail = info?.engine?.detail || 'Engine status could not be verified.';
+          message('CODING BRAIN · SETUP', detail + ' Open Setup to diagnose your engine. No task was started.', 'system');
+          return;
+        }
+        if (mode === 'chat' && info.chat_available !== true) {
+          message('CODING BRAIN · UPDATE', 'Your installed Coding Brain engine does not support conversational chat. A development PR is not an installed release. Update to a verified conversational version first; your message has been kept.', 'system');
+          return;
+        }
+        if (mode === 'new' && info.engine?.new_project !== true) {
+          message('CODING BRAIN · UPDATE', 'Your installed engine does not support new-project creation yet. No task started. To inspect existing projects, choose Projects or Browse folder.', 'system');
+          return;
+        }
+      }
+      message('YOU', text, 'user');
+      $('prompt').value = '';
+      showTyping();
+      $('run-status').hidden = false;
+      $('status-label').textContent = 'Connecting to Coding Brain…';
       const job = await api('/api/start', 'POST', {message: text, mode});
       activeJob = job.id;
       cursor = 0;
       displayedEvents = new Set();
       startedAt = job.started;
-      $('run-status').hidden = false;
       await poll();
       if (activeJob && !pollTimer) pollTimer = setInterval(poll, 750);
     } catch(e) {
