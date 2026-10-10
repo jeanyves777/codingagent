@@ -11,6 +11,18 @@ from desktop_ui import management
 from desktop_ui.server import Workspace, create_app
 
 
+@pytest.fixture(autouse=True)
+def no_installed_engine(monkeypatch):
+    """Hermetic: these tests cover the desktop's own provider probes, so the machine's installed
+    engine (on CI `pip install -e .` puts a real `codingbrain` with the typed API on PATH, whose
+    providers.list would rightly override the fakes) and its local Ollama are not consulted.
+    Engine-sourced readiness is covered in test_desktop_engine_status.py."""
+    monkeypatch.setattr(management, 'engine_capabilities', lambda cli: {
+        'available': True, 'version': '0.9.0', 'conversation': False, 'typed_api': False,
+        'task_command': True, 'detail': 'test engine without the typed API'})
+    monkeypatch.setattr(management, 'local_ollama_models', lambda: {'running': False, 'models': [], 'detail': 'off'})
+
+
 def session(tmp_path):
     root = Workspace(home=tmp_path, executable='codingbrain')
     return TestClient(create_app(root)), root
