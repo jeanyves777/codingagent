@@ -59,7 +59,8 @@ with sync_playwright() as p:
         if (target === '/api/setup/completed') return reply({ok:true});
         if (target.startsWith('/api/updates/status')) {
            data.updateChecks++;
-           const selected = new URL(target, location.origin).searchParams.get('channel') || 'stable';
+           // The page is inline HTML (origin "null"), so read the query without a base URL.
+           const selected = new URLSearchParams(target.split('?')[1] || '').get('channel') || 'stable';
            const result = selected === 'preview' ?
              {tag:'UNRELEASED preview 0.13.0.dev9',latest:'0.13.0.dev9',unreleased:true,
               engine:'0.11.0',desktop:'0.11.0',engine_update_available:true,desktop_update_available:true,
