@@ -249,3 +249,50 @@ def test_windows_user_cli_shims_can_be_detected_after_stale_path(tmp_path, monke
     winget.parent.mkdir(parents=True)
     winget.touch()
     assert management.installed_cli('codex') == str(winget)
+
+
+def test_windows_standalone_codex_install_detected_without_npm_or_fresh_path(tmp_path, monkeypatch):
+    """Official standalone Codex lives under Local/Programs/OpenAI and requires no npm."""
+    monkeypatch.setattr(management, 'IS_WINDOWS', True)
+    monkeypatch.setattr(management.shutil, 'which', lambda name: None)
+    monkeypatch.setenv('APPDATA', str(tmp_path / 'Roaming'))
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path / 'Local'))
+    binary = tmp_path / 'Local' / 'Programs' / 'OpenAI' / 'Codex' / 'bin' / 'codex.exe'
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b'fake-for-path-detection-only')
+    assert management.installed_cli('codex') == str(binary)
+    readiness = {item['id']: item for item in management.installation_probes()['components']}
+    assert readiness['codex']['installed'] is True
+
+    probed = []
+    def fake_auth(command):
+        probed.append(command)
+        return command == [str(binary), 'login', 'status']
+
+    provider = next(item for item in management.providers_snapshot(probe=fake_auth)
+                    if item['id'] == 'codex')
+    assert provider['authenticated'] is True
+    assert provider['status'] == 'authenticated'
+    assert probed == [[str(binary), 'login', 'status']]
+    assert management.provider_auth_command('codex') == [str(binary), 'login']
+
+
+def test_standalone_codex_detected_but_auth_does_not_follow_from_file_presence(tmp_path, monkeypatch):
+    """Finding codex.exe must not falsely declare a ChatGPT login or enabled supervisor."""
+    monkeypatch.setattr(management, 'IS_WINDOWS', True)
+    monkeypatch.setattr(management.shutil, 'which', lambda name: None)
+    monkeypatch.setenv('APPDATA', str(tmp_path / 'Roaming'))
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path / 'Local'))
+    binary = tmp_path / 'Local' / 'Programs' / 'OpenAI' / 'Codex' / 'bin' / 'codex.exe'
+    binary.parent.mkdir(parents=True)
+    binary.touch()
+    provider = next(item for item in management.providers_snapshot(probe=lambda cmd: False)
+                    if item['id'] == 'codex')
+    assert provider['status'] == 'sign-in-needed'
+    assert provider['authenticated'] is False
+    binary.unlink()
+    assert management.installed_cli('codex') is None
+    provider = next(item for item in management.providers_snapshot(probe=lambda cmd: pytest.fail(
+        'Do not run auth probes for a missing provider')) if item['id'] == 'codex')
+    assert provider['status'] == 'not-installed'
+    assert provider['sign_in_available'] is False

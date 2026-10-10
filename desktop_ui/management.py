@@ -159,7 +159,7 @@ def providers_snapshot(probe: Callable[[list[str]], bool | None] = safe_probe) -
         elif provider.id == "codex":
             result = auth.get("codex")
             status = "authenticated" if result is True else "sign-in-needed" if result is False else "auth-unverified" if binary else "not-installed"
-            detail = "Official Codex CLI confirmed ChatGPT sign-in" if result is True else "Sign in with ChatGPT through Codex" if result is False else "Auth check did not complete" if binary else "Codex CLI not found in desktop PATH or user launcher folders. Restart this desktop after installing it."
+            detail = "Official Codex CLI confirmed ChatGPT sign-in" if result is True else "Sign in with ChatGPT through Codex" if result is False else "Auth check did not complete" if binary else "Codex CLI not found in PATH, roaming npm, WinGet links, or the official OpenAI Codex user directory. Recheck connections after installation."
         elif provider.id == "gemini":
             status = "installed" if binary else "not-installed"
             detail = "Sign in within Gemini CLI; autonomous core routing not implemented" if binary else "Gemini CLI not installed"
@@ -188,7 +188,8 @@ def engine_capabilities(cli_command: list[str] | None) -> dict:
     or a live Ollama model. Do not infer support merely from a version number.
     """
     result = {"available": False, "version": None, "conversation": False,
-              "typed_api": False, "task_command": False, "detail": "Coding Brain is not installed"}
+              "typed_api": False, "new_project": False, "task_command": False,
+              "detail": "Coding Brain is not installed"}
     if not cli_command:
         return result
     try:
@@ -205,7 +206,16 @@ def engine_capabilities(cli_command: list[str] | None) -> dict:
         result["available"] = True
         result["task_command"] = True  # availability of run command != sandbox/model readiness
         result["detail"] = "Engine responds to version probe; execution readiness is not yet verified"
-        for command, key in (("chat", "conversation"), ("api", "typed_api")):
+        # The published v0.9.0 release has no chat, API, or goal-first command.
+        # Avoid three extra interpreter launches during first-run readiness:
+        # those may take up to 18 seconds to time out on a slow Windows PC.
+        if result["version"] == "0.9.0":
+            result["detail"] = "Published v0.9.0 supports coding tasks, not conversational chat or new-project creation"
+            return result
+        # Check feature support against the actual installed engine, not the UI bundle.
+        # v0.9.0 has no 'new' command; a successful version probe is insufficient.
+        for command, key in (("chat", "conversation"), ("api", "typed_api"),
+                             ("new", "new_project")):
             try:
                 probe = subprocess.run([*cli_command, command, "--help"],
                                        stdin=subprocess.DEVNULL, capture_output=True,

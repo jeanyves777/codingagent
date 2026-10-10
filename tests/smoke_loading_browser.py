@@ -49,6 +49,7 @@ with sync_playwright() as p:
       window.fetch = async (url, opts) => {
         const target=String(url);
         if (target === '/api/state') return reply({project:null,projects:[],active:null});
+        if (target.startsWith('/api/engine/status')) return reply({engine:{available:true,version:'0.13.0',conversation:true,typed_api:true,new_project:true}, chat_available:true,model:{provider:'ollama',name:'qwen2.5-coder:7b',ready:true},next_action:null,title:'Engine ready',detail:'Verified simulated engine'});
         if (target === '/api/setup') {
           data.checks++;
           if (data.setupPending) return new Promise(resolve => data.setupRelease = () => resolve(reply(setup)));

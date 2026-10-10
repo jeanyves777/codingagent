@@ -186,12 +186,17 @@ class Workspace:
             info = client.call("engine.info", {}, None, 60)
             providers = client.call("providers.list", {}, None, 120)
         except (EngineError, ValueError) as error:
-            core.update(typed_api=False, conversation=False,
+            core.update(typed_api=False, conversation=False, new_project=False, typed_api_failed=True,
                         detail=f"The installed engine's typed API did not start: {str(error)[:300]}")
             return None
-        core.update(operations=sorted(info.get("operations") or []),
+        operations = set(info.get("operations") or [])
+        # The installed engine's own operation list decides chat and new-project support; the CLI
+        # help probes in management.engine_capabilities are only the fallback for older engines.
+        core.update(operations=sorted(operations),
                     version=info.get("engine_version") or core.get("version"), api_version=info.get("api_version"),
-                    conversation=True, detail=f"Typed engine API {info.get('api_version')} (engine {info.get('engine_version')})")
+                    conversation=all(op in operations for op in REQUIRED_OPERATIONS["chat"]),
+                    new_project=all(op in operations for op in REQUIRED_OPERATIONS["new"]),
+                    detail=f"Typed engine API {info.get('api_version')} (engine {info.get('engine_version')})")
         return {"providers": providers}
 
     def engine_status(self, refresh: bool = False) -> dict:
@@ -467,6 +472,34 @@ class Workspace:
             raise ValueError("Unknown mode")
         if mode == "run" and (not self.project or not self.git_branch(self.project)):
             raise ValueError("Select an existing Git repository to run a coding task")
+        # API 1.0 engines are gated below by the operations engine.info lists (which names what is
+        # missing); these checks cover engines without the typed API, from the CLI probes.
+        engine = self.engine_status()["engine"] if mode in {"chat", "new"} else {}
+        if self.use_core and engine.get("typed_api_failed"):
+            raise ValueError(f"{engine.get('detail')}. Nothing was started: no chat session, task or project.")
+        if mode == "chat" and self.use_core and not engine.get("typed_api"):
+            # The desktop's own Python package may contain assistant.py even
+            # when the installed engine is older. Do not allocate a fake chat
+            # job or return a scripted greeting in place of a real model reply.
+            if not engine.get("conversation", False):
+                version = engine.get("version") or "unknown"
+                raise ValueError(
+                    f"Conversation is not available in installed Coding Brain v{version}. "
+                    "No chat session or coding task was started. "
+                    "Install a verified conversational release to use Chat. "
+                    "You can still open registered projects in Projects."
+                )
+        if mode == "new" and not engine.get("typed_api"):
+            # Feature checks must refer to the INSTALLED engine, not an importable
+            # copy of the UI's Python package. Never create a job on older engines.
+            if not engine.get("new_project", False):
+                version = engine.get("version") or "unknown"
+                raise ValueError(
+                    f"New-project creation is unavailable in installed Coding Brain v{version}. "
+                    "No task started and no files were created. "
+                    "Use Browse folder to open an existing project, or install a verified "
+                    "Coding Brain release that supports 'codingbrain new'."
+                )
         # Never treat chat as a coding task. Newer CLIs provide chat; older ones
         # return a clear unsupported-command error instead of running code.
         command = [*self.cli_command(), "chat" if mode == "chat" else "new" if mode == "new" else "run", body.message]

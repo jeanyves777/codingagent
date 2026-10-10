@@ -27,6 +27,7 @@ def test_engine_probe_reports_legacy_release_truthfully(monkeypatch):
     assert status['version'] == '0.9.0'
     assert status['conversation'] is False
     assert status['typed_api'] is False
+    assert status['new_project'] is False
     assert status['task_command'] is True
     assert all('--yes' not in command for command in commands)
     assert all(cmd[-1] in ('version', '--help') for cmd in commands)
@@ -40,6 +41,7 @@ def test_engine_probe_detects_new_chat_and_api_without_exec(monkeypatch):
     monkeypatch.setattr(management.subprocess, 'run', fake_run)
     status = management.engine_capabilities(['fake-codingbrain'])
     assert status['available'] and status['conversation'] and status['typed_api']
+    assert status['new_project'] is True
 
 
 def test_missing_engine_is_reported_as_unavailable_not_ready(monkeypatch):
@@ -83,8 +85,14 @@ def test_api_status_is_authenticated_and_model_is_checked_not_guessed(tmp_path, 
 
 class TypedEngine:
     """The installed engine's typed API (engine.info, providers.list), as EngineClient returns it."""
-    def __init__(self, providers=(), fail=False):
+    # engine.info's operation list from brain.local.engine (API 1.0).
+    OPERATIONS = ('conversation.history', 'conversation.send', 'engine.describe', 'engine.info', 'events.read',
+                  'projects.create', 'projects.list', 'projects.register', 'providers.list', 'tasks.accept',
+                  'tasks.approve', 'tasks.get', 'tasks.list', 'tasks.start', 'tasks.stop', 'tasks.tool_decision')
+
+    def __init__(self, providers=(), fail=False, operations=OPERATIONS):
         self.providers, self.fail, self.calls = list(providers), fail, []
+        self.operations = list(operations)
 
     def call(self, op, params=None, on_event=None, timeout=None):
         from desktop_ui.engine_client import EngineError
@@ -92,7 +100,7 @@ class TypedEngine:
         if self.fail:
             raise EngineError('unavailable', 'the engine did not start')
         if op == 'engine.info':
-            return {'api_version': '1.0', 'engine_version': '0.12.0'}
+            return {'api_version': '1.0', 'engine_version': '0.12.0', 'operations': self.operations}
         if op == 'providers.list':
             return self.providers
         raise AssertionError(f'readiness must not call {op}')
@@ -183,4 +191,48 @@ def test_legacy_engine_chat_is_refused_with_the_update_hint(tmp_path, monkeypatc
     import pytest
     with pytest.raises(ValueError, match='conversational release'):
         w.start(StartRequest(message='hello', mode='chat'))
+    assert not w.jobs
+
+
+def test_chat_update_does_not_automatically_enable_new_project(monkeypatch):
+    """An installed conversational engine without 'codingbrain new' cannot create apps."""
+    commands = []
+
+    def fake_run(argv, **kwargs):
+        commands.append(argv)
+        if argv[-1] == 'version':
+            return FakeResult(output='codingbrain 0.12.0')
+        if argv[-2:] == ['new', '--help']:
+            return FakeResult(2, 'error: invalid choice: new')
+        return FakeResult(output='usage: codingbrain chat/api [-h]')
+
+    monkeypatch.setattr(management.subprocess, 'run', fake_run)
+    capability = management.engine_capabilities(['fake-codingbrain'])
+    assert capability['available'] is True
+    assert capability['conversation'] is True
+    assert capability['typed_api'] is True
+    assert capability['new_project'] is False
+    assert ['fake-codingbrain', 'new', '--help'] in commands
+    assert not any('run' in argv or '--yes' in argv for argv in commands)
+
+
+def test_typed_operations_not_cli_help_decide_chat_and_new_project(tmp_path, monkeypatch):
+    """With API 1.0 the installed engine's engine.info is authoritative: a CLI help probe that
+    missed `new` does not hide project creation, and one that saw it does not enable it."""
+    from desktop_ui.server import StartRequest
+    import pytest
+    w = typed_workspace(tmp_path, monkeypatch, TypedEngine())  # the probe reports no new_project
+    status = w.engine_status(refresh=True)
+    assert status['engine']['new_project'] is True and status['engine']['conversation'] is True
+
+    without = [op for op in TypedEngine.OPERATIONS if op not in {'projects.create', 'conversation.send'}]
+    w = typed_workspace(tmp_path / 'b', monkeypatch, TypedEngine(operations=without))
+    monkeypatch.setattr(management, 'engine_capabilities', lambda cli: {
+        'available': True, 'version': '0.12.0', 'conversation': True, 'typed_api': True,
+        'new_project': True, 'task_command': True, 'detail': 'probe'})
+    status = w.engine_status(refresh=True)
+    assert status['engine']['new_project'] is False and status['chat_available'] is False
+    for mode in ('new', 'chat'):
+        with pytest.raises(ValueError, match='(?i)conversation.send.*missing.*nothing was started'):
+            w.start(StartRequest(message='Create a task management application', mode=mode))
     assert not w.jobs
