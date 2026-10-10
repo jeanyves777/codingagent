@@ -294,7 +294,9 @@ def build(layout: Layout, record: dict, orchestrate: bool = False, auto: bool | 
     if record["stack"] == "web" and context.config["visual"].get("enabled", True):
         visual = {"enabled": True, "references": [], "max_repairs": context.config["visual"]["max_repairs"],
                   "viewports": context.config["visual"]["viewports"]}
-    task = run_goal(context, record["goal"], orchestrate, auto, visual=visual, view=view)
+    def new_project(task):
+        task["tests_expected"] = True  # the new project has no tests yet; writing them is part of the work
+    task = run_goal(context, record["goal"], orchestrate, auto, visual=visual, on_task=new_project, view=view)
     return task or {}
 
 

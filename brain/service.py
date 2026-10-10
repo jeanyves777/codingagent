@@ -4,6 +4,7 @@ import difflib
 import hashlib
 import inspect
 import json
+import re
 import shutil
 import time
 import uuid
@@ -66,6 +67,10 @@ def test_tail(output: str) -> str:
     lines = [line.strip(" =") for line in (output or "").strip().splitlines() if line.strip(" =")]
     errors = [line for line in lines if "Unable to find image" in line or line.lower().startswith(("docker:", "error"))]
     return (errors or lines or ["no output"])[0 if errors else -1][:200]
+
+
+# A test runner that reports zero tests (pytest, node:test spec or TAP output).
+NO_TESTS_RAN = re.compile(r"(?m)^\s*(?:ℹ|#)?\s*tests 0\s*$|collected 0 items")
 
 
 class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin):
@@ -879,6 +884,9 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                         should_cancel=lambda: self.store.get(task_id).get("cancel_requested", False))
                 if evidence.get("cancelled"):
                     self._check_cancelled(task)
+                if task.get("tests_expected") and evidence.get("passed") and NO_TESTS_RAN.search(evidence.get("output", "")):
+                    # A runner that passes with zero tests (node --test) proves nothing.
+                    evidence = {**evidence, "passed": False, "exit_code": 5}
                 task["test_evidence"] = evidence
                 self.event(task, "test_finished", json.dumps(evidence))
                 self.journal_event(task, "test_result", phase="test_results",
@@ -925,6 +933,16 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                                        "the human at acceptance: " + review["reason"][:500])
                         return
                     feedback = "\nSupervisor review (untrusted): " + str(verdict.get("reason", ""))
+                elif evidence["exit_code"] == 5 and task.get("tests_expected") and not sandbox_error(evidence.get("output", "")):
+                    # A project `codingbrain new` just created has no tests yet: writing them is part of
+                    # the work, so their absence is repairable here (elsewhere it fails closed, below).
+                    failure = classify_test_failure(evidence)
+                    task.setdefault("failure_log", []).append({"attempt": attempt, **failure})
+                    self.decision(task, "repair", "coding_brain", f"No tests ran; repair attempt {failures + 1} of "
+                                  f"{limit}: this new project's tests must come with the code", "observed")
+                    feedback = ("\nNo tests ran. This is a new project, so its tests are part of the work: add test "
+                                "files (Python: tests/test_<module>.py using pytest; Node: test/<name>.test.js "
+                                "using node:test) that check the behaviour the goal describes, together with the code.")
                 elif evidence["exit_code"] in (None, 5, 125, 126, 127) or sandbox_error(evidence.get("output", "")):
                     # Missing tests or sandbox problems are not the model's fault; never escalate them.
                     task["status"] = "failed"
