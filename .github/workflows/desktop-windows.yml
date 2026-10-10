@@ -7,6 +7,7 @@ on:
       - 'tests/test_desktop_ui.py'
       - 'tests/test_desktop_native.py'
       - 'Start-CodingBrainDesktop.ps1'
+      - 'installer/windows/CodingBrainDesktop.iss'
       - 'installer/windows/Install-CodingBrainDesktop.ps1'
       - '.github/workflows/desktop-windows.yml'
   workflow_dispatch:
@@ -45,6 +46,46 @@ jobs:
         run: |
           $p = Start-Process -FilePath (Resolve-Path 'dist/CodingBrainDesktop/CodingBrainDesktop.exe').Path -ArgumentList '--self-test' -Wait -PassThru -WindowStyle Hidden
           if ($p.ExitCode -ne 0) { throw "Native self-test returned $($p.ExitCode)" }
+      - name: Build self-contained Windows installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = @(
+            'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+            'C:\Program Files\Inno Setup 6\ISCC.exe'
+          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y --limit-output
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to obtain the Inno Setup compiler' }
+            $iscc = @(
+              'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+              'C:\Program Files\Inno Setup 6\ISCC.exe'
+            ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw 'Inno Setup compiler is missing' }
+          & $iscc 'installer/windows/CodingBrainDesktop.iss'
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path 'dist/CodingBrain-Setup.exe')) {
+            throw 'Windows installer build failed'
+          }
+      - name: Verify installer installs, runs native self-test and uninstalls
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'CodingBrainDesktopInstallerTest'
+          $exe = (Resolve-Path 'dist/CodingBrain-Setup.exe').Path
+          $install = Start-Process -FilePath $exe -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/DIR=' + $dir)) -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer failed with code $($install.ExitCode)" }
+          $app = Join-Path $dir 'CodingBrainDesktop.exe'
+          if (-not (Test-Path -LiteralPath $app)) { throw 'Installer did not install the desktop executable' }
+          $probe = Start-Process -FilePath $app -ArgumentList '--self-test' -Wait -PassThru -WindowStyle Hidden
+          if ($probe.ExitCode -ne 0) { throw "Installed desktop self-test failed with code $($probe.ExitCode)" }
+          $uninstaller = Join-Path $dir 'unins000.exe'
+          if (-not (Test-Path -LiteralPath $uninstaller)) { throw 'Installer did not create an uninstaller' }
+          $remove = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+          if ($remove.ExitCode -ne 0) { throw "Uninstaller failed with code $($remove.ExitCode)" }
+      - name: Checksum installer
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 'dist/CodingBrain-Setup.exe').Hash.ToLowerInvariant()
+          "$hash  CodingBrain-Setup.exe" | Set-Content -Encoding ascii 'dist/CodingBrain-Setup.exe.sha256'
       - name: Package portable Windows application and checksum
         shell: pwsh
         run: |
@@ -57,5 +98,7 @@ jobs:
           path: |
             dist/CodingBrainDesktop-Windows.zip
             dist/CodingBrainDesktop-Windows.zip.sha256
+            dist/CodingBrain-Setup.exe
+            dist/CodingBrain-Setup.exe.sha256
           if-no-files-found: error
           retention-days: 14

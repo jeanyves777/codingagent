@@ -120,10 +120,16 @@ def main(argv=None) -> int:
     try:
         root = source_root()
         if args.self_test:
-            # Portable Windows CI can verify packaging without a signed-in model or GUI session.
+            # Verify bundled assets and pywebview without starting a GUI.
             import importlib.util
+            assets = [root / "desktop_ui" / "static" / name for name in ("index.html", "app.js", "app.css")]
+            if not all(p.is_file() and p.stat().st_size > 0 for p in assets):
+                raise RuntimeError("Required desktop assets are missing")
+            webview_available = importlib.util.find_spec("webview") is not None
+            if getattr(sys, "frozen", False) and not webview_available:
+                raise RuntimeError("Native WebView dependency is missing from packaged executable")
             result = json.dumps({"native_assets": True, "root": str(root),
-                                 "webview_available": importlib.util.find_spec("webview") is not None})
+                                 "webview_available": webview_available})
             # A PyInstaller --windowed EXE has no stdout on Windows.
             if sys.stdout is not None:
                 print(result)
