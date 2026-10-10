@@ -173,3 +173,47 @@ def test_out_of_process_client_against_a_real_engine(world):
         assert {"role": "user", "content": "hello"} in history
     finally:
         client.close()
+
+
+def test_new_project_mode_question_is_answered_not_created(world, desktop):
+    """The owner's screenshot: 'CHECK IS ANY PROJECT EXIST' typed in New project mode. The engine
+    routes it as a question about the registry; no creation prompt, no project, no task."""
+    http, headers, _ = desktop
+    before = sorted(path.name for path in (world["home"] / "Projects").iterdir())
+    job = http.post("/api/start", json={"message": "CHECK IS ANY PROJECT EXIST", "mode": "new"}, headers=headers).json()
+    state = wait_for(http, headers, job["id"], lambda j: j["status"] in {"completed", "failed", "approval_required"})
+    assert state["job"]["status"] == "completed" and state["job"]["approval"] is None
+    text = "\n".join(messages(http, headers, job["id"]))
+    assert "registered with Coding Brain" in text and "calculator" in text and "nothing was created" in text
+    assert sorted(path.name for path in (world["home"] / "Projects").iterdir()) == before
+    assert world["engine"].call("tasks.list", {"project_id": world["project"]["id"]}) == []
+
+
+def test_new_project_mode_creation_still_asks_first(world, desktop):
+    http, headers, _ = desktop
+    job = http.post("/api/start", json={"message": "Create a task management application", "mode": "new"},
+                    headers=headers).json()
+    state = wait_for(http, headers, job["id"], lambda j: j["status"] == "approval_required")
+    assert state["job"]["approval"]["kind"] == "new"
+    http.post(f"/api/jobs/{job['id']}/decision", json={"allow": False, "approval_id": state["job"]["approval"]["id"]},
+              headers=headers)
+    wait_for(http, headers, job["id"], lambda j: j["status"] == "cancelled")
+    assert not (world["home"] / "Projects" / "task-management").exists()
+
+
+def test_a_typed_engine_without_the_operation_refuses_before_a_job(world, desktop, monkeypatch):
+    http, headers, workspace = desktop
+    real = workspace.engine_client()
+
+    class Older:
+        def call(self, op, params=None, on_event=None, timeout=None):
+            result = real.call(op, params, on_event, timeout)
+            if op == "engine.info":
+                result = {**result, "operations": [name for name in result["operations"] if name != "projects.create"]}
+            return result
+    monkeypatch.setattr(type(workspace), "engine_client", lambda self: Older())
+    workspace.engine_status(refresh=True)
+    response = http.post("/api/start", json={"message": "Create a task management application", "mode": "new"},
+                         headers=headers)
+    assert response.status_code == 409 and "projects.create" in response.json()["detail"]
+    assert not workspace.jobs

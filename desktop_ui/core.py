@@ -220,6 +220,19 @@ def create_new(job):
     job.status = "running"
     job.emit("start", "Preparing new-project request")
     try:
+        # The engine decides what the message is. Only a real request to create an application
+        # leads to the creation prompt; a question ("is there any project?") is answered from the
+        # project registry and nothing is created.
+        answer = client_for(job).call("conversation.send", {"message": job.goal}, None, 300)
+        action = answer.get("action") or {}
+        if action.get("kind") != "create_project":
+            if answer.get("reply"):
+                job.emit("output", answer["reply"])
+            job.emit("output", "That is not a request to create a new project, so nothing was created.")
+            job.status = "completed"
+            job.emit("finish", "No project created")
+            return
+        job.goal = action.get("goal") or job.goal
         tentative = {"id": job.id, "goal": job.goal}
         if not asyncio.run(wait_approval(job, "new", tentative)):
             job.status = "cancelled"

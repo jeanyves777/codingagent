@@ -108,6 +108,15 @@ class Job:
                 "task_id": self.task_id, "engine": "core" if self.core else "cli"}
 
 
+# What each window mode needs from the installed engine (from engine.info's operation list, the
+# authoritative feature flags for API 1.0 engines; never inferred from a version or an import).
+REQUIRED_OPERATIONS = {
+    "chat": ("conversation.send",),
+    "run": ("projects.register", "tasks.start", "tasks.approve", "tasks.accept", "tasks.stop"),
+    "new": ("conversation.send", "projects.create", "tasks.start", "tasks.approve", "tasks.accept"),
+}
+
+
 class Workspace:
     def __init__(self, home: Path | None = None, executable: str | None = None):
         self._home_override = home is not None
@@ -180,7 +189,8 @@ class Workspace:
             core.update(typed_api=False, conversation=False,
                         detail=f"The installed engine's typed API did not start: {str(error)[:300]}")
             return None
-        core.update(version=info.get("engine_version") or core.get("version"), api_version=info.get("api_version"),
+        core.update(operations=sorted(info.get("operations") or []),
+                    version=info.get("engine_version") or core.get("version"), api_version=info.get("api_version"),
                     conversation=True, detail=f"Typed engine API {info.get('api_version')} (engine {info.get('engine_version')})")
         return {"providers": providers}
 
@@ -471,6 +481,15 @@ class Workspace:
         # protected execution does not start.
         if self.use_core:
             status = self.engine_status()
+            needed = REQUIRED_OPERATIONS[mode]
+            missing = [op for op in needed if op not in (status["engine"].get("operations") or [])]
+            if status["engine"].get("typed_api") and missing:
+                del self.jobs[job.id]
+                if self.active == job.id:
+                    self.active = None
+                raise ValueError(f"The installed engine (v{status['engine'].get('version') or '?'}) does not support "
+                                 f"{'creating projects' if mode == 'new' else 'this action'} ({', '.join(missing)} missing). "
+                                 "Update Coding Brain; nothing was started.")
             if status["engine"].get("typed_api"):
                 from .core import run as core_run, chat as core_chat, create_new
                 job.core = True
