@@ -27,7 +27,7 @@ release, through these steps.
    - refusal of an update during a session;
    - rollback;
    - uninstall with data kept, and full removal.
-5. **Tag.** Merge to `main`, then tag `v<version>` and push the tag. The `release` job:
+5. **Publish (owner-approved, recommended).** See *Owner-approved releases* below. Alternatively, merge to `main`, then tag `v<version>` and push the tag. The `release` job:
    - checks that the tag matches `pyproject.toml`;
    - builds the wheel and resolves `constraints.txt` on Windows;
    - writes `release.json` and `SHA256SUMS`;
@@ -35,3 +35,51 @@ release, through these steps.
    - publishes the GitHub release. A pre-release is marked as such and never becomes "latest".
 
 Build the assets locally with `python scripts/build_release.py --out dist/release`.
+
+## Owner-approved releases (`.github/workflows/release.yml`)
+
+Releases can be published without pushing a tag from a developer machine. The workflow tags and
+publishes one exact commit of `main`, and only after the repository owner approves the
+`production` deployment in GitHub.
+
+**One-time setup (owner, in GitHub):**
+
+1. Open Settings > Environments > New environment, and name it `production`.
+2. Add yourself under **Required reviewers**.
+3. Optionally, restrict deployment branches to `main`.
+
+The workflow refuses to run if this environment does not require a reviewer.
+
+**Each release:**
+
+1. **Start the workflow.** Go to Actions > *Release (owner-approved)* > Run workflow, and enter:
+   - the full commit SHA on `main`;
+   - the version in that commit's `pyproject.toml`.
+
+   An agent can also start it through the API. Starting the workflow publishes nothing.
+2. **Gate (read-only).** `scripts/release_gate.py` runs from `main`, never from the candidate. It
+   refuses the release unless all of the following hold:
+   - the commit is on `main`;
+   - the version matches `pyproject.toml`;
+   - `CHANGELOG.md` has a section for it;
+   - the tag does not exist yet;
+   - the version is newer than the latest release;
+   - every check of the *Windows local install* workflow succeeded on this exact code. That
+     means the commit itself, or the merged pull request's head when its tree is identical.
+     Only GitHub Actions checks count, and at least the Windows verify matrix and the real
+     Docker sandbox must be present.
+
+   The run summary lists the evidence.
+3. **Approval.** The `publish` job waits for the owner's approval of the `production` deployment
+   (Review deployments > Approve). Nothing is tagged or published before that.
+4. **Publish.** It checks out the approved SHA, confirms it is that commit and version, and builds
+   the assets on Windows (`SHA256SUMS`, `release.json`). It then attests build provenance, creates
+   the annotated tag `v<version>` on that commit, and publishes the release.
+5. **Confirm.** It downloads the published release, verifies every checksum and the version, and
+   checks that the tag points at the approved SHA.
+
+Release in dependency order: one version at a time, each confirmed before the next starts. The
+gate's "newer than the latest release" rule enforces the order.
+
+Users then update with one command: `codingbrain update`. It verifies the release checksums,
+backs up their state and keeps the previous version for `codingbrain rollback`.
