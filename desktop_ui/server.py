@@ -338,10 +338,24 @@ class Workspace:
         cli = self.cli_command()
         deep_doctor = management.supports_cli_option(cli, "doctor", "--full") if action == "doctor" else True
         command = management.maintenance_args(action, cli, deep_doctor=deep_doctor)
+        if action == "update_engine" and os.name == "nt" and cli[1:] == ["-m", "brain.local"]:
+            # Run from the packaged desktop's resources, outside the engine being updated.
+            # The helper pins a single official release, updates the backend through its
+            # own verified updater, then verifies and installs the *matching* desktop EXE.
+            # It prompts to close this GUI before changing running program files.
+            helper = Path(__file__).with_name("Update-CodingBrain.ps1")
+            if not helper.is_file():
+                raise ValueError("Desktop update helper missing from this installation; reinstall a verified desktop build")
+            command = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(helper),
+                       "-EnginePython", cli[0], "-BrainHome", str(self._brain_home())]
         if action in {"install_full", "update_engine", "repair"}:
             # New console owns prompts, elevation and restarts. No silent consent.
             management.launch_interactive_windows(command)
-            return {"opened_terminal":True,"message":"The official Coding Brain workflow opened in a terminal. Follow its prompts; refresh this screen afterward."}
+            message = ("Close the desktop and follow the verified engine + desktop update instructions in the opened "
+                       "PowerShell window. The GUI must stay closed until the update finishes."
+                       if action == "update_engine" and os.name == "nt" and command[0].lower().endswith("powershell.exe")
+                       else "The official Coding Brain workflow opened in a terminal. Follow its prompts; refresh this screen afterward.")
+            return {"opened_terminal":True,"message":message}
         with self.lock:
             if self.active and self.jobs[self.active].status in {"starting", "running", "approval_required"}:
                 raise ValueError("Wait for the active operation to finish")
