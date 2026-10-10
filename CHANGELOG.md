@@ -4,6 +4,9 @@
 
 Images, screenshots and documents, plus a visual development loop (see docs/multimodal.md).
 
+- **Security (from review):** an attachment is refused when any folder in its path, not only the
+  file itself, is a symbolic link or a Windows junction (reparse point), checked before reading,
+  including on Python 3.11.
 - **Attachments:** `codingbrain run "goal" --attach FILE` (repeatable) accepts PNG, JPEG, WebP,
   GIF (frame selection), PDF, DOCX, XLSX, CSV, text, Markdown, JSON, YAML, XML and source files.
   - Formats are detected from content.

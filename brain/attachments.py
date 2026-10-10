@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -139,11 +140,13 @@ EXPECTED_SUFFIX = {"png": {".png"}, "jpeg": {".jpg", ".jpeg", ".jfif"}, "gif": {
 def check_path(raw: str, allowed_roots=(), forbidden_roots=()) -> Path:
     """Only an existing regular file the user named, never through a link, never a secret,
     never Coding Brain's own state, and inside the permitted roots when any are configured."""
-    given = Path(os.path.expanduser(raw))
+    given = Path(os.path.abspath(os.path.expanduser(raw)))  # absolute, links not resolved
     if not given.exists():
         raise AttachmentError(f"{raw}: file not found")
-    if given.is_symlink() or _is_junction(given):
-        raise AttachmentError(f"{raw}: links and junctions are not followed; attach the file itself")
+    linked = _linked_component(given)
+    if linked is not None:
+        raise AttachmentError(f"{raw}: links and junctions are not followed ({linked} is one); "
+                              "attach the file itself")
     path = given.resolve(strict=True)
     if not path.is_file():
         raise AttachmentError(f"{raw}: not a regular file")
@@ -160,9 +163,26 @@ def check_path(raw: str, allowed_roots=(), forbidden_roots=()) -> Path:
     return path
 
 
-def _is_junction(path: Path) -> bool:
-    check = getattr(path, "is_junction", None)
-    return bool(check and check())
+REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def _linked_component(path: Path) -> Path | None:
+    """The first component of the path (the file or any folder above it) that is a symbolic
+    link or, on Windows, any reparse point such as a directory junction. Checked with lstat on
+    every component before anything is read, so it works on Python 3.11 (no Path.is_junction)."""
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except OSError:
+            return current
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & REPARSE_POINT:
+            return current
+        junction = getattr(current, "is_junction", None)
+        if junction and junction():
+            return current
+    return None
 
 
 def sha256_file(path: Path) -> str:
