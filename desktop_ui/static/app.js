@@ -15,6 +15,9 @@
   let submitting = false;
   let polling = false;
   let typingRow = null;
+  let engineInfo = null;
+  let engineNoticeDismissed = false;
+  let engineRefresh = null;
   let controlLoad = null;
   let activeMaintenance = null;
   let maintenancePoll = null;
@@ -208,6 +211,55 @@
     $('thread').append(row);
     $('thread').scrollTop = $('thread').scrollHeight;
     return bubble;
+  }
+
+  function showEngineStatus(info) {
+    engineInfo = info;
+    const available = info.engine?.available === true;
+    const chat = info.chat_available === true;
+    const model = info.model || {};
+    const modelName = model.name || (model.provider === 'ollama' ? 'Local model not configured' : 'Model not configured');
+    $('model-label').textContent = `◈  ${modelName}  ⌄`;
+    $('model-label').title = `Primary worker: ${modelName}. Ollama model detected: ${model.ready ? 'yes' : 'no'}. Claude and Codex are separate optional supervisors; inspect them in AI Providers.`;
+    $('readiness-local').textContent = `◈ ${modelName}: ${model.ready ? 'detected' : 'not verified'}`;
+    $('readiness-local').dataset.ready = model.ready ? 'true' : 'false';
+    $('engine-label').textContent = !available ? 'Engine unavailable' :
+      !chat ? `Engine v${info.engine.version || '?'} · Chat update needed` :
+      model.provider === 'ollama' && !model.ready ? 'Local model not ready' :
+      `Engine v${info.engine.version || '?'} · Chat available`;
+    $('engine-dot').classList.toggle('green', available && chat && (model.provider !== 'ollama' || model.ready));
+    $('engine-dot').classList.toggle('amber', available && (!chat || (model.provider === 'ollama' && !model.ready)));
+    $('engine-banner').hidden = !info.next_action || engineNoticeDismissed;
+    $('engine-banner').dataset.state = available ? 'warning' : 'error';
+    $('engine-banner-title').textContent = info.title || 'Coding Brain engine status';
+    $('engine-banner-detail').textContent = info.detail || '';
+    $('engine-banner-action').textContent = info.next_action === 'updates' ? 'View updates' : 'Open setup';
+    if (!activeJob) $('footer-status').textContent = !available ? 'Engine unavailable' :
+      !chat ? 'Engine update required for chat' :
+      model.provider === 'ollama' && !model.ready ? 'Local model not ready' : 'Ready';
+  }
+
+  async function refreshEngine(options = {}) {
+    if (engineRefresh) return engineRefresh;
+    engineRefresh = (async () => {
+      try {
+        const info = await api('/api/engine/status' + (options.force ? '?refresh=true' : ''));
+        showEngineStatus(info);
+        return info;
+      } catch (error) {
+        if (!options.quiet) {
+          $('engine-label').textContent = 'Engine status unavailable';
+          $('engine-dot').classList.remove('green','amber');
+          $('model-label').textContent = '◈  Model status unknown  ⌄';
+          $('engine-banner').hidden = false;
+          $('engine-banner-title').textContent = 'Could not verify the installed brain';
+          $('engine-banner-detail').textContent = error.message;
+          $('engine-banner-action').textContent = 'Open setup';
+        }
+        return null;
+      } finally { engineRefresh = null; }
+    })();
+    return engineRefresh;
   }
 
   function setMode(value) {
@@ -440,7 +492,8 @@
       $('run-status').hidden = !running;
       busySend(running);
       $('status-label').textContent = job.status === 'approval_required' ? 'Awaiting your approval' : `Running ${job.kind} — waiting for engine output`;
-      $('footer-status').textContent = `Task ${job.status}`;
+      $('footer-status').textContent = job.kind === 'chat' && engineInfo?.chat_available === false ?
+        'Engine update required for chat' : `Task ${job.status}`;
       tickTime();
       if (!running) {
         if (pollTimer) clearInterval(pollTimer);
@@ -501,6 +554,7 @@
       const data = await api('/api/state');
       knownProjects = data.projects;
       if (data.project) updateProject(data.project);
+      await refreshEngine({force:true});
       if (data.active && ['starting','running','approval_required'].includes(data.active.status)) {
         activeJob = data.active.id;
         startedAt = data.active.started;
@@ -527,6 +581,8 @@
   });
   $('refresh-files').addEventListener('click', loadTree);
   $('refresh').addEventListener('click', refresh);
+  $('engine-banner-close').addEventListener('click', () => { engineNoticeDismissed = true; $('engine-banner').hidden = true; });
+  $('engine-banner-action').addEventListener('click', () => openControl(engineInfo?.next_action === 'updates' ? 'updates' : 'setup'));
   $('preview-close').addEventListener('click', () => $('preview').hidden = true);
   $('stop-task').addEventListener('click', async () => {
     if (!activeJob || !await confirmAction('Stop the active task?', 'Coding Brain will request cancellation at a safe boundary. Unsaved task progress may be interrupted.', 'Stop task', true)) return;
@@ -683,6 +739,17 @@
   }
 
   function renderProviders(providers) {
+    for (const providerId of ['claude','codex']) {
+      const provider = providers.find(entry => entry.id === providerId);
+      const node = $('readiness-' + providerId);
+      const name = providerId === 'claude' ? 'Claude' : 'Codex';
+      const connected = provider?.authenticated === true && provider?.supervisor_enabled === true;
+      const signedIn = provider?.authenticated === true;
+      node.textContent = `${name}: ${connected ? 'connected' : signedIn ? 'signed in (disabled)' :
+        provider?.status === 'not-installed' ? 'CLI not found' :
+        provider?.status === 'sign-in-needed' ? 'sign-in needed' : 'not verified'}`;
+      node.dataset.ready = connected ? 'true' : 'false';
+    }
     const list = $('provider-list');
     list.replaceChildren();
     const logos = {ollama:'◈',claude:'C',codex:'O',gemini:'G',grok:'X',meta:'M',muse:'✧'};
@@ -705,7 +772,8 @@
         provider.status === 'not-installed' ? 'not-installed' : 'unverified' : provider.status;
       const badges = document.createElement('div'); badges.className = 'provider-badges';
       const badge = document.createElement('span'); badge.className = 'provider-badge ' + state;
-      badge.textContent = isSubscription ?
+      badge.textContent = provider.id === 'ollama' ?
+        provider.model_ready ? 'Model detected' : provider.ollama_running ? 'Configured model missing' : 'Ollama not running' : isSubscription ?
         connected ? '✓ Connected' : verified ? '✓ Authenticated' :
         provider.status === 'not-installed' ? 'CLI not found' :
         provider.status === 'sign-in-needed' ? 'Sign-in needed' : 'Not verified' :
@@ -716,6 +784,12 @@
         provider.core_enabled ? 'Core integration' : 'Connector pending';
       badges.append(badge,extra);
       inner.append(heading,desc,badges);
+      if (provider.id === 'ollama') {
+        const localState = document.createElement('div');
+        localState.className = 'provider-connection ' + (provider.model_ready ? 'signed-in' : 'unverified');
+        localState.textContent = provider.detail || 'The local model has not been verified.';
+        inner.append(localState);
+      }
       if (isSubscription) {
         const stateText = document.createElement('div');
         stateText.className = 'provider-connection ' + state;
@@ -803,6 +877,7 @@
         setupCache = await api('/api/setup');
         renderSetup(setupCache.readiness);
         renderProviders(setupCache.providers);
+        if (!quiet) await refreshEngine({force:true, quiet:true});
         if (!quiet && !activeMaintenance) {
           const connected = setupCache.providers.filter(p => ['claude','codex'].includes(p.id) && p.authenticated && p.supervisor_enabled);
           if (activeControlTab === 'providers') feedback('success', 'Provider connections refreshed',

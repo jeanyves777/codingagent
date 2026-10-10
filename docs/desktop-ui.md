@@ -175,3 +175,35 @@ restart the desktop after installing it, then select **Recheck connections**.
 
 Test: `python tests/smoke_provider_browser.py` and
 `python -m pytest -q tests/test_desktop_management.py`.
+
+
+## Installed engine and model readiness (desktop integration)
+
+The green **Desktop connected** footer confirms only the loopback UI bridge,
+**not** that the installed Coding Brain engine, its local Qwen model, or its
+premium supervisors are ready. The header checks the **installed** engine
+through read-only CLI capability probes (`codingbrain version`,
+`codingbrain chat --help`, `codingbrain api --help`); the model pill shows the
+configured model from the installed engine's own configuration. Ollama model
+availability comes from local `http://127.0.0.1:11434/api/tags`, not merely
+the presence of `ollama.exe`. No inference requests, remote network calls or
+system changes occur during these probes. A detected model still requires a
+deep doctor/self-test to demonstrate actual generation.
+
+A v0.9.0 engine cannot handle ordinary questions through the new chat
+interface. The UI shows a non-green warning and an Update link rather than
+pretending the local bridge is a connected brain. The conversational/API PRs
+must be merged, released and installed before general chat is available on a
+normal Windows installation.
+
+Claude Code and Codex each display independent readiness: CLI found, official
+sign-in verified, and supervisor enabled in Coding Brain's configuration.
+An authenticated premium supervisor is **not** automatically the primary
+chat model. The composer displays distinct provider chips without exposing
+account credentials.
+
+**Backend integration requirement for PR #17:** Prefer typed `engine.info`
+and `providers.list` over CLI capability probes once the versioned engine API
+is shipped; preserve the honest UI-facing fields and human approvals. The
+Windows acceptance test must cover a real Qwen inference turn, authenticated
+premium supervisors, and recovery after upgrading an older engine.

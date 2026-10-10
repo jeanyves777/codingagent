@@ -144,6 +144,59 @@ class Workspace:
         staging.write_text(json.dumps({"completed": bool(complete)}), encoding="utf-8")
         os.replace(staging, self.state_path)
 
+    def _brain_home(self) -> Path:
+        if self._home_override:
+            return self.home / ".local" / "CodingBrain"
+        return Path(os.environ.get("CODINGBRAIN_HOME") or
+                    (Path(os.environ.get("LOCALAPPDATA", str(self.home / "AppData" / "Local"))) / "CodingBrain"))
+
+    def engine_status(self, refresh: bool = False) -> dict:
+        """Truthful installed-engine/model readiness; the local UI is a separate process.
+
+        Cache cheap probes briefly so a slow provider CLI doesn't freeze chat or activity.
+        """
+        now = time.monotonic()
+        cached = getattr(self, "_engine_status_cache", None)
+        if not refresh and cached and now - cached[0] < 20:
+            return cached[1]
+        try:
+            command = self.cli_command()
+        except ValueError:
+            command = None
+        core = management.engine_capabilities(command)
+        model = management.configured_model(self._brain_home() / "config" / "config.json")
+        ollama = management.local_ollama_models()
+        wanted = model["model"]
+        names = ollama["models"]
+        # Ollama usually uses ':latest' for the default tag. Do not treat a
+        # configured model as ready just because the Ollama executable exists.
+        available = (model["provider"] == "ollama" and bool(wanted) and
+                     any(name == wanted or (":" not in wanted and name == wanted + ":latest") for name in names))
+        chat = bool(core["available"] and core["conversation"])
+        if not core["available"]:
+            title, detail = "Coding Brain engine unavailable", core["detail"]
+            next_action = "setup"
+        elif not chat:
+            title = f"Engine v{core['version'] or '?'} needs the conversational release"
+            detail = "Desktop UI is connected, but this installed engine cannot handle general chat. The development PR is not an installed release."
+            next_action = "updates"
+        elif model["provider"] == "ollama" and not available:
+            title = "Local coding model not ready"
+            detail = (f"Configured model {wanted} is not installed or Ollama is stopped." if wanted else
+                      "Choose and install a local model through Coding Brain setup.")
+            next_action = "setup"
+        else:
+            title = "Engine and chat interface available"
+            detail = "Provider readiness and actual model generation require a deep system test."
+            next_action = None
+        report = {"bridge_online": True, "engine": core, "model": {
+            "provider": model["provider"], "name": wanted, "ready": available,
+            "ollama_running": ollama["running"], "installed_models": names,
+            "detail": ollama["detail"] if model["provider"] == "ollama" else "Provider readiness not verified"},
+            "chat_available": chat, "title": title, "detail": detail, "next_action": next_action}
+        self._engine_status_cache = (now, report)
+        return report
+
     def installation_status(self) -> dict:
         try:
             cli = self.cli_command()
@@ -165,19 +218,22 @@ class Workspace:
 
     def configured_providers(self) -> list[dict]:
         providers = management.providers_snapshot()
-        if self._home_override:
-            base = self.home / ".local" / "CodingBrain"
-        elif os.name == "nt":
-            base = Path(os.environ.get("CODINGBRAIN_HOME") or
-                        (Path(os.environ.get("LOCALAPPDATA", str(self.home / "AppData" / "Local"))) / "CodingBrain"))
-        else:
-            base = Path(os.getenv("CODINGBRAIN_HOME") or (self.home / ".local" / "CodingBrain"))
+        base = self._brain_home()
         try:
             conf = json.loads((base / "config" / "config.json").read_text(encoding="utf-8"))
             supervisors = conf.get("supervisors", {})
         except (OSError, ValueError, TypeError):
             supervisors = {}
+        local = self.engine_status()["model"]
         for provider in providers:
+            if provider["id"] == "ollama":
+                provider["model_name"] = local["name"]
+                provider["model_ready"] = local["ready"]
+                provider["ollama_running"] = local["ollama_running"]
+                provider["detail"] = (f"Model {local['name']} is available via Ollama (generation not verified)"
+                                      if local["ready"] else
+                                      f"Configured model {local['name'] or '(none)'} is unavailable or Ollama is stopped")
+                provider["status"] = "model-detected" if local["ready"] else "model-not-ready"
             if provider["id"] in {"claude", "codex"}:
                 enabled = bool(supervisors.get(provider["id"], {}).get("enabled"))
                 provider["supervisor_enabled"] = enabled
@@ -240,7 +296,7 @@ class Workspace:
                 raise ValueError("Batch-based CLI launchers are not supported by the UI bridge")
             return [self.executable]
         if os.name == "nt":
-            local = Path(os.environ.get("LOCALAPPDATA", self.home / "AppData" / "Local")) / "CodingBrain"
+            local = self._brain_home()
             current = local / "app" / "current.json"
             try:
                 version = json.loads(current.read_text(encoding="utf-8"))["version"]
@@ -488,6 +544,10 @@ def create_app(state: Workspace | None = None) -> FastAPI:
         return {"project": {"name": state.project.name, "path": str(state.project),
                             "git": state.git_branch(state.project)} if state.project else None,
                 "projects": state.projects(), "active": active.view() if active else None}
+
+    @app.get("/api/engine/status", dependencies=[Depends(auth)])
+    def engine_status(refresh: bool = False):
+        return state.engine_status(refresh=refresh)
 
     @app.get("/api/setup", dependencies=[Depends(auth)])
     def setup_status():

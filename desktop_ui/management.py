@@ -132,6 +132,75 @@ def providers_snapshot(probe: Callable[[list[str]], bool | None] = safe_probe) -
     return entries
 
 
+
+def engine_capabilities(cli_command: list[str] | None) -> dict:
+    """Read-only checks of the *installed* Coding Brain, never of this UI process.
+
+    A running loopback UI is NOT evidence of a working engine, chat capability,
+    or a live Ollama model. Do not infer support merely from a version number.
+    """
+    result = {"available": False, "version": None, "conversation": False,
+              "typed_api": False, "task_command": False, "detail": "Coding Brain is not installed"}
+    if not cli_command:
+        return result
+    try:
+        version = subprocess.run([*cli_command, "version"], stdin=subprocess.DEVNULL,
+                                 capture_output=True, text=True, errors="replace", timeout=6,
+                                 check=False)
+        if version.returncode:
+            result["detail"] = "Installed Coding Brain could not start; repair its Python environment"
+            return result
+        import re
+        match = re.search(r"\b(?:codingbrain\s+)?v?(\d+\.\d+(?:\.\d+){0,2}(?:[.a-z0-9+-]+)?)\b",
+                          version.stdout, re.I)
+        result["version"] = match.group(1) if match else None
+        result["available"] = True
+        result["task_command"] = True  # availability of run command != sandbox/model readiness
+        result["detail"] = "Engine responds to version probe; execution readiness is not yet verified"
+        for command, key in (("chat", "conversation"), ("api", "typed_api")):
+            try:
+                probe = subprocess.run([*cli_command, command, "--help"],
+                                       stdin=subprocess.DEVNULL, capture_output=True,
+                                       text=True, errors="replace", timeout=6, check=False)
+                result[key] = probe.returncode == 0 and "usage:" in probe.stdout.lower()
+            except (OSError, subprocess.TimeoutExpired):
+                result[key] = False
+        if result["typed_api"]:
+            result["conversation"] = True
+        return result
+    except (OSError, subprocess.TimeoutExpired):
+        result["detail"] = "Could not start installed Coding Brain; check its Python environment"
+        return result
+
+
+def local_ollama_models() -> dict:
+    """Read-only local Ollama tags; no inference request, no proxy, no remote host."""
+    from urllib.request import ProxyHandler, Request, build_opener
+    from urllib.error import HTTPError, URLError
+    result = {"running": False, "models": [], "detail": "Ollama service is not reachable on localhost:11434"}
+    try:
+        request = Request("http://127.0.0.1:11434/api/tags", headers={"Accept": "application/json"})
+        with build_opener(ProxyHandler({})).open(request, timeout=2) as response:
+            payload = json.load(response)
+        result["running"] = True
+        result["models"] = [str(item["name"])[:160] for item in payload.get("models", [])[:100]
+                            if isinstance(item, dict) and isinstance(item.get("name"), str)]
+        result["detail"] = "Ollama is reachable; a model generation test is still required for full readiness"
+    except (ValueError, TypeError, KeyError, HTTPError, URLError, TimeoutError, OSError):
+        pass
+    return result
+
+
+def configured_model(config_path: Path) -> dict:
+    """Return only non-sensitive model names and routing type, never configuration secrets."""
+    try:
+        configuration = json.loads(config_path.read_text(encoding="utf-8"))
+        models = configuration.get("models") or {}
+        return {"provider": str(models.get("provider") or "unknown")[:80],
+                "model": str(models.get("model") or "")[:160]}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {"provider": "unknown", "model": ""}
+
 def installation_probes(cli_command: list[str] | None = None) -> dict:
     """Cheap preflight: installation presence, not fake deep readiness."""
     required = ("git", "python", "docker", "ollama", "claude", "codex")
