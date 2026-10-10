@@ -84,6 +84,58 @@ jobs:
           $version = (Select-String -Path pyproject.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
           if ($version -ne $env:VERSION) { throw "pyproject.toml says $version, expected $env:VERSION" }
           python scripts/build_release.py --out dist/release
+      - name: Package matching desktop installer when desktop source is present
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if (-not (Test-Path 'desktop_ui/launch_native.py')) {
+            Write-Host 'This approved historical commit contains engine-only source.'
+            exit 0
+          }
+          if (-not (Test-Path 'desktop_ui/Update-CodingBrain.ps1')) {
+            throw 'Desktop source has no verified dual-component updater: refuse to publish an incomplete GUI.'
+          }
+          python -m pip install --disable-pip-version-check -e .
+          if ($LASTEXITCODE -ne 0) { throw 'Engine dependency installation failed' }
+          python -m pip install --disable-pip-version-check 'pytest>=8,<10' 'pytest-asyncio>=0.24,<2' 'pywebview>=5,<7' 'pyinstaller>=6,<7'
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop build dependency installation failed' }
+          python -m pytest -q -p no:cacheprovider tests/test_unified_windows_update.py tests/test_desktop_ui.py tests/test_desktop_native.py tests/test_desktop_management.py tests/test_desktop_engine_status.py
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop compatibility tests failed' }
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name CodingBrainDesktop --collect-all webview --add-data 'desktop_ui;desktop_ui' desktop_ui/launch_native.py
+          if ($LASTEXITCODE -ne 0) { throw 'Native desktop packaging failed' }
+          $app = (Resolve-Path 'dist/CodingBrainDesktop/CodingBrainDesktop.exe').Path
+          $probe = Start-Process -FilePath $app -ArgumentList '--self-test' -Wait -PassThru -WindowStyle Hidden
+          if ($probe.ExitCode -ne 0) { throw "Packaged desktop self-test failed: $($probe.ExitCode)" }
+          $iscc = @('C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+                    'C:\Program Files\Inno Setup 6\ISCC.exe') |
+                    Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y --limit-output
+            if ($LASTEXITCODE -ne 0) { throw 'Could not install Inno Setup' }
+            $iscc = @('C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+                      'C:\Program Files\Inno Setup 6\ISCC.exe') |
+                      Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw 'Inno Setup compiler missing' }
+          & $iscc "/DCodingBrainVersion=$env:VERSION" 'installer/windows/CodingBrainDesktop.iss'
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path 'dist/CodingBrain-Setup.exe')) {
+            throw 'Versioned desktop installer failed to build'
+          }
+          # Test a real install and self-test before this installer can be published.
+          $dir = Join-Path $env:RUNNER_TEMP 'CodingBrain-ReleaseInstallerTest'
+          $installer = (Resolve-Path 'dist/CodingBrain-Setup.exe').Path
+          $installed = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/DIR=' + $dir)) -Wait -PassThru
+          if ($installed.ExitCode -ne 0) { throw "Desktop installation failed: $($installed.ExitCode)" }
+          $exe = Join-Path $dir 'CodingBrainDesktop.exe'
+          $selfTest = Start-Process -FilePath $exe -ArgumentList '--self-test' -Wait -PassThru -WindowStyle Hidden
+          if ($selfTest.ExitCode -ne 0) { throw "Installed desktop self-test failed: $($selfTest.ExitCode)" }
+          $uninstaller = Join-Path $dir 'unins000.exe'
+          $removed = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+          if ($removed.ExitCode -ne 0) { throw 'Desktop uninstall test failed' }
+          Compress-Archive -Path 'dist/CodingBrainDesktop' -DestinationPath 'dist/CodingBrainDesktop-Windows.zip'
+          python scripts/finalize_desktop_release.py --out dist/release --installer dist/CodingBrain-Setup.exe --portable dist/CodingBrainDesktop-Windows.zip
+          if ($LASTEXITCODE -ne 0) { throw 'Matching desktop release manifest and checksums failed' }
       - uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/release/*.whl
