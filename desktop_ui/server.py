@@ -703,7 +703,7 @@ def create_app(state: Workspace | None = None) -> FastAPI:
         if not body.confirmed:
             raise HTTPException(409, "Confirm the operation before starting it")
         try:
-            return state.maintenance(action, channel=channel)
+            return state.maintenance(action) if channel == "stable" else state.maintenance(action, channel=channel)
         except (ValueError, OSError) as error:
             raise HTTPException(409, str(error)) from error
 
