@@ -117,6 +117,32 @@ def test_new_project_cannot_run_without_an_installed_engine(client, monkeypatch)
     assert not workspace.jobs
 
 
+def test_legacy_engine_refuses_chat_before_queuing_or_simulating_greeting(client, monkeypatch):
+    api, workspace = client
+    monkeypatch.setattr(workspace, "engine_status", lambda: {
+        "engine": {"available": True, "version": "0.9.0", "conversation": False}
+    })
+    response = api.post("/api/start", headers=headers(workspace),
+                        json={"mode": "chat", "message": "Hello"})
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "v0.9.0" in detail
+    assert "No chat session or coding task was started" in detail
+    assert workspace.jobs == {}
+    assert workspace.active is None
+
+
+def test_unavailable_engine_refuses_chat_without_job(client, monkeypatch):
+    api, workspace = client
+    monkeypatch.setattr(workspace, "engine_status", lambda: {
+        "engine": {"available": False, "conversation": False}
+    })
+    response = api.post("/api/start", headers=headers(workspace),
+                        json={"mode": "chat", "message": "Who is the president?"})
+    assert response.status_code == 409
+    assert workspace.jobs == {}
+
+
 def test_run_is_explicit_and_cannot_run_outside_git(client):
     api, w = client
     result = api.post("/api/start", headers=headers(w), json={"mode":"run","message":"create tests"})
@@ -141,6 +167,9 @@ def test_chat_never_falls_back_to_engineering_task(client):
 
 def test_acceptance_requires_actual_prompt(client):
     api, w = client
+    # Probe the deliberate legacy CLI argument-array path. Normal desktop chat
+    # now rejects pre-conversational engines before allocating any job.
+    w.use_core = False
     result = api.post("/api/start", headers=headers(w), json={"mode":"chat","message":"hello"})
     job_id = result.json()["id"]
     assert api.post(f"/api/jobs/{job_id}/decision", headers=headers(w), json={"allow":True}).status_code == 409
