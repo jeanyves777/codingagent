@@ -163,6 +163,12 @@ def engine_capabilities(cli_command: list[str] | None) -> dict:
         result["available"] = True
         result["task_command"] = True  # availability of run command != sandbox/model readiness
         result["detail"] = "Engine responds to version probe; execution readiness is not yet verified"
+        # The published v0.9.0 release has no chat, API, or goal-first command.
+        # Avoid three extra interpreter launches during first-run readiness:
+        # those may take up to 18 seconds to time out on a slow Windows PC.
+        if result["version"] == "0.9.0":
+            result["detail"] = "Published v0.9.0 supports coding tasks, not conversational chat or new-project creation"
+            return result
         # Check feature support against the actual installed engine, not the UI bundle.
         # v0.9.0 has no 'new' command; a successful version probe is insufficient.
         for command, key in (("chat", "conversation"), ("api", "typed_api"),
