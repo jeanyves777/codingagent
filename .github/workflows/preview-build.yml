@@ -79,7 +79,7 @@ jobs:
           # This is still an UNRELEASED CI artifact. No release tag or production environment.
           python -m pip install --disable-pip-version-check 'pywebview>=5,<7' 'pyinstaller>=6,<7'
           if ($LASTEXITCODE -ne 0) { throw 'Desktop packaging dependencies failed' }
-          python -m pytest -q -p no:cacheprovider tests/test_unified_windows_update.py
+          python -m pytest -q -p no:cacheprovider tests/test_unified_windows_update.py tests/test_desktop_git_live.py
           if ($LASTEXITCODE -ne 0) { throw 'Unified updater tests failed' }
           $env:CODINGBRAIN_DESKTOP_VERSION = $env:version
           python -c "import json,os,pathlib;pathlib.Path('desktop_ui/release-version.json').write_text(json.dumps({'version':os.environ['CODINGBRAIN_DESKTOP_VERSION']}),encoding='utf-8')"
