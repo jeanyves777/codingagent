@@ -62,10 +62,14 @@ OPERATIONS = {
                       "approve: review, apply in the isolated worktree and test; decline: cancel"),
     "tasks.accept": ("action", {"project_id": ("str", True), "task_id": ("str", True)},
                      "accepts a tested task as a new branch"),
+    "tasks.tool_decision": ("action", {"project_id": ("str", True), "task_id": ("str", True),
+                                       "request_id": ("str", True), "decision": ("str", True)},
+                            "approve or decline the protected tool request a task is waiting on "
+                            "(pending_tool_approval); the task then continues or stops"),
     "tasks.stop": ("action", {"project_id": ("str", True), "task_id": ("str", True)}, "requests cancellation"),
     "tasks.resume": ("action", {"project_id": ("str", True), "task_id": ("str", True)}, "continues an unfinished task"),
 }
-LONG = {"tasks.start", "tasks.approve", "tasks.accept", "tasks.resume"}
+LONG = {"tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
 CHECK_TYPES = {"str": str, "bool": bool, "int": int}
 
 
@@ -370,6 +374,29 @@ class Engine:
                 brain.store.save(task)
             return task
         return task_summary(self.run(go()))
+
+    def op_tasks_tool_decision(self, project_id: str, task_id: str, request_id: str, decision: str, emit=None):
+        """A protected tool request is single-use and bound to its task: the service refuses a
+        request id that is not the one the task is waiting on."""
+        if decision not in {"approve", "decline"}:
+            raise ApiError("bad_params", "decision must be approve or decline")
+        brain = self.brain(project_id)
+        task = brain.store.get(task_id)
+        if task["status"] != "awaiting_tool_approval" or task.get("pending_approval_id") != request_id:
+            raise ApiError("refused", f"task is {task['status']}, not waiting for this tool request")
+        done = self.watching(project_id, emit, {task_id})
+
+        async def go():
+            try:
+                brain.decide_tool_approval(request_id, decision == "approve")
+                await self._drain(brain)
+            except asyncio.CancelledError:  # tasks.stop: the task stopped at a safe boundary
+                pass
+            return brain.store.get(task_id)
+        try:
+            return task_summary(self.run(go()))
+        finally:
+            done()
 
     def op_tasks_stop(self, project_id: str, task_id: str):
         """Request cancellation; a running task stops at its next safe boundary (the sandbox polls
