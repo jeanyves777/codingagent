@@ -27,6 +27,7 @@ def test_engine_probe_reports_legacy_release_truthfully(monkeypatch):
     assert status['version'] == '0.9.0'
     assert status['conversation'] is False
     assert status['typed_api'] is False
+    assert status['new_project'] is False
     assert status['task_command'] is True
     assert all('--yes' not in command for command in commands)
     assert all(cmd[-1] in ('version', '--help') for cmd in commands)
@@ -40,6 +41,7 @@ def test_engine_probe_detects_new_chat_and_api_without_exec(monkeypatch):
     monkeypatch.setattr(management.subprocess, 'run', fake_run)
     status = management.engine_capabilities(['fake-codingbrain'])
     assert status['available'] and status['conversation'] and status['typed_api']
+    assert status['new_project'] is True
 
 
 def test_missing_engine_is_reported_as_unavailable_not_ready(monkeypatch):
@@ -106,3 +108,25 @@ def test_model_configuration_probe_never_returns_secrets(tmp_path):
                            'provider': 'ollama', 'api_key_env': 'SECRET_VAR', 'token': 'PRIVATE_VALUE'}}))
     info = management.configured_model(config)
     assert info == {'provider': 'ollama', 'model': 'qwen2.5-coder:7b'}
+
+
+def test_chat_update_does_not_automatically_enable_new_project(monkeypatch):
+    """An installed conversational engine without 'codingbrain new' cannot create apps."""
+    commands = []
+
+    def fake_run(argv, **kwargs):
+        commands.append(argv)
+        if argv[-1] == 'version':
+            return FakeResult(output='codingbrain 0.12.0')
+        if argv[-2:] == ['new', '--help']:
+            return FakeResult(2, 'error: invalid choice: new')
+        return FakeResult(output='usage: codingbrain chat/api [-h]')
+
+    monkeypatch.setattr(management.subprocess, 'run', fake_run)
+    capability = management.engine_capabilities(['fake-codingbrain'])
+    assert capability['available'] is True
+    assert capability['conversation'] is True
+    assert capability['typed_api'] is True
+    assert capability['new_project'] is False
+    assert ['fake-codingbrain', 'new', '--help'] in commands
+    assert not any('run' in argv or '--yes' in argv for argv in commands)
