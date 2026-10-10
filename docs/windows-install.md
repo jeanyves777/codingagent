@@ -108,6 +108,7 @@ branch yourself.
 | `codingbrain tasks` | Every task for this project |
 | `codingbrain resume [id]` | Continue the latest unfinished task, or the given one. Interrupted tasks start again from a fresh worktree. |
 | `codingbrain accept [id]` | Accept a tested result as a new branch |
+| `codingbrain memory ...` | Cross-agent project memory: scan, import, sync, status, show, conflicts ([details](project-memory.md)) |
 | `codingbrain doctor` | Health and provider check |
 | `codingbrain setup` | Change settings |
 | `codingbrain update` / `rollback` | See below |

@@ -24,4 +24,5 @@ def migrate(layout: Layout) -> dict:
         applied.append(version + 1)
     config["schema_version"] = SCHEMA_VERSION
     save(layout, config)
-    return {"from": start, "to": SCHEMA_VERSION, "applied": applied}
+    from .memory import migrate_all
+    return {"from": start, "to": SCHEMA_VERSION, "applied": applied, "memory_stores": len(migrate_all(layout))}

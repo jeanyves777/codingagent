@@ -1,6 +1,7 @@
 """Local installation: configuration, project recognition, the CLI, updates and rollback."""
 import hashlib
 import json
+import re
 import os
 import sqlite3
 import subprocess
@@ -117,7 +118,9 @@ def test_cli_recognizes_any_repository_without_changing_it(tmp_path):
     before = snapshot(repo)
     home = tmp_path / "home"
     version = run_cli(home, repo, "--version")
-    assert version.returncode == 0 and version.stdout.startswith("codingbrain 0.9")
+    expected = re.search(r'^version = "([^"]+)"', (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(),
+                         re.M).group(1)
+    assert version.returncode == 0 and version.stdout.strip() == f"codingbrain {expected}"
     initialized = run_cli(home, repo, "init")
     assert initialized.returncode == 0 and "Nothing in the project was changed" in initialized.stdout
     status = run_cli(home, repo, "status")
