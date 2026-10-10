@@ -21,6 +21,7 @@ def no_installed_engine(monkeypatch):
         'available': True, 'version': '0.9.0', 'conversation': False, 'typed_api': False,
         'task_command': True, 'detail': 'test engine without the typed API'})
     monkeypatch.setattr(management, 'local_ollama_models', lambda: {'running': False, 'models': [], 'detail': 'off'})
+    monkeypatch.setattr(management, '_registry_path_dirs', lambda: [])  # never this machine's registry
 
 
 def session(tmp_path):

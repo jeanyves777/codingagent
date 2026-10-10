@@ -111,10 +111,10 @@ def locate_cli(name: str) -> tuple[str | None, list[str]]:
     configured prefix, official launcher folders. Nothing is executed to find a CLI, and finding
     one never means signed in or connected. Returns the path and every location checked."""
     found = shutil.which(name)
-    if found or not IS_WINDOWS:
-        return found, ([] if found else ["PATH"])
+    if found or not IS_WINDOWS or name not in {"claude", "codex", "gemini"}:
+        return found, ([] if found else ["PATH"])  # only vendor CLIs get the extra lookup
     checked = ["PATH"]
-    folders = [*_registry_path_dirs(), *(_npm_prefixes() if name in {"claude", "codex", "gemini"} else [])]
+    folders = [*_registry_path_dirs(), *_npm_prefixes()]
     local = os.environ.get("LOCALAPPDATA")
     if local:
         if name == "codex":  # the standalone Codex for Windows
