@@ -138,9 +138,10 @@ def scaffold(stack: str, name: str, goal: str) -> dict[str, str]:
     if stack == "python":
         files[".gitignore"] = "__pycache__/\n*.pyc\n.venv/\n.pytest_cache/\n"
         # -vv: full assertion diffs, so a failed attempt tells the repair exactly what differed
-        # (pytest's quiet default truncates them).
+        # (pytest's quiet default truncates them). python_files=*.py: test_* functions are collected
+        # wherever they are written (models often put them in the module itself).
         files["coding-brain.json"] = json.dumps({"test_profile": "python", "test_command": [
-            "python", "-m", "pytest", "-vv", "-p", "no:cacheprovider"]}, indent=2) + "\n"
+            "python", "-m", "pytest", "-vv", "-p", "no:cacheprovider", "-o", "python_files=*.py"]}, indent=2) + "\n"
         # Makes modules in the project root importable from tests/ without packaging.
         files["conftest.py"] = "import sys\nfrom pathlib import Path\n\nsys.path.insert(0, str(Path(__file__).parent))\n"
         files["tests/README.md"] = "Tests for this project (pytest). Coding Brain adds tests for each requirement.\n"

@@ -62,7 +62,8 @@ def test_creates_folder_baseline_and_scaffold_in_the_projects_folder(env):
     assert git(path, "status", "--porcelain") == ""
     assert git(path, "branch", "--show-current") == "main"
     assert json.loads((path / "coding-brain.json").read_text()) == {
-        "test_profile": "python", "test_command": ["python", "-m", "pytest", "-vv", "-p", "no:cacheprovider"]}
+        "test_profile": "python",
+        "test_command": ["python", "-m", "pytest", "-vv", "-p", "no:cacheprovider", "-o", "python_files=*.py"]}
     assert (path / "conftest.py").is_file() and "task manager" in (path / "README.md").read_text()
     # registered, with the goal in project memory as the user's approved instruction
     from brain.local.cli import Context

@@ -942,7 +942,10 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                                   f"{limit}: this new project's tests must come with the code", "observed")
                     feedback = ("\nNo tests ran. This is a new project, so its tests are part of the work: add test "
                                 "files (Python: tests/test_<module>.py using pytest; Node: test/<name>.test.js "
-                                "using node:test) that check the behaviour the goal describes, together with the code.")
+                                "using node:test) that check the behaviour the goal describes, together with the code. "
+                                "Tests the runner cannot find do not count: write test functions named test_* "
+                                "(Python) or test(...) calls in test files (Node), and do not claim tests exist "
+                                "when the output above shows none ran.")
                 elif evidence["exit_code"] in (None, 5, 125, 126, 127) or sandbox_error(evidence.get("output", "")):
                     # Missing tests or sandbox problems are not the model's fault; never escalate them.
                     task["status"] = "failed"
