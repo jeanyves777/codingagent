@@ -90,7 +90,7 @@ with sync_playwright() as p:
     page.locator('#refresh').click()
     page.get_by_text('Chat available', exact=False).first.wait_for(timeout=5000)
     page.locator('#send').click()
-    page.get_by_text('Reply from simulated API-capable brain', exact=False).wait_for(timeout=5000)
+    page.locator('#thread .message.assistant .message-content').get_by_text('Reply from simulated API-capable brain', exact=True).wait_for(timeout=5000)
     assert page.evaluate('window.__demo.starts') == 1
     assert page.evaluate('window.__demo.lastStart.mode') == 'chat'
     assert page.locator('#thread .typing-row').count() == 0
