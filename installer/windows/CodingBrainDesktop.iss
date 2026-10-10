@@ -1,9 +1,13 @@
 ; Coding Brain Desktop per-user installer. Changes no Coding Brain engine or models.
+; Official release runner must pass /DCodingBrainVersion=<matching engine version>.
+#ifndef CodingBrainVersion
+#define CodingBrainVersion "0.1.0-preview"
+#endif
 [Setup]
 AppId={{70E4E90D-3BDA-4A4F-AB9C-FAD28EAD6F11}
 AppName=Coding Brain Desktop
-AppVersion=0.1.0-preview
-AppVerName=Coding Brain Desktop 0.1.0 Preview
+AppVersion={#CodingBrainVersion}
+AppVerName=Coding Brain Desktop {#CodingBrainVersion}
 AppPublisher=Coding Brain
 DefaultDirName={localappdata}\Programs\CodingBrainDesktop
 DefaultGroupName=Coding Brain Desktop

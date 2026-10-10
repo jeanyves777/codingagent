@@ -249,6 +249,14 @@ class Workspace:
         self._engine_status_cache = (now, report)
         return report
 
+    def update_status(self, channel: str = "stable") -> dict:
+        """An uncached GitHub release check; preview is explicit and untagged."""
+        from .updates import release_status
+        if channel not in {"stable", "preview"}:
+            raise ValueError("Invalid update channel")
+        engine = self.engine_status()["engine"]
+        return release_status(engine.get("version"), channel=channel)
+
     def installation_status(self) -> dict:
         try:
             cli = self.cli_command()
@@ -334,14 +342,35 @@ class Workspace:
         if result.returncode:
             raise ValueError("Coding Brain rejected this supervisor setting")
 
-    def maintenance(self, action: str) -> dict:
+    def maintenance(self, action: str, channel: str = "stable") -> dict:
+        if channel not in {"stable", "preview"}:
+            raise ValueError("Unsupported update channel")
+        if channel == "preview" and action != "update_engine":
+            raise ValueError("Preview channel is only supported for an explicit update")
         cli = self.cli_command()
         deep_doctor = management.supports_cli_option(cli, "doctor", "--full") if action == "doctor" else True
         command = management.maintenance_args(action, cli, deep_doctor=deep_doctor)
+        if action == "update_engine" and os.name == "nt" and cli[1:] == ["-m", "brain.local"]:
+            # Run from the packaged desktop's resources, outside the engine being updated.
+            # The helper pins a single official release, updates the backend through its
+            # own verified updater, then verifies and installs the *matching* desktop EXE.
+            # It prompts to close this GUI before changing running program files.
+            helper = Path(__file__).with_name("Update-CodingBrain.ps1")
+            if not helper.is_file():
+                raise ValueError("Desktop update helper missing from this installation; reinstall a verified desktop build")
+            command = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(helper),
+                       "-EnginePython", cli[0], "-BrainHome", str(self._brain_home()),
+                       "-Channel", channel]
+        if action == "update_engine" and channel == "preview" and not (os.name == "nt" and command[0].lower().endswith("powershell.exe")):
+            raise ValueError("This desktop build cannot install preview engine + native packages together")
         if action in {"install_full", "update_engine", "repair"}:
             # New console owns prompts, elevation and restarts. No silent consent.
             management.launch_interactive_windows(command)
-            return {"opened_terminal":True,"message":"The official Coding Brain workflow opened in a terminal. Follow its prompts; refresh this screen afterward."}
+            message = ("Close the desktop and follow the verified engine + desktop update instructions in the opened "
+                       "PowerShell window. The GUI must stay closed until the update finishes."
+                       if action == "update_engine" and os.name == "nt" and command[0].lower().endswith("powershell.exe")
+                       else "The official Coding Brain workflow opened in a terminal. Follow its prompts; refresh this screen afterward.")
+            return {"opened_terminal":True,"message":message}
         with self.lock:
             if self.active and self.jobs[self.active].status in {"starting", "running", "approval_required"}:
                 raise ValueError("Wait for the active operation to finish")
@@ -653,6 +682,13 @@ def create_app(state: Workspace | None = None) -> FastAPI:
     def engine_status(refresh: bool = False):
         return state.engine_status(refresh=refresh)
 
+    @app.get("/api/updates/status", dependencies=[Depends(auth)])
+    def update_status(channel: str = "stable"):
+        try:
+            return state.update_status(channel)
+        except (OSError, ValueError) as error:
+            raise HTTPException(503, f"Could not check GitHub's stable releases: {type(error).__name__}") from error
+
     @app.get("/api/setup", dependencies=[Depends(auth)])
     def setup_status():
         return {"readiness":state.installation_status(), "providers":state.configured_providers()}
@@ -663,11 +699,11 @@ def create_app(state: Workspace | None = None) -> FastAPI:
         return {"ok":True,"onboarding_completed":state.first_run_completed()}
 
     @app.post("/api/system/action", dependencies=[Depends(auth)])
-    def system_action(action: str, body: ConfirmAction):
+    def system_action(action: str, body: ConfirmAction, channel: str = "stable"):
         if not body.confirmed:
             raise HTTPException(409, "Confirm the operation before starting it")
         try:
-            return state.maintenance(action)
+            return state.maintenance(action) if channel == "stable" else state.maintenance(action, channel=channel)
         except (ValueError, OSError) as error:
             raise HTTPException(409, str(error)) from error
 
@@ -708,6 +744,15 @@ def create_app(state: Workspace | None = None) -> FastAPI:
             return state.choose(choice) if choice else {"cancelled": True}
         except Exception as e:
             raise HTTPException(503, "Native folder picker unavailable; enter a path instead") from e
+
+    @app.get("/api/git/snapshot", dependencies=[Depends(auth)])
+    def git_snapshot():
+        """Read-only fresh Git state for the selected project; no path input accepted."""
+        from .git_inspection import git_snapshot as inspect_git
+        try:
+            return inspect_git(state.project)
+        except (ValueError, OSError) as error:
+            raise HTTPException(503, "Local Git state unavailable; retry the live refresh") from error
 
     @app.get("/api/tree", dependencies=[Depends(auth)])
     def tree(path: str = ""):
