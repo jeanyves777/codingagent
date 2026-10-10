@@ -23,6 +23,14 @@ def git(path, *arguments):
 
 @pytest.fixture
 def world(tmp_path, monkeypatch):
+    import os
+    environment = dict(os.environ)  # building a real service writes the project's settings here
+    yield from _world(tmp_path, monkeypatch)
+    os.environ.clear()
+    os.environ.update(environment)
+
+
+def _world(tmp_path, monkeypatch):
     home = tmp_path / "Users" / "Kkoff"
     home.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))  # new projects go to <home>/Projects: never the real home
