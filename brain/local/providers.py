@@ -47,6 +47,7 @@ def descriptors(env: Env, deep: bool = False) -> list[dict]:
                                                                           "review_budget")},
                 "daily_limit": config["budgets"].get("daily_limit"), "api_key_billing": "refused"},
             "last_error": None if ready else status.detail,
+            "cli_path": (status.data or {}).get("path"), "checked": (status.data or {}).get("checked") or [],
             "supported_actions": ["install", "sign_in", "enable", "disable"], "adapter": f"{name}_cli",
         })
     unsupported = "No reviewed adapter yet: shown for information only, never selectable or reported as connected."
