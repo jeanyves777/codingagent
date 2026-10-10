@@ -2,8 +2,8 @@
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 root=Path(__file__).resolve().parents[1] / 'desktop_ui/static'
-html=(root/'index.html').read_text().replace('<link rel="stylesheet" href="/app.css">','<style>'+ (root/'app.css').read_text() + '</style>').replace('<script defer src="/app.js"></script>','')
-js=(root/'app.js').read_text()
+html=(root/'index.html').read_text(encoding='utf-8').replace('<link rel="stylesheet" href="/app.css">','<style>'+ (root/'app.css').read_text(encoding='utf-8') + '</style>').replace('<script defer src="/app.js"></script>','')
+js=(root/'app.js').read_text(encoding='utf-8')
 with sync_playwright() as p:
     browser=p.chromium.launch(headless=True,executable_path='/usr/bin/chromium',args=['--no-sandbox','--disable-dev-shm-usage'])
     page=browser.new_page(viewport={'width':1440,'height':900})
