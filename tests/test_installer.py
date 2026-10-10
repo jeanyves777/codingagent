@@ -419,12 +419,14 @@ def test_real_preflight_on_this_machine(layout):
     from brain.local.system import System
     system = System()
     facts = preflight(system, layout, "full")
+    print(json.dumps({**facts, "raw": system.facts()}, indent=2, default=str))  # in the log even on failure
     assert not facts["simulated"]
     assert facts["disk_free_gb"] > 0
     assert facts["virtualization"]["state"] in {"enabled", "possibly_disabled", "unknown"}
     if sys.platform == "win32":
         assert facts["build"] and facts["winget"] is not None and facts["ram_gb"]
-    print(json.dumps(facts, indent=2, default=str))
+        # The PowerShell probe supplies the virtualization signals and must work on a real Windows VM.
+        assert not system.facts().get("probe_error"), system.facts()["probe_error"]
 
 
 @pytest.mark.skipif(not os.environ.get("CODINGBRAIN_TEST_WINGET"), reason="set CODINGBRAIN_TEST_WINGET=1 (Windows with winget)")

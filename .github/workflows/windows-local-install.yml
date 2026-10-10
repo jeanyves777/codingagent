@@ -118,6 +118,7 @@ jobs:
           # Linux containers, so WSL/Docker readiness here shows the not-ready path, never a success.
           if (Get-Command winget -ErrorAction SilentlyContinue) { $env:CODINGBRAIN_TEST_WINGET = '1' } else { Write-Host 'winget is not on this runner image: the package-id check is skipped' }
           python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py -k real
+          if ($LASTEXITCODE -ne 0) { throw "real installer probes failed (pytest exited $LASTEXITCODE)" }
           $env:CODINGBRAIN_HOME = Join-Path $env:RUNNER_TEMP 'cb-plan'
           python -m brain.local install --plan --full --plain 2>&1 | Tee-Object -FilePath install-plan.txt
           if ($LASTEXITCODE -ne 0) { throw "install --plan exited $LASTEXITCODE" }
