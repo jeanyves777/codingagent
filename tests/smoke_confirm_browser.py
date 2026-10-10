@@ -71,10 +71,12 @@ with sync_playwright() as p:
     page.locator('#action-dialog').wait_for(state='hidden')
     assert page.evaluate('window.testApp.actions.length') == 0
 
-    # Cancel button refuses the update check as well.
+    # Read-only checks need no consent; installing a newer build absolutely does.
     page.locator('#control-tab-updates').click()
-    page.locator('#check-updates').click()
+    page.locator('#apply-update').click()
+    page.locator('#action-dialog').wait_for(state='visible')
     page.locator('#action-cancel').click()
+    page.locator('#action-dialog').wait_for(state='hidden')
     assert page.evaluate('window.testApp.actions.length') == 0
 
     # Only affirmative button authorizes a request, and the UI labels basic verification honestly.
