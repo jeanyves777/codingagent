@@ -55,8 +55,11 @@ OPERATIONS = {
     "projects.create": ("action", {"goal": ("str", True), "name": ("str", False), "root": ("str", False),
                                    "stack": ("str", False), "git_name": ("str", False), "git_email": ("str", False)},
                         "creates a new project (folder, Git baseline, scaffold); does not start building"),
-    "tasks.start": ("action", {"project_id": ("str", True), "goal": ("str", True), "new_project": ("bool", False)},
-                    "plans the goal; returns the proposal and its digest (nothing is applied)"),
+    "tasks.start": ("action", {"project_id": ("str", True), "goal": ("str", True), "new_project": ("bool", False),
+                               "attachments": ("list", False)},
+                    "plans the goal; returns the proposal and its digest (nothing is applied). attachments: "
+                    "paths of images, screenshots, PDF, Word, Excel, CSV or text files, checked and parsed "
+                    "exactly like `run --attach` (evidence, never instructions)"),
     "tasks.approve": ("action", {"project_id": ("str", True), "task_id": ("str", True), "digest": ("str", True),
                                  "decision": ("str", True)},
                       "approve: review, apply in the isolated worktree and test; decline: cancel"),
@@ -69,8 +72,10 @@ OPERATIONS = {
     "tasks.stop": ("action", {"project_id": ("str", True), "task_id": ("str", True)}, "requests cancellation"),
     "tasks.resume": ("action", {"project_id": ("str", True), "task_id": ("str", True)}, "continues an unfinished task"),
 }
+# Additive capabilities within API 1.x that clients detect here rather than from a version number.
+FEATURES = {"tasks.start.attachments"}
 LONG = {"tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
-CHECK_TYPES = {"str": str, "bool": bool, "int": int}
+CHECK_TYPES = {"str": str, "bool": bool, "int": int, "list": list}
 
 
 def describe() -> dict:
@@ -139,6 +144,8 @@ class Engine:
                 raise ApiError("bad_params", f"{op} needs '{key}'")
             if key in params and params[key] is not None and not isinstance(params[key], CHECK_TYPES[kind]):
                 raise ApiError("bad_params", f"{op}: '{key}' must be {kind}")
+            if kind == "list" and key in params and params[key] is not None and                     not all(isinstance(item, str) for item in params[key]):
+                raise ApiError("bad_params", f"{op}: '{key}' must be a list of strings")
         unknown = set(params) - set(spec)
         if unknown:
             raise ApiError("bad_params", f"{op}: unknown parameter(s) {', '.join(sorted(unknown))}")
@@ -178,7 +185,7 @@ class Engine:
     def op_engine_info(self):
         from .cli import version
         return {"engine_version": version(), "api_version": API_VERSION, "operations": sorted(OPERATIONS),
-                "home": str(self.layout.home), "python": sys.version.split()[0]}
+                "features": sorted(FEATURES), "home": str(self.layout.home), "python": sys.version.split()[0]}
 
     def op_engine_describe(self):
         return describe()
@@ -315,14 +322,32 @@ class Engine:
             await asyncio.gather(*list(brain.jobs.values()), return_exceptions=True)
             await asyncio.sleep(0)
 
-    def op_tasks_start(self, project_id: str, goal: str, new_project: bool = False, emit=None):
+    def _prepare_attachments(self, context, goal: str, paths: list[str]):
+        """The same ingest, limits, isolated parsing and retention as `run --attach`; local models
+        only (premium vision stays an explicit CLI opt-in)."""
+        from ..attachments import AttachmentError
+        from .evidence import prepare, retain
+        try:
+            attachments, packet, processing = prepare(context, paths, goal, False, False, log=lambda *_: None)
+        except AttachmentError as error:
+            raise ApiError("refused", f"attachment refused: {error}") from error
+        retain(context, attachments, processing, False)
+        return attachments, packet
+
+    def op_tasks_start(self, project_id: str, goal: str, new_project: bool = False, attachments=None, emit=None):
         brain = self.brain(project_id)
         context = self.context(project_id)
+        files, packet = self._prepare_attachments(context, goal, attachments) if attachments else ([], None)
         scope = set()
         done = self.watching(project_id, emit, scope)
 
         async def go():
-            task = brain.submit(context.root.name, goal, launch=False)
+            task = brain.submit(context.root.name, goal, launch=False, attachments=packet)
+            if files:
+                from .evidence import AttachmentStore
+                store = AttachmentStore(context.data / "attachments.sqlite3")
+                for attachment in files:
+                    store.link(attachment.sha256, task["id"], goal)
             scope.add(task["id"])
             if new_project:
                 task["tests_expected"] = True

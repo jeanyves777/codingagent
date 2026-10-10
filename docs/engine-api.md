@@ -50,7 +50,7 @@ The same operations are available in-process as `brain.local.engine.Engine(...).
 
 | Operation | Returns |
 | --- | --- |
-| `engine.info` | engine version, API version, supported operations, data folder |
+| `engine.info` | engine version, API version, supported operations, `features` (additive capabilities such as `tasks.start.attachments`), data folder |
 | `engine.describe` | the schema |
 | `doctor.run {full}` | checks and readiness levels (the same as `codingbrain doctor --json`) |
 | `install.status` | installer checkpoints, the last readiness level, a pending restart |
@@ -68,7 +68,7 @@ The same operations are available in-process as `brain.local.engine.Engine(...).
 | --- | --- |
 | `projects.register {path}` | Registers an existing Git project. The project is not changed. |
 | `projects.create {goal, name, root, stack, git_name, git_email}` | Creates a new project: a folder, a Git baseline and a scaffold, with every `codingbrain new` safety check. It does not start building; call `tasks.start` with `new_project: true` for that. |
-| `tasks.start {project_id, goal, new_project}` | Plans the goal. Returns the proposal, the files and the diff, and the **digest**. Nothing is applied. |
+| `tasks.start {project_id, goal, new_project, attachments}` | Plans the goal. Returns the proposal, the files and the diff, and the **digest**. Nothing is applied. `attachments` (optional, when `engine.info.features` lists `tasks.start.attachments`) is a list of file paths — images, screenshots, PDF, Word, Excel, CSV or text — checked, parsed in isolation and retained exactly like `run --attach`, with local models only. They are evidence for planning, never instructions. |
 | `tasks.approve {project_id, task_id, digest, decision}` | `approve` reviews the proposal, applies it in the isolated worktree and tests it in the sandbox, repairing or escalating within the budgets. Only the current digest is accepted, so an approval cannot be replayed once the task moves on. `decline` cancels. |
 | `tasks.accept {project_id, task_id}` | Accepts a tested result as a **new branch**. The checked-out branch is unchanged. |
 | `tasks.tool_decision {project_id, task_id, request_id, decision}` | Approves or declines the protected tool request the task is waiting on (`pending_tool_approval`); any other request id is refused. The task then continues or stops. |

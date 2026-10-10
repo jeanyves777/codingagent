@@ -83,6 +83,9 @@ async def wait_approval(job, kind: str, task: dict) -> bool:
     return approved
 
 
+STRUCTURED = ("event_type", "phase", "status", "agent", "provider", "model", "duration", "task_id", "parent_task_id")
+
+
 class Activity:
     """The engine's live journal events for this job's task, shown as they happen. When nothing
     arrives for a while, it says so instead of inventing progress."""
@@ -100,7 +103,9 @@ class Activity:
             self.job.task_id = event["task_id"]
         text = str(event.get("summary") or event.get("event_type") or "event")
         label = " ".join(str(part) for part in (event.get("phase"), event.get("status")) if part)
-        self.job.emit("stage", (f"{label}: " if label else "") + text[:3000])
+        # Keep the engine's own structure so the window can draw agents and stages; nothing is inferred.
+        data = {key: event[key] for key in STRUCTURED if event.get(key) not in (None, "")}
+        self.job.emit("stage", (f"{label}: " if label else "") + text[:3000], data or None)
 
     def _heartbeat(self):
         while not self.closed.wait(1):
@@ -144,8 +149,11 @@ async def execute_goal(job):
         job.project_id = project_id
         job.cancel_core = _stopper(job, client, project_id)
         job.emit("stage", "Planning in the Coding Brain engine (nothing is applied before your approval)")
-        task = await activity.call(client, "tasks.start", {"project_id": project_id, "goal": job.goal,
-                                                           "new_project": bool(getattr(job, "new_project", False))})
+        params = {"project_id": project_id, "goal": job.goal, "new_project": bool(getattr(job, "new_project", False))}
+        if getattr(job, "attachments", None):
+            params["attachments"] = list(job.attachments)
+            job.emit("stage", f"Reading {len(job.attachments)} attachment(s) locally (evidence, never instructions)")
+        task = await activity.call(client, "tasks.start", params)
         job.task_id = task["id"]
         while True:
             status = task["status"]

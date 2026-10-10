@@ -26,6 +26,8 @@ on:
       - 'tests/smoke_chat_gate_browser.py'
       - 'tests/smoke_confirm_browser.py'
       - 'tests/smoke_provider_browser.py'
+      - 'tests/smoke_live_flow_browser.py'
+      - 'tests/test_desktop_live.py'
       - 'docs/backend-integration-handoff.md'
       - 'Start-CodingBrainDesktop.ps1'
       - 'installer/windows/CodingBrainDesktop.iss'
@@ -60,7 +62,7 @@ jobs:
       - name: Native service, task approvals and browser API tests
         shell: pwsh
         run: |
-          python -m pytest -q tests/test_desktop_ui.py tests/test_desktop_native.py tests/test_desktop_management.py tests/test_desktop_engine.py tests/test_desktop_engine_status.py tests/test_desktop_cli_discovery.py tests/test_cli_discovery.py tests/test_unified_windows_update.py tests/test_desktop_git_live.py
+          python -m pytest -q tests/test_desktop_ui.py tests/test_desktop_native.py tests/test_desktop_management.py tests/test_desktop_engine.py tests/test_desktop_engine_status.py tests/test_desktop_cli_discovery.py tests/test_cli_discovery.py tests/test_unified_windows_update.py tests/test_desktop_git_live.py tests/test_desktop_live.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --check desktop_ui/static/app.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -185,6 +187,10 @@ jobs:
         env:
           CB_DESKTOP_PROVIDER_SCREENSHOT: ${{ runner.temp }}/CodingBrain-Desktop-Providers-Connected.png
         run: python tests/smoke_provider_browser.py
+      - name: Verify agent flow ownership, progress, code display, attachments and reconnect
+        env:
+          CB_DESKTOP_FLOW_SCREENSHOT: ${{ runner.temp }}/CodingBrain-Desktop-Flow.png
+        run: python tests/smoke_live_flow_browser.py
       - uses: actions/upload-artifact@v4
         with:
           name: CodingBrainDesktop-UI-Screenshots

@@ -19,7 +19,7 @@ import time
 import uuid
 import webbrowser
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
@@ -30,6 +30,12 @@ IGNORED = {".git", ".venv", "venv", "node_modules", "__pycache__", ".next", "dis
 SENSITIVE = {".env", ".env.local", ".env.production", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", "credentials.json", "secrets.json"}
 MAX_PREVIEW_BYTES = 128_000
 MAX_ENTRIES = 350
+# Attachments mirror the engine's own limits (brain.attachments.LIMITS); the engine re-checks every file.
+MAX_ATTACHMENTS = 10
+MAX_ATTACHMENT_BYTES = 25_000_000
+ATTACHMENT_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".docx", ".xlsx", ".csv", ".tsv", ".txt",
+                    ".md", ".json", ".yaml", ".yml", ".xml", ".log", ".html", ".css", ".js", ".ts", ".tsx",
+                    ".jsx", ".py", ".toml", ".ini", ".svg"}
 
 
 def sensitive_name(name: str) -> bool:
@@ -45,6 +51,7 @@ class ProjectChoice(BaseModel):
 class StartRequest(BaseModel):
     message: str = Field(min_length=1, max_length=16000)
     mode: str = "chat"
+    attachments: list[str] = Field(default_factory=list, max_length=MAX_ATTACHMENTS)
 
 
 class ConfirmAction(BaseModel):
@@ -89,11 +96,15 @@ class Job:
         self.core = False
         self.new_project = False
         self.on_project_created = None
+        self.attachments: list[str] = []
 
-    def emit(self, kind: str, message: str):
+    def emit(self, kind: str, message: str, data: dict | None = None):
         with self.lock:
             self.cursor += 1
-            self.events.append({"seq": self.cursor, "kind": kind, "message": message, "at": time.time(), "job_id": self.id})
+            event = {"seq": self.cursor, "kind": kind, "message": message, "at": time.time(), "job_id": self.id}
+            if data:
+                event["data"] = data  # the engine's structured fields: agent, model, phase, status, duration
+            self.events.append(event)
 
     def dump(self, after: int = 0) -> list[dict]:
         with self.lock:
@@ -195,7 +206,8 @@ class Workspace:
         operations = set(info.get("operations") or [])
         # The installed engine's own operation list decides chat and new-project support; the CLI
         # help probes in management.engine_capabilities are only the fallback for older engines.
-        core.update(operations=sorted(operations),
+        core.update(operations=sorted(operations), features=sorted(info.get("features") or []),
+                    attachments="tasks.start.attachments" in (info.get("features") or []),
                     version=info.get("engine_version") or core.get("version"), api_version=info.get("api_version"),
                     conversation=all(op in operations for op in REQUIRED_OPERATIONS["chat"]),
                     new_project=all(op in operations for op in REQUIRED_OPERATIONS["new"]),
@@ -514,8 +526,58 @@ class Workspace:
             raise ValueError("Preview supports UTF-8 text only") from None
         return {"path": relative, "content": content, "bytes": len(raw)}
 
+    def _staging(self) -> Path:
+        return self._brain_home() / "desktop" / "attachments"
+
+    @staticmethod
+    def attachment_view(path: Path) -> dict:
+        return {"path": str(path), "name": path.name, "bytes": path.stat().st_size}
+
+    def check_attachment(self, raw: str) -> Path:
+        """A file the user chose: a regular file (no link), a supported type, within the size limit,
+        and never a secret. The engine applies its full checks again before parsing."""
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            raise ValueError("Attachments must be absolute file paths")
+        if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+            raise ValueError(f"{path.name}: links are not accepted as attachments")
+        try:
+            path = path.resolve(strict=True)
+        except OSError:
+            raise ValueError(f"{path.name}: file not found") from None
+        if not path.is_file():
+            raise ValueError(f"{path.name}: not a file")
+        if sensitive_name(path.name):
+            raise ValueError(f"{path.name}: secret and key files are never attached")
+        if path.suffix.lower() not in ATTACHMENT_TYPES:
+            raise ValueError(f"{path.name}: unsupported type (images, PDF, Word, Excel, CSV, text and source files)")
+        if path.stat().st_size > MAX_ATTACHMENT_BYTES:
+            raise ValueError(f"{path.name}: larger than 25 MB")
+        return path
+
+    def stage_upload(self, name: str, data: bytes) -> dict:
+        """A pasted screenshot or dropped file, saved privately so the engine can read it by path."""
+        clean = "".join(ch for ch in Path(name or "").name if ch.isalnum() or ch in "._- ").strip(" .") or "pasted.png"
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            raise ValueError(f"{clean}: larger than 25 MB")
+        if not data:
+            raise ValueError(f"{clean}: empty file")
+        folder = self._staging() / uuid.uuid4().hex
+        folder.mkdir(parents=True)
+        target = folder / clean[:120]
+        target.write_bytes(data)
+        try:
+            return self.attachment_view(self.check_attachment(str(target)))
+        except ValueError:
+            shutil.rmtree(folder, ignore_errors=True)
+            raise
+
     def start(self, body: StartRequest) -> Job:
         mode = body.mode
+        attachments = [str(self.check_attachment(item)) for item in body.attachments]
+        if attachments and mode == "chat":
+            raise ValueError("Chat only reads your message; attachments are used by Run task and New project. "
+                             "Switch mode to send these files. Nothing was started.")
         if mode not in {"chat", "run", "new"}:
             raise ValueError("Unknown mode")
         if mode == "run" and (not self.project or not self.git_branch(self.project)):
@@ -555,6 +617,7 @@ class Workspace:
             if self.active and self.jobs[self.active].status in {"starting", "running", "approval_required"}:
                 raise ValueError("Another task is active; finish or stop it first")
             job = Job(mode, str(self.project) if self.project else None, command)
+            job.attachments = attachments
             self.jobs[job.id] = job
             self.active = job.id
         # Chat, new projects and tasks go through the installed engine's typed API (one transport,
@@ -571,6 +634,13 @@ class Workspace:
                 raise ValueError(f"The installed engine (v{status['engine'].get('version') or '?'}) does not support "
                                  f"{'creating projects' if mode == 'new' else 'this action'} ({', '.join(missing)} missing). "
                                  "Update Coding Brain; nothing was started.")
+            if attachments and not status["engine"].get("attachments"):
+                del self.jobs[job.id]
+                if self.active == job.id:
+                    self.active = None
+                raise ValueError(f"The installed engine (v{status['engine'].get('version') or '?'}) cannot receive "
+                                 "attachments from the desktop. Update Coding Brain, or send without files. "
+                                 "Nothing was started.")
             if status["engine"].get("typed_api"):
                 from .core import run as core_run, chat as core_chat, create_new
                 job.core = True
@@ -579,7 +649,7 @@ class Workspace:
                 target = core_run if mode == "run" else create_new if mode == "new" else core_chat
                 threading.Thread(target=target, args=(job,), daemon=True).start()
                 return job
-            if mode in {"new", "run"} or not status["engine"].get("conversation"):
+            if mode in {"new", "run"} or attachments or not status["engine"].get("conversation"):
                 del self.jobs[job.id]
                 if self.active == job.id:
                     self.active = None
@@ -767,6 +837,40 @@ def create_app(state: Workspace | None = None) -> FastAPI:
             return state.choose(choice) if choice else {"cancelled": True}
         except Exception as e:
             raise HTTPException(503, "Native folder picker unavailable; enter a path instead") from e
+
+    @app.post("/api/attachments/pick", dependencies=[Depends(auth)])
+    def pick_attachments():
+        try:
+            from tkinter import Tk, filedialog
+            root = Tk(); root.withdraw(); root.attributes("-topmost", True)
+            try:
+                chosen = filedialog.askopenfilenames(title="Attach files for Coding Brain")
+            finally:
+                root.destroy()
+        except Exception as e:
+            raise HTTPException(503, "Native file picker unavailable; paste or drop files instead") from e
+        files, refused = [], []
+        for item in list(chosen or [])[:MAX_ATTACHMENTS]:
+            try:
+                files.append(state.attachment_view(state.check_attachment(item)))
+            except ValueError as error:
+                refused.append(str(error))
+        return {"files": files, "refused": refused}
+
+    @app.post("/api/attachments/upload", dependencies=[Depends(auth)])
+    async def upload_attachment(request: Request, x_filename: str = Header(default="pasted.png")):
+        if int(request.headers.get("content-length") or 0) > MAX_ATTACHMENT_BYTES:
+            raise HTTPException(413, "Attachment larger than 25 MB")
+        data = bytearray()
+        async for chunk in request.stream():
+            data += chunk
+            if len(data) > MAX_ATTACHMENT_BYTES:
+                raise HTTPException(413, "Attachment larger than 25 MB")
+        try:
+            from urllib.parse import unquote
+            return state.stage_upload(unquote(x_filename), bytes(data))
+        except (ValueError, OSError) as error:
+            raise HTTPException(400, str(error)) from error
 
     @app.get("/api/git/snapshot", dependencies=[Depends(auth)])
     def git_snapshot():

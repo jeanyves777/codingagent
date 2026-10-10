@@ -67,14 +67,18 @@
           </div>
           <section class="composer-wrap" aria-label="Message input">
             <div class="status-strip" id="run-status" hidden>
-              <span class="pulse"></span><span id="status-label">Working</span><span class="status-time" id="status-time"></span>
+              <span class="pulse"></span><span id="status-label">Working</span>
+              <span class="run-progress" id="run-progress" hidden title="Estimated from the stages the engine has completed"><span class="progress-track"><span class="progress-fill" id="run-progress-fill"></span></span><span id="run-progress-label">0%</span></span>
+              <span class="status-time" id="status-time"></span>
               <button type="button" class="stop-btn" id="stop-task">Stop</button>
             </div>
             <div class="composer">
+              <div class="attachment-list" id="attachment-list" aria-label="Attached files" hidden></div>
               <label for="prompt" class="sr-only">Message to Coding Brain</label>
               <textarea id="prompt" placeholder="Ask Coding Brain anything..." rows="2"></textarea>
               <div class="composer-bottom">
                 <div class="composer-options">
+                  <button class="attach-chip" id="attach-files" type="button" title="Attach images, screenshots, PDF, Word, Excel, CSV or text files (or paste / drop them)" aria-label="Attach files">⊕ Attach</button>
                   <button class="project-chip" id="project-picker"><span class="folder-glyph">▱</span><span id="project-label">Choose project</span><span class="chevron">⌄</span></button>
                   <button class="model-chip" id="model-label" title="Inspect the installed local model and supervisors" aria-label="Inspect configured models">◈ &nbsp; Checking models… <span class="chevron">⌄</span></button>
                   <span class="mode-toggle" role="group" aria-label="Message mode">
@@ -84,7 +88,7 @@
                 <button id="send" class="send" aria-label="Send message" title="Send message">➤</button>
               </div>
             </div>
-            <p class="hint">Enter to send · Shift+Enter for a new line <span class="hint-separator">·</span> Protected actions require your approval</p>
+            <p class="hint">Enter to send · Shift+Enter for a new line <span class="hint-separator">·</span> Paste or drop files to attach <span class="hint-separator">·</span> Protected actions require your approval</p>
             <div class="readiness-chips" id="readiness-chips" role="status" aria-label="Installed model and supervisor readiness">
               <span id="readiness-local">◈ Local model: checking…</span>
               <span id="readiness-claude">Claude: checking…</span>
@@ -97,6 +101,7 @@
           <div class="explorer-tabs" role="tablist" aria-label="Explorer tabs">
             <button role="tab" class="active" id="tab-files" aria-selected="true">Files</button>
             <button role="tab" id="tab-activity" aria-selected="false">Activity</button>
+            <button role="tab" id="tab-flow" aria-selected="false">Agents</button>
              <button role="tab" id="tab-git" aria-selected="false">Git</button>
           </div>
           <div class="file-panel" id="file-panel">
@@ -105,6 +110,17 @@
             <div class="preview" id="preview" hidden><div class="preview-bar"><span id="preview-name"></span><button id="preview-close" aria-label="Close preview">✕</button></div><pre id="preview-content"></pre></div>
           </div>
           <div class="activity-panel" id="activity-panel" hidden><div class="activity-title">Live activity</div><div id="activity-list" class="activity-list"><p class="muted">Activity appears here when Coding Brain starts working.</p></div></div>
+          <section class="flow-panel" id="flow-panel" aria-label="Agent flow and progress" hidden>
+            <div class="flow-head">
+              <div><div class="flow-title" id="flow-title">No task running</div><div class="flow-sub" id="flow-sub">Run a task to see each agent and stage live.</div></div>
+              <div class="flow-percent" id="flow-percent">–</div>
+            </div>
+            <div class="progress-track wide"><span class="progress-fill" id="flow-progress-fill"></span></div>
+            <h4 class="flow-heading">Agents</h4>
+            <div class="agent-lanes" id="agent-lanes" role="list"></div>
+            <h4 class="flow-heading">Stages</h4>
+            <ol class="stage-list" id="stage-list"></ol>
+          </section>
           <section class="git-panel" id="git-panel" aria-label="Git branches and commit history" hidden>
              <div class="git-head">
                <div><h3>Source control</h3><p id="git-updated" class="git-muted">Select a project to inspect Git.</p></div>

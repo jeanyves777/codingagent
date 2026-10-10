@@ -132,3 +132,32 @@ def test_bridge_output_after_the_handshake_is_drained(tmp_path, monkeypatch):
         assert bridge.stderr_tail[-1].strip() == "done"
     finally:
         bridge.stop()
+
+
+def test_uploaded_attachment_is_staged_privately_and_checked(tmp_path):
+    workspace = Workspace(home=tmp_path, executable="not-a-real-binary")
+    client = TestClient(create_app(workspace))
+    headers = {"X-CodingBrain-Token": workspace.secret, "X-Filename": "..%2F..%2Fscreen%20shot.png"}
+    assert client.post("/api/attachments/upload", content=b"png", headers={"X-Filename": "a.png"}).status_code == 403
+    staged = client.post("/api/attachments/upload", content=b"\x89PNG data", headers=headers).json()
+    path = Path(staged["path"])
+    assert path.name == "screen shot.png" and path.read_bytes() == b"\x89PNG data"
+    assert workspace._staging() in path.parents  # never outside the private staging folder
+    refused = client.post("/api/attachments/upload", content=b"KEY", headers={**headers, "X-Filename": "server.key"})
+    assert refused.status_code == 400 and "secret" in refused.json()["detail"]
+    assert client.post("/api/attachments/upload", content=b"x", headers={**headers, "X-Filename": "tool.exe"}).status_code == 400
+
+
+def test_attachments_are_refused_for_chat_links_and_missing_files(tmp_path):
+    from desktop_ui.server import StartRequest
+    workspace = Workspace(home=tmp_path, executable="not-a-real-binary")
+    spec = tmp_path / "spec.md"
+    spec.write_text("# spec")
+    import pytest
+    with pytest.raises(ValueError, match="Run task and New project"):
+        workspace.start(StartRequest(message="hi", mode="chat", attachments=[str(spec)]))
+    with pytest.raises(ValueError, match="file not found"):
+        workspace.check_attachment(str(tmp_path / "missing.png"))
+    with pytest.raises(ValueError, match="absolute"):
+        workspace.check_attachment("spec.md")
+    assert workspace.check_attachment(str(spec)) == spec.resolve()
