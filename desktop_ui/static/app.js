@@ -774,6 +774,7 @@
     });
   }
   $('git-refresh').addEventListener('click', () => refreshGit(true));
+  $('branch-name').addEventListener('click', () => $('tab-git').click());
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && currentProject) refreshGit(true);
   });
@@ -822,6 +823,7 @@
   $('full-setup').addEventListener('click', () => systemAction('install_full'));
   $('update-channel').addEventListener('change', () => {
     const preview = $('update-channel').value === 'preview';
+    $('apply-update').textContent = preview ? 'Install verified preview' : 'Install latest stable';
     $('update-channel-description').textContent = preview ?
       'Preview: UNRELEASED Windows CI artifacts from the current preview branch, only after successful checks. Requires GitHub CLI sign-in.' :
       'Stable: owner-approved, tagged GitHub releases only. Draft PRs are never installed.';
