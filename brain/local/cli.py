@@ -878,26 +878,16 @@ def cmd_attachments(args, layout):
 
 
 def cmd_shell(args, layout):
-    context = Context(layout, Path.cwd())
-    print(f"Coding Brain {version()}\n" + describe(context.project))
-    context.check()
-    onboard(context, interactive=sys.stdin.isatty())
-    pending = [task for task in context.tasks() if task["status"] in RESUMABLE and task.get("kind") == "task"]
-    if pending:
-        print(f"\n{len(pending)} unfinished task(s); `codingbrain resume` continues the latest:")
-        for task in pending[:5]:
-            print("  " + task_line(task))
-    print("\nDescribe an engineering goal (prefix with 'orchestrate:' for multi-agent work). Empty line exits.")
-    while True:
-        try:
-            goal = input("\ngoal> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return
-        if not goal:
-            return
-        orchestrated = goal.lower().startswith("orchestrate:")
-        run_goal(context, goal.split(":", 1)[1].strip() if orchestrated else goal, orchestrated)
+    """`codingbrain` with no command: the conversational assistant, from any folder. Messages are
+    answered in conversation; coding work starts only when asked for and confirmed
+    (brain.local.assistant)."""
+    from .assistant import Assistant
+    message = " ".join(getattr(args, "message", None) or [])
+    assistant = Assistant(layout, Path.cwd(), verbose=getattr(args, "verbose", False))
+    if message:
+        assistant.handle(message)
+        return 0
+    return assistant.repl()
 
 
 def doctor_report(layout: Layout, offline: bool, full: bool = False) -> dict:
@@ -1474,6 +1464,10 @@ def main(argv=None) -> int:
     new_output = new_parser.add_mutually_exclusive_group()
     for flag in ("--verbose", "--quiet", "--plain", "--json"):
         new_output.add_argument(flag, action="store_true")
+    chat_parser = commands.add_parser("chat", help="talk to Coding Brain (the default when no command is given); "
+                                      "with a message: answer it and exit")
+    chat_parser.add_argument("message", nargs="*")
+    chat_parser.add_argument("--verbose", action="store_true", help="show how each message was understood")
     selftest_parser = commands.add_parser("selftest", help="a throwaway end-to-end task: model, sandbox and tests")
     selftest_parser.add_argument("--json", action="store_true")
     setup = commands.add_parser("setup", help="configure models, premium supervisors, budgets and approvals")
@@ -1572,7 +1566,7 @@ def main(argv=None) -> int:
     handlers = {"init": cmd_init, "status": cmd_status, "tasks": cmd_tasks, "resume": cmd_resume,
                 "accept": cmd_accept, "run": cmd_run, "doctor": cmd_doctor, "setup": cmd_setup,
                 "update": cmd_update, "rollback": cmd_rollback, "migrate": cmd_migrate,
-                "post-install": cmd_post_install, "memory": cmd_memory, None: cmd_shell,
+                "post-install": cmd_post_install, "memory": cmd_memory, None: cmd_shell, "chat": cmd_shell,
                 "attachments": cmd_attachments, "inspect-ui": cmd_inspect_ui, "activity": cmd_activity,
                 "watch": cmd_watch, "trace": cmd_trace, "snapshots": cmd_snapshots, "snapshot": cmd_snapshot,
                 "install": cmd_install, "selftest": cmd_selftest, "new": cmd_new,

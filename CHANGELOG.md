@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased: conversational by default
+
+See docs/assistant.md.
+
+- **`codingbrain` from any folder starts a conversation.** It no longer queues every message as a
+  coding task. In 0.9.0, typing `hello` started engineering work and went silent until Ctrl+C;
+  now a greeting gets a greeting and a question gets an answer.
+- **Intent routing.** Fixed rules handle the unmistakable cases: greetings, thanks, help,
+  goodbye, slash commands and the project list. Everything else goes to the local model, which
+  picks one of: chat, question, projects, status, investigate, plan, review, create_project or
+  implement. The model only proposes; work needs an action verb and your confirmation. Without a
+  model, uncertain messages are treated as conversation.
+- **Global projects.** The assistant reads the project registry ("what projects am I working
+  on?"). It resolves the project for a request from its name, the conversation, the current
+  repository or matching file names, and asks when unclear. It never scans the home folder.
+- **Safe task lifecycle.** Conversation never creates tasks, worktrees or files, and never spends
+  premium budget. Ctrl+C while the model is thinking starts nothing. Tasks and conversations are
+  listed separately.
+- **Memory.** The global conversation log is redacted and tagged per project, and a conversation
+  about one project never receives another project's turns.
+- `codingbrain chat ["message"]`, and `/projects /tasks /history /run /new` inside the
+  conversation. `codingbrain run "goal"` is unchanged.
+
 ## Unreleased: goal-first project creation
 
 See docs/new-project.md.
