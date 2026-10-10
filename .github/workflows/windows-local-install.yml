@@ -11,6 +11,14 @@ on:
       - "tests/test_memory.py"
       - "tests/test_multimodal.py"
       - "tests/multimodal_fixtures.py"
+      - "tests/test_activity.py"
+      - "tests/test_installer.py"
+      - "tests/installer_fakes.py"
+      - "tests/test_new.py"
+      - "tests/test_assistant.py"
+      - "tests/test_engine.py"
+      - "tests/test_cli_discovery.py"
+      - "scripts/engine_client_check.py"
       - ".github/workflows/windows-local-install.yml"
       - ".github/workflows/release.yml"
       - "scripts/release_gate.py"
@@ -46,14 +54,23 @@ jobs:
       - name: Install Tesseract OCR (real OCR tests on Windows)
         shell: pwsh
         run: |
-          choco install tesseract --no-progress -y
+          # The Chocolatey community feed intermittently answers 504; retry with backoff.
+          foreach ($attempt in 1..4) {
+            choco install tesseract --no-progress -y
+            if (Test-Path 'C:\Program Files\Tesseract-OCR\tesseract.exe') { break }
+            if ($attempt -eq 4) { throw 'Tesseract could not be installed from Chocolatey after 4 attempts' }
+            Start-Sleep -Seconds ([math]::Pow(2, $attempt) * 5)
+          }
           & 'C:\Program Files\Tesseract-OCR\tesseract.exe' --version
       - name: Unit tests for the local installation and multimodal features
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check -e ".[dev]"
-          python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_memory.py tests/test_multimodal.py tests/test_release_gate.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:CODINGBRAIN_TRANSCRIPTS = "$PWD\transcripts\${{ matrix.os }}-${{ matrix.python }}-${{ matrix.shell }}"
+          python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_memory.py tests/test_multimodal.py tests/test_activity.py tests/test_installer.py tests/test_new.py tests/test_assistant.py tests/test_engine.py tests/test_cli_discovery.py tests/test_release_gate.py
+          $tests = $LASTEXITCODE
+          Get-ChildItem transcripts -Recurse -Filter run-*.txt | ForEach-Object { python scripts/render_transcript.py $_.FullName ($_.FullName -replace '\.txt$', '.png') "Windows, Python ${{ matrix.python }}, ${{ matrix.shell }}" }
+          if ($tests -ne 0) { exit $tests }
           # The junction regression must run, not skip, on every Windows Python (3.11 has no Path.is_junction).
           $junction = python -m pytest -q -p no:cacheprovider -rs tests/test_memory.py -k windows_junction 2>&1 | Out-String
           Write-Host $junction
@@ -61,6 +78,51 @@ jobs:
           $attach = python -m pytest -q -p no:cacheprovider -rs tests/test_multimodal.py -k windows_junction_in_the_path 2>&1 | Out-String
           Write-Host $attach
           if ($LASTEXITCODE -ne 0 -or $attach -notmatch '2 passed' -or $attach -match 'skipped') { throw 'the Windows attachment junction regression did not run and pass' }
+      - name: Conversational assistant through a real Windows console pipe, from the home folder
+        run: |
+          # `codingbrain` started in C:\Users\<runner>, outside any repository, with no model on this
+          # runner: greetings, the project registry, creation and fixes must route correctly, and no
+          # conversation may create a task store.
+          $env:CODINGBRAIN_HOME = Join-Path $env:RUNNER_TEMP 'cb-chat'
+          $lines = @('hello', 'What projects am I working on?', 'Create a task management application', 'n',
+                     'Fix the calculator bug', '/tasks', '/exit')
+          Push-Location $HOME
+          try { $output = ($lines -join "`n") | python -m brain.local 2>&1 | Out-String } finally { Pop-Location }
+          Write-Host $output
+          if ($LASTEXITCODE -ne 0) { throw "codingbrain exited $LASTEXITCODE" }
+          foreach ($expected in @("Hello! I'm Coding Brain", 'No projects yet', 'sounds like a new application',
+                                  'nothing was created', 'Which project do you mean', 'conversations are not tasks', 'Goodbye')) {
+            if ($output -notmatch [regex]::Escape($expected)) { throw "missing: $expected" }
+          }
+          if (Get-ChildItem $env:CODINGBRAIN_HOME -Recurse -Filter brain.sqlite3 -ErrorAction SilentlyContinue) {
+            throw 'a conversation created a task store'
+          }
+      - name: Engine API through a real stdio client, with this runner's installed Python
+        run: |
+          # The engine runs as a separate process, as the desktop app starts it: handshake, info,
+          # conversation, structured errors for invalid requests, registration, and a killed engine
+          # restarted from its persisted state. No model or sandbox on this runner (no task here).
+          $env:CODINGBRAIN_HOME = Join-Path $env:RUNNER_TEMP 'cb-api'
+          # A model name is configured (registration requires it); nothing listens at this URL.
+          python -m brain.local setup --non-interactive --model qwen2.5-coder:7b --url http://127.0.0.1:9
+          if ($LASTEXITCODE -ne 0) { throw "setup exited $LASTEXITCODE" }
+          python scripts/engine_client_check.py
+          if ($LASTEXITCODE -ne 0) { throw "engine client check exited $LASTEXITCODE" }
+      - name: Installer on a real Windows runner (preflight, plan, readiness, winget package ids)
+        shell: pwsh
+        run: |
+          # Real probes on this VM. GitHub's Windows runners have no nested virtualization, WSL 2 or
+          # Linux containers, so WSL/Docker readiness here shows the not-ready path, never a success.
+          if (Get-Command winget -ErrorAction SilentlyContinue) { $env:CODINGBRAIN_TEST_WINGET = '1' } else { Write-Host 'winget is not on this runner image: the package-id check is skipped' }
+          python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py -k real
+          $env:CODINGBRAIN_HOME = Join-Path $env:RUNNER_TEMP 'cb-plan'
+          python -m brain.local install --plan --full --plain 2>&1 | Tee-Object -FilePath install-plan.txt
+          if ($LASTEXITCODE -ne 0) { throw "install --plan exited $LASTEXITCODE" }
+          python -m brain.local doctor --json > doctor-readiness.json
+          $report = Get-Content -Raw doctor-readiness.json | ConvertFrom-Json
+          Write-Host ("readiness: {0} (reached {1})" -f $report.readiness.level, $report.readiness.reached)
+          if (-not $report.readiness.level) { throw 'doctor --json has no readiness level' }
+          if ((Get-Content -Raw install-plan.txt) -match 'definitely') { throw 'virtualization must never be reported as definitely disabled' }
       - name: Build an older and a newer release
         shell: pwsh
         run: |
@@ -69,6 +131,14 @@ jobs:
           python scripts/build_release.py --out dist/new --version "$version.post1" --constraints dist/old/constraints.txt
       - name: Install, recognize, update, refuse bad updates, roll back, uninstall
         run: ./installer/windows/verify.ps1 -Old dist/old -New dist/new
+      - name: install.ps1 hands over to provisioning before the CLI is on PATH
+        run: |
+          $boot = Join-Path $env:RUNNER_TEMP 'cb-boot'
+          $output = & ./installer/windows/install.ps1 -From dist/new -InstallDir $boot -Python (Get-Command python).Source -Yes -NoPath -Full -PlanOnly *>&1 | Out-String
+          Write-Host $output
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 -Full -PlanOnly exited $LASTEXITCODE" }
+          if ($output -notmatch 'Plan:' -or $output -notmatch 'Docker Desktop' -or $output -notmatch 'Readiness:') { throw 'the provisioning plan was not shown' }
+          if (Get-Command codingbrain -ErrorAction SilentlyContinue) { Write-Host '(a codingbrain from an earlier step is on PATH; the plan above ran from the new venv)' }
       - name: Download the published v0.9.0 release
         shell: pwsh
         env:
@@ -83,6 +153,9 @@ jobs:
           path: |
             verify-report.json
             upgrade-report.json
+            install-plan.txt
+            doctor-readiness.json
+            transcripts/
 
   engines:
     # Real engines, no mocks: the whole test suite (gauntlet included) with Tesseract OCR, a
@@ -158,9 +231,114 @@ jobs:
           python -m pip install --disable-pip-version-check -e ".[dev]"
           python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_brain.py
 
+  installer-e2e:
+    # Real, unmocked: `codingbrain install --profile local` on a Linux runner with a real Ollama and
+    # model (the generation test proves it runs), `doctor --full` with real sandbox images, and the
+    # disposable end-to-end task (real model fixes a real bug, tests run in the real sandbox).
+    name: real installer readiness and end-to-end task (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CODINGBRAIN_TEST_CODING_MODEL: qwen2.5-coder:7b
+      CODINGBRAIN_TEST_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Sandbox images, Ollama and the coding model
+        run: |
+          for base in $(grep -h '^FROM' brain/local/assets/Dockerfile.sandbox brain/local/assets/Dockerfile.sandbox.node | awk '{print $2}' | sort -u); do
+            for attempt in 1 2 3 4; do
+              if docker pull "mirror.gcr.io/library/$base" && docker tag "mirror.gcr.io/library/$base" "$base"; then break; fi
+              if docker pull "$base"; then break; fi
+              [ "$attempt" = 4 ] && exit 1
+              sleep $((2 ** attempt))
+            done
+          done
+          python -m pip install --disable-pip-version-check -e ".[dev]"
+          curl -fsSL https://ollama.com/install.sh | sh
+          (ollama serve > ollama.log 2>&1 &)
+          sleep 5
+      - name: codingbrain install --profile local (real; downloads the model through Ollama)
+        shell: bash
+        run: |
+          export CODINGBRAIN_HOME="$RUNNER_TEMP/cb-real"
+          python -m brain.local setup --non-interactive --model "$CODINGBRAIN_TEST_CODING_MODEL"
+          python -m brain.local install --profile local --yes --plain 2>&1 | tee install-local.txt
+          grep -q "Readiness: Core ready" install-local.txt
+      - name: doctor --full (real generation, real sandbox start)
+        shell: bash
+        run: |
+          export CODINGBRAIN_HOME="$RUNNER_TEMP/cb-real"
+          python -m brain.local install --only sandbox --profile full --yes --plain 2>&1 | tee install-sandbox.txt
+          python -m brain.local doctor --full --json > doctor-full.json
+          python - <<'PY'
+          import json
+          report = json.load(open("doctor-full.json"))["readiness"]
+          print("level:", report["level"], "reached:", report["reached"])
+          assert report["levels"]["core"]["ready"] and report["levels"]["sandbox"]["ready"], report
+          assert report["components"]["model"]["verified"], report["components"]["model"]
+          assert report["components"]["sandbox"]["verified"], report["components"]["sandbox"]
+          PY
+      - name: Real model and end-to-end tests (merge gate - Coding Brain's own guarantees)
+        shell: bash
+        env:
+          CODINGBRAIN_CAPABILITY_REPORT: ${{ github.workspace }}/goal-first-capability.json
+        run: python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py tests/test_new.py -k real 2>&1 | tee installer-real.log
+      - name: Engine API with a real task (real stdio client, real model, real sandbox)
+        if: always()
+        shell: bash
+        run: |
+          # The contract (digest-bound single-use approval, task-scoped live events, accept) is a
+          # gate; whether the model's fix passes its tests is reported (exit 2) without failing it.
+          export CODINGBRAIN_HOME="$RUNNER_TEMP/cb-real"
+          set +e
+          python scripts/engine_client_check.py --task 2>&1 | tee engine-client.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" = 2 ]; then echo "::warning::Engine API contract held; the real model's change did not pass (see engine-client.log)"; exit 0; fi
+          exit "$code"
+      - name: Real-model goal-first capability (reported, not a merge gate; required before production-ready)
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          path = "goal-first-capability.json"
+          if not os.path.exists(path):
+              print("::warning::No capability report: the real goal-first build did not run to completion")
+              sys.exit(1)
+          report = json.load(open(path))
+          verdict = "SUCCEEDED" if report["passed"] else "FAILED"
+          lines = [f"### Real-model goal-first build: {verdict}", "",
+                   f"Model `{report['model']}`, status `{report['status']}`, {report['attempts']} test run(s), "
+                   f"{report['seconds']} s, supervisor used: {report['supervisor_used']}.", "",
+                   "Not a merge gate. Goal-first building is not production-ready until this succeeds reliably.", ""]
+          lines += [f"- {item['category']}" + (f" (diagnosis: {item['diagnosis']})" if item.get("diagnosis") else "")
+                    + f": {str(item.get('summary') or '')[:160]}" for item in report["failures"]]
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a").write("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          if not report["passed"]:
+              print(f"::warning::Real-model goal-first build {verdict.lower()} ({report['status']}); see the job summary")
+              sys.exit(1)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installer-real
+          path: |
+            install-local.txt
+            install-sandbox.txt
+            doctor-full.json
+            installer-real.log
+            goal-first-capability.json
+            engine-client.log
+            ollama.log
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [verify, engines, sandbox]
+    needs: [verify, engines, sandbox, installer-e2e]
     runs-on: windows-latest
     permissions:
       contents: write

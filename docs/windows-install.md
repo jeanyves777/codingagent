@@ -179,3 +179,7 @@ own data too. Your projects and the `codingbrain/...` branches are never removed
 - **Tests cannot run.** Start Docker Desktop and run `codingbrain setup --sandbox`.
 - **Execution policy errors.** Use the `powershell -ExecutionPolicy Bypass -File ...` form shown
   above. It applies to that one command only.
+
+## Preparing everything else
+
+`install.ps1 -Local` or `-Full` (or `codingbrain install [--full]` later) installs and verifies Ollama and a model, WSL 2, Docker Desktop, the sandbox, Claude Code, Codex and the extras, asking before each change. See [installation.md](installation.md).

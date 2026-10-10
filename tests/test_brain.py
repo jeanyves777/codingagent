@@ -171,6 +171,41 @@ def test_no_tests_fails_closed(brain, monkeypatch):
     asyncio.run(flow())
 
 
+def test_new_project_without_tests_gets_a_repair(brain, monkeypatch):
+    """Only tasks `codingbrain new` marks: there, missing tests are the model's to write."""
+    results = iter([{"passed": False, "exit_code": 5, "output": "collected 0 items"},
+                    {"passed": True, "exit_code": 0, "output": "1 passed"}])
+    monkeypatch.setattr("brain.service.run_tests", lambda *a, **k: next(results))
+
+    async def flow():
+        task = brain.submit("demo", "Fix x", launch=False)
+        task["tests_expected"] = True
+        task = await brain.create(task)
+        task = await brain.execute(task["id"], task["digest"])
+        await drain(brain)
+        task = brain.store.get(task["id"])
+        assert task["failure_log"][0]["category"] == "no_tests"
+        kinds = [event["kind"] for event in task["events"]]
+        after_tests = kinds[kinds.index("test_finished") + 1:]
+        assert "validation_failed" in after_tests or "implementer" in after_tests  # the model was asked to repair
+    asyncio.run(flow())
+
+
+def test_zero_tests_passing_runner_is_not_a_pass_for_new_projects(brain, monkeypatch):
+    monkeypatch.setattr("brain.service.run_tests",
+                        lambda *a, **k: {"passed": True, "exit_code": 0, "output": "ℹ tests 0\nℹ pass 0\n"})
+
+    async def flow():
+        task = brain.submit("demo", "Fix x", launch=False)
+        task["tests_expected"] = True
+        task = await brain.create(task)
+        task = await brain.execute(task["id"], task["digest"])
+        await drain(brain)
+        task = brain.store.get(task["id"])
+        assert task["status"] != "passed" and task["test_evidence"]["exit_code"] == 5
+    asyncio.run(flow())
+
+
 def test_worker_limit(brain):
     active = maximum = 0
     brain.slots = asyncio.Semaphore(2)

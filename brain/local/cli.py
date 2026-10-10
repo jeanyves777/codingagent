@@ -47,14 +47,31 @@ def version() -> str:
         return "unknown"
 
 
+LIVE = None  # the live activity view while a goal runs in this terminal
+
+
+def quiet_live():
+    """Stop live output while the terminal asks or prints a plan (resumed by resume_live)."""
+    if LIVE is not None:
+        LIVE.pause()
+
+
+def resume_live():
+    if LIVE is not None:
+        LIVE.resume()
+
+
 def ask(question: str, default: bool = False) -> bool:
     if not sys.stdin.isatty():
         return default
+    quiet_live()
     try:
         answer = input(f"{question} [{'Y/n' if default else 'y/N'}] ").strip().lower()
     except EOFError:  # Windows reports a NUL stdin as a terminal; end of input means the default
         print()
         return default
+    finally:
+        resume_live()
     return default if not answer else answer in {"y", "yes"}
 
 
@@ -202,9 +219,11 @@ async def handle(context: Context, task: dict, auto: bool) -> dict:
     """Carry a task forward, asking before each protected step."""
     brain = context.brain
     while True:
+        resume_live()  # live output runs while the task works; it pauses for prompts and summaries
         task = brain.store.get(task["id"])
         status = task["status"]
         if status == "proposed":
+            quiet_live()
             proposal = task["proposal"]
             print(f"\nPlan ({task.get('proposal_author', 'implementer')}): {proposal['plan'][:1500]}")
             print("Files: " + ", ".join(change["path"] for change in proposal["changes"]))
@@ -228,6 +247,7 @@ async def handle(context: Context, task: dict, auto: bool) -> dict:
         elif status == "queued" and task.get("pending_goal"):
             await brain.resume(task["id"])
         elif status == "passed":
+            quiet_live()
             evidence = task.get("test_evidence", {})
             completion = (task.get("completion") or {}).get("status", "unchecked")
             print(f"\nTests passed in the sandbox (exit {evidence.get('exit_code')}); "
@@ -241,11 +261,15 @@ async def handle(context: Context, task: dict, auto: bool) -> dict:
                 return task
             return await accept(context, task)
         elif status == "awaiting_implementer":
+            quiet_live()
             print("No free model is reachable. Start Ollama (or your model server), then `codingbrain resume`.")
             return task
         else:
+            quiet_live()  # print the outcome after every event that led to it
             if status in {"failed", "blocked", "integration_conflict"}:
-                last = (task.get("failure_log") or [{}])[-1]
+                evidence = task.get("test_evidence") or {}
+                last = (task.get("failure_log") or [{"category": "sandbox" if evidence.get("exit_code") in (None, 125, 126, 127)
+                                                     else "tests", "summary": (evidence.get("output") or "")[-300:]}])[-1]
                 context.memory.remember("repair", f"Attempt at '{task['goal'][:200]}' ended {status}: "
                                         f"{last.get('category', '')} {str(last.get('summary', ''))[:300]}",
                                         verified=False, ref=f"task:{task['id']}")
@@ -327,13 +351,18 @@ async def orchestrate(context: Context, goal: str, auto: bool, attachments=None)
 
 
 def run_goal(context: Context, goal: str, orchestrate_goal: bool = False, auto: bool | None = None,
-             attachments=None, visual=None, on_task=None):
+             attachments=None, visual=None, on_task=None, view: str | None = None):
     from .session import session
+    global LIVE
+    view = view or ("live" if sys.stdout.isatty() else "plain")
     auto = context.config["autonomy"]["execution"] == "auto" if auto is None else auto
     if context.project["tracked_changes"]:
         print("Note: Coding Brain starts from your last commit; uncommitted tracked changes are not included "
               "and must be committed or stashed first.")
-    with session(context.layout, context.project["id"], goal[:80]):
+    from .live import LiveView
+    with session(context.layout, context.project["id"], goal[:80]), \
+            LiveView(context.brain.telemetry, view) as live:
+        LIVE = live
         try:
             if orchestrate_goal:
                 return asyncio.run(orchestrate(context, goal, auto, attachments))
@@ -347,10 +376,228 @@ def run_goal(context: Context, goal: str, orchestrate_goal: bool = False, auto: 
                 return await handle(context, task, auto)
             return asyncio.run(single())
         except KeyboardInterrupt:
+            live.pause()
             print("\nPaused. Your work is saved; continue with `codingbrain resume`.")
+        finally:
+            LIVE = None
 
 
 # Commands -------------------------------------------------------------------------------------
+
+def view_mode(args) -> str | None:
+    for mode in ("json", "quiet", "verbose", "plain"):
+        if getattr(args, mode, False):
+            return mode
+    return None
+
+
+def telemetry_for(context):
+    """The project's journal, opened read-only in spirit: never starts the service."""
+    from ..telemetry import Telemetry
+    return context._brain.telemetry if context._brain is not None else Telemetry(context.data / "telemetry.sqlite3")
+
+
+def snapshots_for(context):
+    from ..snapshots import SnapshotStore
+    return context._brain.snapshots if context._brain is not None else SnapshotStore(context.data / "snapshots")
+
+
+def task_by_prefix(context, prefix: str | None, active_only=False) -> dict:
+    tasks = context.tasks()
+    if prefix:
+        found = [task for task in tasks if task["id"].startswith(prefix)]
+    else:
+        found = [task for task in tasks if not active_only or task["status"] in ACTIVE_STATES][:1]
+    if len(found) != 1:
+        raise SystemExit(f"No single task matches {prefix!r}" if prefix else "No matching task in this project.")
+    return found[0]
+
+
+ACTIVE_STATES = {"queued", "planning", "running", "testing", "cancellation_requested"}
+
+
+def cmd_activity(args, layout):
+    """What each agent is doing now in this project (read-only; safe while a task runs)."""
+    import time as clock_time
+    from .live import PHASES, clock, who
+    from .session import pid_alive
+    context = Context(layout, Path.cwd())
+    telemetry = telemetry_for(context)
+    tasks = context.tasks()
+    active = [task for task in tasks if task["status"] in ACTIVE_STATES | {"proposed", "passed", "awaiting_tool_approval"}]
+    report = []
+    for task in active[:10]:
+        events = telemetry.journal([task["id"]], limit=100000)
+        open_stage, request, beat = None, None, None
+        for event in events:
+            if event["event_type"] == "stage":
+                open_stage = event if event["status"] == "RUNNING" else (None if open_stage and event["phase"] == open_stage["phase"] else open_stage)
+            elif event["event_type"] == "model_request":
+                request, beat = event, event["at"]
+            elif event["event_type"] == "heartbeat" and request:
+                beat = event["at"]
+            elif event["event_type"] == "model_response":
+                request = None
+        owner = (task.get("owner") or {}).get("pid")
+        report.append({"task": task["id"], "goal": task.get("goal", "")[:120], "status": task["status"],
+                       "stage": open_stage and open_stage["phase"], "agent": open_stage and open_stage["agent"],
+                       "request": request and {"agent": request["agent"], "model": request["model"],
+                                               "elapsed": clock_time.time() - request["at"],
+                                               "heartbeat_age": clock_time.time() - beat},
+                       "process_alive": bool(owner and pid_alive(int(owner))),
+                       "latest": [{"at": event["at"], "type": event["event_type"], "status": event["status"],
+                                   "summary": event["summary"]} for event in events[-5:]]})
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+    if not report:
+        print("No active or pending tasks in this project.")
+        return 0
+    for item in report:
+        print(f"{item['task'][:8]}  {item['status']:<22} {item['goal']}")
+        if item["stage"]:
+            print(f"  now: {PHASES.get(item['stage'], item['stage'])} — {who({'agent': item['agent']})}")
+        if item["request"]:
+            request = item["request"]
+            stalled = request["heartbeat_age"] > 3 * accounting_heartbeat() + 5
+            print(f"  model request: {who(request)} for {clock(request['elapsed'])}, last heartbeat "
+                  f"{int(request['heartbeat_age'])} s ago" + (" — no heartbeat, may be stalled" if stalled else ""))
+        if item["status"] in ACTIVE_STATES and not item["process_alive"]:
+            print("  the process running this task has ended; `codingbrain resume` continues it")
+        for event in item["latest"]:
+            print(f"  {clock_time.strftime('%H:%M:%S', clock_time.localtime(event['at']))} {event['status'] or '':<16} "
+                  f"{' '.join(str(event['summary']).split())[:110]}")
+    return 0
+
+
+def accounting_heartbeat() -> float:
+    from .. import accounting
+    return accounting.HEARTBEAT_SECONDS
+
+
+def cmd_watch(args, layout):
+    """Follow a task's activity from any terminal until it finishes or needs you."""
+    import time as clock_time
+    from ..store import Store
+    from .live import LiveView
+    if args.install:
+        return watch_install(args, layout)
+    context = Context(layout, Path.cwd())
+    task = task_by_prefix(context, args.task, active_only=not args.task)
+    telemetry = telemetry_for(context)
+    store = Store(context.data / "brain.sqlite3")
+    ids = [task["id"], *[child["id"] for child in task.get("children", [])]]
+    with LiveView(telemetry, view_mode(args) or ("live" if sys.stdout.isatty() else "plain"), task_ids=ids,
+                  after=0 if args.history else None) as view:
+        view.started = (telemetry.journal(ids, limit=1) or [{"at": clock_time.time()}])[0]["at"]
+        try:
+            while store.get(task["id"])["status"] in ACTIVE_STATES:
+                clock_time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+    print(f"Task {task['id'][:8]} is {store.get(task['id'])['status']}.")
+    return 0
+
+
+def watch_install(args, layout):
+    """Follow the latest installation (or show its history once it has finished)."""
+    import time as clock_time
+    from ..telemetry import Telemetry
+    from .installer import InstallState
+    from .live import LiveView
+    state = InstallState(layout)
+    runs = state.data.get("runs") or []
+    if not runs:
+        raise SystemExit("No installation has run yet: `codingbrain install`.")
+    run = runs[-1]["id"]
+    lock = layout.locks / "install.json"
+    with LiveView(Telemetry(layout.data / "install.sqlite3"), view_mode(args) or ("live" if sys.stdout.isatty() else "plain"),
+                  task_ids=[run], after=0):
+        try:
+            while lock.exists() and run in lock.read_text(encoding="utf-8"):
+                clock_time.sleep(1)
+        except (KeyboardInterrupt, OSError):
+            pass
+    return 0
+
+
+def cmd_trace(args, layout):
+    from .live import render_trace, trace
+    context = Context(layout, Path.cwd())
+    task = task_by_prefix(context, args.task)
+    children = [child for child in context.tasks() if child.get("parent_id") == task["id"]]
+    report = trace(telemetry_for(context), task, children, snapshots_for(context).list(task["id"]))
+    print(json.dumps(report, indent=2, default=str) if args.json else render_trace(report))
+    return 0
+
+
+def cmd_snapshots(args, layout):
+    context = Context(layout, Path.cwd())
+    task = task_by_prefix(context, args.task)
+    items = snapshots_for(context).list(task["id"])
+    if args.json:
+        print(json.dumps(items, indent=2))
+    for item in [] if args.json else items:
+        print(f"{item['id']}  {time.strftime('%H:%M:%S', time.localtime(item['at']))}  {item['label']:<18} {item['status']}")
+    return 0
+
+
+def cmd_snapshot(args, layout):
+    context = Context(layout, Path.cwd())
+    store = snapshots_for(context)
+    try:
+        if args.action == "show":
+            snapshot = store.show(args.ids[0])
+            if args.json:
+                print(json.dumps(snapshot, indent=2, default=str))
+            else:
+                print(f"{snapshot['id']}  {snapshot['label']}  task {snapshot['task_id'][:8]}  {snapshot['status']}")
+                print(f"Goal: {snapshot['goal'][:200]}\nBaseline: {snapshot.get('base_commit')}")
+                print("Changed files: " + (", ".join(f"{item['path']} ({item['change']})" for item in snapshot["manifest"]) or "none"))
+                print(f"Tests: {snapshot['test_evidence']}  Visual: {snapshot['visual']}")
+                if snapshot["plan"]:
+                    print(f"Plan (model-provided): {' '.join(snapshot['plan'].split())[:600]}")
+                for artifact in snapshot["artifacts"]:
+                    print(f"Artifact: {artifact.get('kind')} {artifact.get('viewport', '')} {artifact['name']} {artifact['sha256'][:12]}")
+                print(f"Resume: {snapshot['resume']['command']}")
+                if args.diff and snapshot.get("diff"):
+                    print(store.get(snapshot["diff"]).decode("utf-8", errors="replace")[:40000])
+        elif args.action == "diff":
+            if len(args.ids) != 2:
+                raise SystemExit("codingbrain snapshot diff <A> <B>")
+            result = store.diff(*args.ids)
+            if args.json:
+                print(json.dumps(result, indent=2, default=str))
+            else:
+                print(f"{result['a']} -> {result['b']}")
+                for key, value in result["state"].items():
+                    print(f"  {key}: {str(value['a'])[:120]} -> {str(value['b'])[:120]}")
+                for item in result["files"]:
+                    print(f"  {item['path']}: {item['in_a']} -> {item['in_b']}")
+                    if item.get("diff"):
+                        print(item["diff"][:8000])
+        elif args.action == "restore":
+            snapshot = store.show(args.ids[0])
+            branch = args.branch or f"codingbrain/restore-{snapshot['id'][:9]}"
+            print(f"This creates branch {branch} with snapshot {snapshot['id']} ({snapshot['label']}) on top of "
+                  f"{(snapshot.get('base_commit') or '?')[:10]}. Your working files and current branch are not changed.")
+            if not (args.yes or ask("Create it?")):
+                print("Nothing restored.")
+                return 1
+            commit = store.restore(snapshot["id"], context.root, branch)
+            print(f"Restored on new branch {branch} at {commit[:10]}.")
+        elif args.action == "purge":
+            if args.task:
+                removed = store.purge(task_id=args.task)
+            else:
+                removed = store.purge(older_than=time.time() - 86400 * args.older_than_days)
+            removed_events = telemetry_for(context).purge_journal(time.time() - 86400 * args.older_than_days) \
+                if not args.task else 0
+            print(f"Removed {removed} snapshot(s) and {removed_events} journal event(s); unreferenced files deleted.")
+    except (KeyError, ValueError) as error:
+        raise SystemExit(str(error))
+    return 0
+
 
 def cmd_init(args, layout):
     context = Context(layout, Path.cwd())
@@ -477,7 +724,8 @@ def cmd_run(args, layout):
                 task["attachments_sensitive"] = True
                 context.brain.store.save(task)
     try:
-        run_goal(context, goal, args.orchestrate, True if args.yes else None, packet, visual, on_task=link)
+        run_goal(context, goal, args.orchestrate, True if args.yes else None, packet, visual, on_task=link,
+                 view=view_mode(args))
     finally:
         if args.sensitive and attachments:
             from .evidence import discard_private_copies
@@ -630,29 +878,21 @@ def cmd_attachments(args, layout):
 
 
 def cmd_shell(args, layout):
-    context = Context(layout, Path.cwd())
-    print(f"Coding Brain {version()}\n" + describe(context.project))
-    context.check()
-    onboard(context, interactive=sys.stdin.isatty())
-    pending = [task for task in context.tasks() if task["status"] in RESUMABLE and task.get("kind") == "task"]
-    if pending:
-        print(f"\n{len(pending)} unfinished task(s); `codingbrain resume` continues the latest:")
-        for task in pending[:5]:
-            print("  " + task_line(task))
-    print("\nDescribe an engineering goal (prefix with 'orchestrate:' for multi-agent work). Empty line exits.")
-    while True:
-        try:
-            goal = input("\ngoal> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return
-        if not goal:
-            return
-        orchestrated = goal.lower().startswith("orchestrate:")
-        run_goal(context, goal.split(":", 1)[1].strip() if orchestrated else goal, orchestrated)
+    """`codingbrain` with no command: the conversational assistant, from any folder. Messages are
+    answered in conversation; coding work starts only when asked for and confirmed
+    (brain.local.assistant)."""
+    from .assistant import Assistant
+    message = " ".join(getattr(args, "message", None) or [])
+    assistant = Assistant(layout, Path.cwd(), verbose=getattr(args, "verbose", False))
+    if message:
+        assistant.handle(message)
+        return 0
+    return assistant.repl()
 
 
-def doctor_report(layout: Layout, offline: bool) -> dict:
+def doctor_report(layout: Layout, offline: bool, full: bool = False) -> dict:
+    """`ok` is the application itself (what install and update gate on); `readiness` is the
+    level the whole environment reached (brain.local.readiness)."""
     checks = []
 
     def check(name, ok, detail="", core=True):
@@ -702,35 +942,35 @@ def doctor_report(layout: Layout, offline: bool) -> dict:
     multimodal = multimodal_status(config or settings.DEFAULTS, offline)
     for name, ok, detail in multimodal:
         check(name, ok, detail, core=name == "documents")  # parsers ship with the app; the rest is optional
+    readiness = None
     if not offline:
-        docker = shutil.which("docker")
-        images = []
-        if docker:
-            listed = subprocess.run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
-                                    capture_output=True, text=True, timeout=30)
-            images = listed.stdout.split() if listed.returncode == 0 else []
-            wanted = (config or settings.DEFAULTS)["sandbox"]["python_image"]
-            check("docker sandbox", wanted in images,
-                  f"{wanted} {'ready' if wanted in images else 'missing: run `codingbrain setup --sandbox`'}"
-                  if listed.returncode == 0 else "Docker is installed but not running", core=False)
-        else:
-            check("docker sandbox", False, "Docker not found: tests cannot run until Docker Desktop is installed",
-                  core=False)
-        if config and config["models"]["provider"] == "ollama":
-            try:
-                import httpx
-                tags = httpx.get(config["models"]["url"].rstrip("/") + "/api/tags", timeout=5, trust_env=False).json()
-                names = [item["name"] for item in tags.get("models", [])]
-                wanted = config["models"]["model"]
-                found = any(name == wanted or name.split(":")[0] == wanted.split(":")[0] for name in names)
-                check("local model", found, f"Ollama has {len(names)} model(s); {wanted or 'none selected'} "
-                      f"{'available' if found else 'not pulled'}", core=False)
-            except Exception as error:
-                check("local model", False, f"Ollama not reachable at {config['models']['url']}: "
-                      f"{type(error).__name__}", core=False)
-        for name, detail in premium_status().items():
-            check(f"premium: {name}", detail["usable"], detail["detail"], core=False)
-    return {"ok": all(item["ok"] for item in checks if item["core"]), "version": version(), "checks": checks}
+        from .components import Env, check_all
+        from .installer import InstallState
+        from .readiness import assess
+        from .system import System
+        state = InstallState(layout)
+        env = Env(System(), layout, config or settings.DEFAULTS, evidence=state.evidence)
+        results = check_all(env, deep=full)
+        if full:
+            state.save()  # deep checks are evidence for later quick checks
+        docker, sandbox = results["docker"], results["sandbox"]
+        check("docker sandbox", docker.ready and sandbox.ready,
+              f"{docker.detail}; {sandbox.detail}" if docker.ready else docker.detail, core=False)
+        check("local model", results["model"].ready, results["model"].detail
+              if results["ollama"].ready else results["ollama"].detail, core=False)
+        for name in ("claude", "codex"):
+            check(f"premium: {name}", results[name].ready, f"{(results[name].data or {}).get('auth', '')}: "
+                  f"{results[name].detail}", core=False)
+        problems = [item["name"] for item in checks if item["core"] and not item["ok"]]
+        profile = state.data.get("profile")
+        from .components import PROFILES
+        readiness = assess(results, app_ok=not problems, app_problems=problems, declined=state.data.get("declined", []),
+                           config=config or settings.DEFAULTS, profile=profile,
+                           expected=PROFILES.get(profile or "", []))
+        readiness["components"] = {key: value.to_dict() for key, value in results.items()}
+        readiness["deep"] = full
+    return {"ok": all(item["ok"] for item in checks if item["core"]), "version": version(), "checks": checks,
+            "readiness": readiness}
 
 
 def multimodal_status(config: dict, offline: bool = False) -> list[tuple[str, bool, str]]:
@@ -802,18 +1042,105 @@ def premium_status() -> dict:
 
 
 def cmd_doctor(args, layout):
-    report = doctor_report(layout, args.offline)
+    if args.full and args.offline:
+        raise SystemExit("--full runs real checks (model generation, sandbox start, sign-ins); it cannot be offline")
+    if args.full and not args.json:
+        print("Full check: generating text with the local model, starting the sandbox images offline and asking "
+              "Claude Code and Codex for their sign-in state. This can take a few minutes.\n")
+    report = doctor_report(layout, args.offline, full=args.full)
     if args.json:
-        print(json.dumps(report, indent=2))
+        print(json.dumps(report, indent=2, default=str))
     else:
         for item in report["checks"]:
             mark = "ok " if item["ok"] else ("ERR" if item["core"] else "-- ")
             print(f"[{mark}] {item['name']:<20} {item['detail']}")
-        print("\nHealthy." if report["ok"] else "\nProblems found above.")
+        if report["readiness"]:
+            from .readiness import render
+            print("\n" + render(report["readiness"]))
+        else:
+            print("\nApplication checks passed (offline: run `codingbrain doctor --full` for readiness)."
+                  if report["ok"] else "\nProblems found above.")
     return 0 if report["ok"] else 1
 
 
+def cmd_install(args, layout):
+    """Install and verify everything the chosen profile needs (see brain.local.installer)."""
+    from .installer import Installer
+    profile = "full" if args.full else args.profile
+    mode = "json" if args.json else view_mode(args) or ("live" if sys.stdout.isatty() else "plain")
+    installer = Installer(layout, yes=args.yes, mode=mode, interactive=sys.stdin.isatty() and not args.non_interactive)
+    report = installer.install(profile, only=args.only, skip=args.skip or (), resume=args.resume,
+                               plan_only=args.plan, retry_declined=args.retry_declined,
+                               register_resume=False if args.no_auto_resume else None)
+    if not args.plan and not report.get("restart_required") and report["levels"]["sandbox"]["ready"] and (
+            args.selftest or (installer.interactive and not args.yes and ask(
+                "Run a short end-to-end test now (a throwaway project, a real task for your model, tests in the "
+                "sandbox; your projects are not touched)?", False))):
+        report["selftest"] = run_selftest(layout, args.json)
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+    return 0 if args.plan or report["level"] not in {"blocked"} else 1
+
+
+def run_selftest(layout, quiet=False) -> dict:
+    from .installer import selftest
+    if not quiet:
+        print("\nEnd-to-end test: a throwaway project with a failing test; the configured model must fix it and the "
+              "sandbox must run the test.")
+    result = selftest(layout)
+    if not quiet:
+        print(("PASSED" if result["passed"] else "NOT PASSED") + f": task {result['status']}"
+              + (f", tests exit {result.get('tests_exit_code')}" if result.get("tests_exit_code") is not None else "")
+              + (f", {result.get('seconds')} s with {result.get('model')}" if result.get("model") else "")
+              + (f"\n  {result['failure']}" if result.get("failure") else ""))
+    return result
+
+
+def cmd_new(args, layout):
+    """Create a new application from a sentence (brain.local.create)."""
+    from .create import Blocked, build, create_project, report
+    identity = {"name": args.git_name, "email": args.git_email} if args.git_name or args.git_email else None
+    if identity and not (identity["name"] and identity["email"]):
+        raise SystemExit("--git-name and --git-email go together")
+    try:
+        record = create_project(layout, " ".join(args.goal), name=args.name, root=args.in_, stack=args.stack,
+                                yes=args.yes, identity=identity, check_ready=not args.skip_readiness_check)
+    except Blocked as error:
+        print(f"Not created: {error}")
+        return 1
+    print(f"\nCreated {record['path']} ({record['stack']}); building your goal now. Live activity follows.")
+    if args.create_only:
+        print(report(record, {}))
+        return 0
+    task = build(layout, record, args.orchestrate, True if args.yes else None, view_mode(args))
+    print(report(record, task))
+    return 0 if task.get("status") in {"accepted", "passed", "completed"} else 1
+
+
+def cmd_api(args, layout):
+    """The typed engine API for programs such as the desktop app (brain.local.engine)."""
+    from .engine import Engine, describe, serve_stdio
+    if args.describe or not args.stdio:
+        print(json.dumps(describe(), indent=2))
+        return 0
+    return serve_stdio(Engine(layout, Path.cwd()))
+
+
+def cmd_selftest(args, layout):
+    result = run_selftest(layout, args.json)
+    if args.json:
+        print(json.dumps(result, indent=2))
+    return 0 if result["passed"] else 1
+
+
 def cmd_setup(args, layout):
+    if args.repair:
+        from .installer import Installer
+        installer = Installer(layout, yes=args.yes, interactive=sys.stdin.isatty() and not args.non_interactive,
+                              mode="live" if sys.stdout.isatty() else "plain")
+        print("Repair: every component of your profile gets a full check; anything not working is offered a fix.")
+        report = installer.install(None, resume=True, deep_plan=True)
+        return 0 if report["level"] != "blocked" else 1
     layout.ensure()
     config = settings.load(layout)
     models = config["models"]
@@ -1098,9 +1425,63 @@ def main(argv=None) -> int:
     run.add_argument("--visual-check", action="store_true", help="always verify the rendered result visually")
     run.add_argument("--no-visual-check", action="store_true", help="never verify the rendered result visually")
     run.add_argument("--viewport", action="append", choices=["desktop", "tablet", "mobile"])
+    for parser_ in (run,):
+        output = parser_.add_mutually_exclusive_group()
+        output.add_argument("--verbose", action="store_true", help="also show heartbeats, routes and snapshots")
+        output.add_argument("--quiet", action="store_true", help="only failures, approvals and outcomes")
+        output.add_argument("--plain", action="store_true", help="no in-place status line")
+        output.add_argument("--json", action="store_true", help="activity as JSON lines")
     doctor = commands.add_parser("doctor", help="check the installation, models and premium CLIs")
     doctor.add_argument("--offline", action="store_true", help="only local checks")
     doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--full", action="store_true",
+                        help="real checks: model generation, sandbox start, sign-in states (slower)")
+    install_parser = commands.add_parser("install", help="install and verify Python, Git, WSL 2, Docker, Ollama, "
+                                         "a model, Claude Code, Codex, sandbox and extras (asks first)")
+    install_parser.add_argument("--profile", choices=["local", "full"], default=None,
+                                help="local: Git, Ollama and a model; full: everything (default: your last profile, "
+                                     "else local)")
+    install_parser.add_argument("--full", action="store_true", help="same as --profile full")
+    install_parser.add_argument("--resume", action="store_true", help="continue after a restart or interruption")
+    install_parser.add_argument("--plan", action="store_true", help="show the checks and the plan; change nothing")
+    install_parser.add_argument("--only", action="append", metavar="COMPONENT", help="only this component (repeatable)")
+    install_parser.add_argument("--skip", action="append", metavar="COMPONENT", help="leave this component out")
+    install_parser.add_argument("--yes", action="store_true",
+                                help="agree to the plan shown (Windows still asks for administrator changes)")
+    install_parser.add_argument("--retry-declined", action="store_true", help="ask again about declined components")
+    install_parser.add_argument("--no-auto-resume", action="store_true",
+                                help="never register a one-time resume after a restart")
+    install_parser.add_argument("--selftest", action="store_true", help="run the end-to-end test at the end")
+    install_parser.add_argument("--non-interactive", action="store_true")
+    install_output = install_parser.add_mutually_exclusive_group()
+    for flag in ("--verbose", "--quiet", "--plain", "--json"):
+        install_output.add_argument(flag, action="store_true")
+    new_parser = commands.add_parser("new", help="create a new application from a sentence: a new folder, Git, "
+                                     "a tested scaffold, then your goal built and tested")
+    new_parser.add_argument("goal", nargs="+", help='what to build, e.g. "a task manager with due dates"')
+    new_parser.add_argument("--name", help="folder name (default: from the goal)")
+    new_parser.add_argument("--in", dest="in_", metavar="FOLDER",
+                            help="where to create it (default: your Projects folder, e.g. C:\\Users\\you\\Projects)")
+    new_parser.add_argument("--stack", choices=["python", "node", "web"], help="default: chosen from the goal")
+    new_parser.add_argument("--yes", action="store_true", help="create and run plans without asking "
+                            "(accepting the result still asks)")
+    new_parser.add_argument("--orchestrate", action="store_true", help="split the goal into dependent assignments")
+    new_parser.add_argument("--create-only", action="store_true", help="create the project; do not start building")
+    new_parser.add_argument("--git-name", help="author name for this repository only (if Git has none)")
+    new_parser.add_argument("--git-email", help="author email for this repository only (if Git has none)")
+    new_parser.add_argument("--skip-readiness-check", action="store_true", help=argparse.SUPPRESS)
+    new_output = new_parser.add_mutually_exclusive_group()
+    for flag in ("--verbose", "--quiet", "--plain", "--json"):
+        new_output.add_argument(flag, action="store_true")
+    api_parser = commands.add_parser("api", help="the typed engine API for programs (JSON lines over stdio)")
+    api_parser.add_argument("--stdio", action="store_true", help="serve requests on stdin/stdout")
+    api_parser.add_argument("--describe", action="store_true", help="print the API schema")
+    chat_parser = commands.add_parser("chat", help="talk to Coding Brain (the default when no command is given); "
+                                      "with a message: answer it and exit")
+    chat_parser.add_argument("message", nargs="*")
+    chat_parser.add_argument("--verbose", action="store_true", help="show how each message was understood")
+    selftest_parser = commands.add_parser("selftest", help="a throwaway end-to-end task: model, sandbox and tests")
+    selftest_parser.add_argument("--json", action="store_true")
     setup = commands.add_parser("setup", help="configure models, premium supervisors, budgets and approvals")
     setup.add_argument("--non-interactive", action="store_true")
     setup.add_argument("--provider", choices=["ollama", "openai"])
@@ -1119,6 +1500,8 @@ def main(argv=None) -> int:
     setup.add_argument("--premium-vision", choices=["off", "claude", "codex"])
     setup.add_argument("--ocr-command", help="path to tesseract if it is not on PATH")
     setup.add_argument("--browser", action="store_true", help="set up the browser for visual checks")
+    setup.add_argument("--repair", action="store_true", help="fully check every component and offer fixes")
+    setup.add_argument("--yes", action="store_true", help="--repair: agree to the fixes shown")
     attachments_parser = commands.add_parser("attachments", help="attachments: preview, list, show, approve, "
                                              "reprocess, purge")
     attachments_parser.add_argument("action", choices=["preview", "list", "show", "approve", "reprocess", "purge"])
@@ -1156,6 +1539,30 @@ def main(argv=None) -> int:
     memory_parser.add_argument("--json", action="store_true")
     memory_parser.add_argument("--explain", action="store_true", help="print the authority hierarchy")
     commands.add_parser("version", help="print the version")
+    activity = commands.add_parser("activity", help="what each agent is doing now in this project")
+    activity.add_argument("--json", action="store_true")
+    watch = commands.add_parser("watch", help="follow a task's live activity from any terminal")
+    watch.add_argument("task", nargs="?")
+    watch.add_argument("--history", action="store_true", help="start from the task's first event")
+    watch.add_argument("--install", action="store_true", help="follow the latest installation instead of a task")
+    watch_output = watch.add_mutually_exclusive_group()
+    for flag in ("--verbose", "--quiet", "--plain", "--json"):
+        watch_output.add_argument(flag, action="store_true")
+    trace_parser = commands.add_parser("trace", help="a task's full execution history")
+    trace_parser.add_argument("task", nargs="?")
+    trace_parser.add_argument("--json", action="store_true")
+    snapshots_parser = commands.add_parser("snapshots", help="a task's saved snapshots")
+    snapshots_parser.add_argument("task", nargs="?")
+    snapshots_parser.add_argument("--json", action="store_true")
+    snapshot_parser = commands.add_parser("snapshot", help="show, diff, restore (as a new branch) or purge snapshots")
+    snapshot_parser.add_argument("action", choices=["show", "diff", "restore", "purge"])
+    snapshot_parser.add_argument("ids", nargs="*")
+    snapshot_parser.add_argument("--json", action="store_true")
+    snapshot_parser.add_argument("--diff", action="store_true", help="show: include the full diff")
+    snapshot_parser.add_argument("--branch", help="restore: the new branch name")
+    snapshot_parser.add_argument("--yes", action="store_true", help="restore without asking")
+    snapshot_parser.add_argument("--task", help="purge: only this task's snapshots")
+    snapshot_parser.add_argument("--older-than-days", type=float, default=30)
     migrate_parser = commands.add_parser("migrate", help=argparse.SUPPRESS)
     migrate_parser.add_argument("--json", action="store_true")
     post = commands.add_parser("post-install", help=argparse.SUPPRESS)
@@ -1171,7 +1578,9 @@ def main(argv=None) -> int:
     handlers = {"init": cmd_init, "status": cmd_status, "tasks": cmd_tasks, "resume": cmd_resume,
                 "accept": cmd_accept, "run": cmd_run, "doctor": cmd_doctor, "setup": cmd_setup,
                 "update": cmd_update, "rollback": cmd_rollback, "migrate": cmd_migrate,
-                "post-install": cmd_post_install, "memory": cmd_memory, None: cmd_shell,
-                "attachments": cmd_attachments, "inspect-ui": cmd_inspect_ui,
+                "post-install": cmd_post_install, "memory": cmd_memory, None: cmd_shell, "chat": cmd_shell, "api": cmd_api,
+                "attachments": cmd_attachments, "inspect-ui": cmd_inspect_ui, "activity": cmd_activity,
+                "watch": cmd_watch, "trace": cmd_trace, "snapshots": cmd_snapshots, "snapshot": cmd_snapshot,
+                "install": cmd_install, "selftest": cmd_selftest, "new": cmd_new,
                 "version": lambda args, layout: print(f"codingbrain {version()}")}
     return handlers[args.command](args, layout) or 0

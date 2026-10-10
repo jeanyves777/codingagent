@@ -1,0 +1,97 @@
+name: Preview build (unreleased, Windows)
+
+# An UNRELEASED preview for testing on a Windows PC before the final releases. It creates no tag
+# and no GitHub release, and never uses the production environment: the files are a workflow
+# artifact only. Published releases still go only through "Release (owner-approved)".
+#
+# The version is 0.13.0.dev<run number>, a dev pre-release. Each new preview is newer than the
+# previous one, and a later full release that contains this work is newer than every preview,
+# so `codingbrain update` moves from the preview to it. Older published releases (0.9.1 to
+# 0.12.0) are not newer than the preview and are not offered as updates.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    if: github.head_ref == 'preview' || github.ref == 'refs/heads/preview'
+    name: build and verify the preview on Windows
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the preview release files
+        shell: pwsh
+        run: |
+          $version = "0.13.0.dev${{ github.run_number }}"
+          python scripts/build_release.py --out dist/preview --version $version
+          if ($LASTEXITCODE -ne 0) { throw "build exited $LASTEXITCODE" }
+          $info = Get-Content -Raw dist/preview/release.json | ConvertFrom-Json
+          if ($info.version -ne $version -or $info.channel -ne 'dev') { throw "release.json: $($info.version) $($info.channel)" }
+          Get-Content dist/preview/SHA256SUMS | ForEach-Object {
+            $hash, $name = $_ -split '\s+', 2
+            if ((Get-FileHash -Algorithm SHA256 (Join-Path dist/preview $name)).Hash.ToLower() -ne $hash) { throw "checksum: $name" }
+          }
+          "version=$version" | Out-File -Append $env:GITHUB_ENV
+      - name: Fresh install with install.ps1 -From, then the engine API against the installed engine
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'cb-preview'
+          powershell -NoProfile -ExecutionPolicy Bypass -File dist/preview/install.ps1 -From dist/preview -InstallDir $dir -Yes -NoPath
+          if ($LASTEXITCODE -ne 0) { throw "install exited $LASTEXITCODE" }
+          $py = Join-Path $dir "app\versions\$env:version\venv\Scripts\python.exe"
+          $installed = & $py -I -m brain.local version
+          Write-Host $installed
+          if ($installed -notmatch [regex]::Escape($env:version)) { throw "installed version: $installed" }
+          # Run from outside the checkout so `-m brain.local` is the installed engine, not this source.
+          $env:CODINGBRAIN_HOME = Join-Path $env:RUNNER_TEMP 'cb-preview-api'
+          $check = (Resolve-Path scripts/engine_client_check.py).Path
+          Push-Location $env:RUNNER_TEMP
+          try {
+            & $py -I -m brain.local setup --non-interactive --model qwen2.5-coder:7b --url http://127.0.0.1:9
+            if ($LASTEXITCODE -ne 0) { throw "setup exited $LASTEXITCODE" }
+            & $py $check
+            if ($LASTEXITCODE -ne 0) { throw "engine client check exited $LASTEXITCODE" }
+          } finally { Pop-Location }
+      - name: Download the published v0.9.0 release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download v0.9.0 --repo "${{ github.repository }}" --dir dist/published-0.9.0
+      - name: Update from the published v0.9.0 to the preview, and roll back
+        run: ./installer/windows/verify-upgrade.ps1 -New dist/preview -PublishedDir dist/published-0.9.0
+      - name: Instructions
+        shell: pwsh
+        run: |
+          @"
+          Coding Brain $env:version - UNRELEASED PREVIEW (not a published release)
+          Built from commit ${{ github.sha }} by run ${{ github.run_id }}.
+
+          Update an existing installation (keeps settings, projects and memory; a backup is made):
+            1. Extract this zip to a folder, e.g. C:\Users\<you>\Downloads\codingbrain-preview
+            2. In PowerShell:  codingbrain update --source C:\Users\<you>\Downloads\codingbrain-preview
+          New installation instead:
+            powershell -ExecutionPolicy Bypass -File install.ps1 -From C:\Users\<you>\Downloads\codingbrain-preview
+
+          Back to the previous version at any time:  codingbrain rollback
+          Later, to the final release:               codingbrain update
+          (a full release that contains this work is newer than every 0.13.0.devN preview)
+
+          Files are checked against SHA256SUMS during the update.
+          "@ | Out-File -Encoding utf8 dist/preview/PREVIEW-README.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: CodingBrain-Preview-${{ env.version }}
+          path: |
+            dist/preview/
+            upgrade-report.json
+          if-no-files-found: warn

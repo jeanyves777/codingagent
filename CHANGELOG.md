@@ -1,5 +1,144 @@
 # Changelog
 
+## Unreleased: typed engine API
+
+See docs/engine-api.md.
+
+- **`codingbrain api --describe | --stdio`:** a versioned (1.0) API that the desktop app and other
+  programs use instead of parsing CLI output. It covers:
+  - engine information and the schema;
+  - doctor, install status and the install plan;
+  - provider descriptors;
+  - projects (list, register, create);
+  - conversation, which only proposes;
+  - tasks, with digest-bound, single-use approval, acceptance as a new branch, stop and resume;
+  - activity-journal events streamed live while tasks run, scoped to the operation's own task;
+  - exactly one structured response per request line, including invalid JSON values;
+  - `tasks.stop` during a running task over the same session, ending in `cancelled`;
+  - after a restart, tasks whose engine process is gone are reported as `interrupted`, never as
+    passed or restarted on their own.
+- **`scripts/engine_client_check.py`:** a real out-of-process client, run in CI on Windows and,
+  with a real model and sandbox, on Ubuntu.
+- **Provider registry (issue #14):** each provider reports separately whether it is installed,
+  how it is authenticated, whether it is enabled and ready, how it is billed and its cost gate.
+  Providers without a reviewed adapter (Gemini, Grok, Muse) are never reported as connected.
+
+## Unreleased: conversational by default
+
+See docs/assistant.md.
+
+- **`codingbrain` from any folder starts a conversation.** It no longer queues every message as a
+  coding task. In 0.9.0, typing `hello` started engineering work and went silent until Ctrl+C;
+  now a greeting gets a greeting and a question gets an answer.
+- **Intent routing.** Fixed rules handle the unmistakable cases: greetings, thanks, help,
+  goodbye, slash commands and the project list. Everything else goes to the local model, which
+  picks one of: chat, question, projects, status, investigate, plan, review, create_project or
+  implement. The model only proposes; work needs an action verb and your confirmation. Without a
+  model, uncertain messages are treated as conversation.
+- **Global projects.** The assistant reads the project registry ("what projects am I working
+  on?"). It resolves the project for a request from its name, the conversation, the current
+  repository or matching file names, and asks when unclear. It never scans the home folder.
+- **Safe task lifecycle.** Conversation never creates tasks, worktrees or files, and never spends
+  premium budget. Ctrl+C while the model is thinking starts nothing. Tasks and conversations are
+  listed separately.
+- **Memory.** The global conversation log is redacted and tagged per project, and a conversation
+  about one project never receives another project's turns.
+- `codingbrain chat ["message"]`, and `/projects /tasks /history /run /new` inside the
+  conversation. `codingbrain run "goal"` is unchanged.
+
+## Unreleased: goal-first project creation
+
+See docs/new-project.md.
+
+- **`codingbrain new "<goal>"`** creates a new application from a sentence. It:
+  1. checks readiness (nothing is created if Git, the model, Docker or the sandbox are missing);
+  2. creates a new folder in your Projects folder, with path safety checks: it never reuses a
+     folder, never overlaps Coding Brain's data, respects your allowed roots, and refuses nesting
+     in other repositories and linked folders;
+  3. runs `git init` and makes an empty baseline commit authored by you;
+  4. makes a listed scaffold commit for the python, node or web stack;
+  5. records the goal in project memory;
+  6. builds and tests the goal through the normal lifecycle, with live activity and visual
+     checks for web projects.
+- **Git identity:** a missing identity is asked for and stored only in the new repository, never
+  globally.
+- **Dependencies:** stacks are dependency-free for the offline sandbox. Missing third-party
+  packages are reported from the sandbox output, and network access is never granted quietly.
+
+## Unreleased: complete installation and readiness
+
+See docs/installation.md. This is a separate installer improvement on top of 0.12.0, waiting for
+verification and approval.
+
+- **`codingbrain install`** with Local and Full profiles. It runs a preflight, shows a plan, and
+  asks permission before each change:
+  - Python and Git;
+  - WSL 2;
+  - Docker Desktop;
+  - Ollama;
+  - a model chosen for this computer's memory;
+  - Claude Code and Codex;
+  - the sandbox images;
+  - the knowledge library;
+  - OCR, a vision model and a browser.
+
+  Components come from winget or the vendor's official channel. Administrator rights are asked
+  through UAC, signatures are recorded and tampered binaries are refused. No remote scripts are
+  run and no security warnings are suppressed.
+- **Restart-safe checkpoints:**
+  - `--resume`;
+  - an optional one-time resume after a WSL restart;
+  - idempotent reruns;
+  - one installation at a time.
+- **`install.ps1 -Local` / `-Full` / `-Resume` / `-PlanOnly`:** prepares the environment before the
+  `codingbrain` command is on PATH.
+- **Readiness levels** replace "Healthy": Core, Sandbox, Hybrid and Full ready, Degraded, Blocked.
+  - Levels count only verified evidence: a model that generated text, sandbox images that started
+    offline, and a subscription sign-in.
+  - `doctor --full` runs the real checks, and `doctor --json` includes `readiness`.
+- **Virtualization** is judged from several signals. It is never reported as definitely disabled
+  from Windows' firmware flag, and firmware settings are never changed.
+- **Docker:** the installer separates the CLI from the engine and detects Windows-containers mode.
+  It starts Docker Desktop and waits for it, and runs a sandbox smoke test with `--network none`.
+- **Claude Code and Codex** have explicit sign-in states:
+  - not installed;
+  - not authenticated;
+  - authenticated;
+  - API-key billing (refused);
+  - expired;
+  - temporarily unavailable;
+  - disabled.
+
+  The official sign-in flows run without API-key variables, and no credentials are read or stored.
+- **`codingbrain selftest`:** a disposable end-to-end task (a throwaway project, the real model and
+  the sandbox).
+- **`codingbrain setup --repair`** and **`codingbrain watch --install`**. Installer progress goes
+  to the activity journal: tool-reported bytes and output, elapsed time and heartbeats. Percentages
+  are never estimated.
+- **Update, rollback and uninstall** never touch WSL, Docker, Ollama, models, Claude Code, Codex,
+  Git or Python.
+
+## 0.12.0
+
+Live activity, execution traces and snapshots (see docs/live-activity.md).
+
+- **Journal:** an append-only event journal in telemetry. Events are persisted as they happen,
+  ordered, deduplicated for replayed milestones and redacted. Each event records the task and
+  parent task, the agent, provider and model, the stage, a state (RUNNING, COMPLETED, FAILED,
+  BLOCKED, RETRYING, WAITING_APPROVAL, CANCELLED), the duration, a summary and artifacts.
+- **Instrumentation:** the existing service stages, from goal to acceptance and Git integration,
+  report through the journal. Model calls report start, heartbeat and response for every
+  provider, including the premium CLIs and vision models, with token counts where the provider
+  gives them. The journal also records tool calls, routes, fallbacks, supervisor selection with
+  remaining budgets, model-provided explanations and observed decisions.
+- **Terminal:** `codingbrain run` shows live activity by default, with `--verbose`, `--quiet`,
+  `--plain` and `--json`, and works on Windows PowerShell code pages and without a terminal.
+  New commands: `activity`, `watch`, `trace`, `snapshots`, and
+  `snapshot show|diff|restore|purge`.
+- **Snapshots:** content-addressed and taken at each boundary. They include visual evidence
+  from the multimodal verifier. Restoring always creates a new branch, after asking.
+- **Includes the 0.9.1 fixes:** projects in the home folder, and read-only status commands.
+
 ## 0.11.0
 
 Images, screenshots and documents, plus a visual development loop (see docs/multimodal.md).
