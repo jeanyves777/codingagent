@@ -40,7 +40,9 @@ THANKS = re.compile(r"(?i)^\s*(thanks|thank\s+you|thx|merci|cheers|ok(ay)?|great
                     r"(\s+(so\s+much|a\s+lot|very\s+much))?\s*[!.]*\s*$")
 FAREWELL = re.compile(r"(?i)^\s*(bye|goodbye|see\s+you|exit|quit|q)\s*[!.]*\s*$")
 HELP = re.compile(r"(?i)^\s*(help|\?|what\s+can\s+you\s+do\??|how\s+do\s+(i|you)\s+use\s+(this|you)\??)\s*$")
-PROJECTS = re.compile(r"(?i)\b(what|which|list|show|my|all)\b[^?]*\bprojects?\b|^\s*projects?\s*\??\s*$")
+PROJECTS = re.compile(r"(?i)\b(what|which|list|show|my|all)\b[^?]*\bprojects?\b|^\s*projects?\s*\??\s*$"
+                      r"|\bany\s+projects?\b|\bprojects?\s+(exists?|are\s+there)\b"
+                      r"|\bdo\s+i\s+have\s+(any\s+)?projects?\b|\bhow\s+many\s+projects?\b")
 CREATE = re.compile(r"(?i)^\s*(please\s+)?(can\s+you\s+)?(create|build|make|start|generate|scaffold|develop|write)"
                     r"\s+(me\s+)?(a|an|new|the)?\s*\w+.*\b(app|application|website|site|tool|game|api|service|"
                     r"program|script|cli|dashboard|bot|project)\b")
