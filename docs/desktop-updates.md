@@ -63,3 +63,26 @@ Do not publish a full Windows application release or mark the feature ready unti
 
 The PR is development-only until these gates succeed. Do not merge the combined preview branch
 into main merely to make an updater available.
+
+## Live Git panel
+
+The desktop explorer has a **Git** tab and a clickable branch label in the footer.
+The tab shows the active branch (including detached or unborn HEAD), local branches,
+recent 20 commits with author/date/hash, and staged/modified/untracked working-tree
+counts with up to 75 changed-file names.
+
+The panel reads **only the currently selected project** from the local authenticated
+desktop bridge (`GET /api/git/snapshot`; callers cannot submit arbitrary file paths).
+It uses `git --no-optional-locks` and never checks out a branch, stages a file,
+creates a commit, fetches/pulls or pushes. It does not call GitHub and requires no GitHub
+credentials. Commit subjects and filenames are displayed as literal text, never HTML.
+
+When the desktop is visible and a project is selected, Git is rechecked every 3 seconds;
+the branch indicator updates even when another explorer tab is selected. Switching
+projects ignores stale in-flight Git results, and clicking Refresh updates immediately.
+After an agent task ends the Git view refreshes again. Browser and real-repository tests
+validate branch checkout, commits, rename/untracked handling and automatic changes.
+
+This is **near-live polling**, not a persistent filesystem watcher or remote GitHub
+event stream. Remote branch and PR tracking can be added independently in a later
+reviewed feature without compromising the local-only Git panel.
