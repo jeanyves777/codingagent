@@ -191,18 +191,29 @@ class Workspace:
             lock = self._engine_lock_object = threading.Lock()
         return lock
 
-    def _typed_status(self, core: dict) -> dict | None:
+    def _typed_status(self, core: dict, refresh: bool = False) -> dict | None:
         """With API 1.0 installed, versions and provider readiness come from the engine itself
         (engine.info, providers.list), not from CLI probes or modules bundled into this UI."""
         from .engine_client import EngineError
         try:
             client = self.engine_client()
             info = client.call("engine.info", {}, None, 60)
-            providers = client.call("providers.list", {}, None, 120)
         except (EngineError, ValueError) as error:
             core.update(typed_api=False, conversation=False, new_project=False, typed_api_failed=True,
                         detail=f"The installed engine's typed API did not start: {str(error)[:300]}")
             return None
+        # Provider readiness checks the Claude/Codex sign-ins and can take 20 s or more (longer on a
+        # cold start). It describes the supervisors only: a slow or failed check must never switch
+        # chat off, so it is cached separately and its last good answer is kept on failure.
+        cached = getattr(self, "_providers_cache", None)
+        if cached and not refresh and time.monotonic() - cached[0] < 300:
+            providers = cached[1]
+        else:
+            try:
+                providers = client.call("providers.list", {}, None, 120)
+                self._providers_cache = (time.monotonic(), providers)
+            except (EngineError, ValueError):
+                providers = cached[1] if cached else []
         operations = set(info.get("operations") or [])
         # The installed engine's own operation list decides chat and new-project support; the CLI
         # help probes in management.engine_capabilities are only the fallback for older engines.
@@ -244,7 +255,7 @@ class Workspace:
         except ValueError:
             command = None
         core = management.engine_capabilities(command)
-        typed = self._typed_status(core) if core.get("typed_api") else None
+        typed = self._typed_status(core, refresh) if core.get("typed_api") else None
         model = management.configured_model(self._brain_home() / "config" / "config.json")
         ollama = management.local_ollama_models()
         wanted = model["model"]

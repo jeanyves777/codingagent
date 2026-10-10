@@ -161,3 +161,27 @@ def test_attachments_are_refused_for_chat_links_and_missing_files(tmp_path):
     with pytest.raises(ValueError, match="absolute"):
         workspace.check_attachment("spec.md")
     assert workspace.check_attachment(str(spec)) == spec.resolve()
+
+
+def test_slow_or_failing_provider_check_never_switches_chat_off(tmp_path, monkeypatch):
+    from desktop_ui.engine_client import EngineError
+    install(tmp_path, "0.13.0.dev5")
+    workspace = Workspace(home=tmp_path, executable="not-a-real-binary")
+    calls = []
+
+    class Client:
+        def call(self, op, params, on_event, timeout):
+            calls.append(op)
+            if op == "engine.info":
+                return {"engine_version": "0.13.0.dev5", "api_version": "1.0",
+                        "operations": ["conversation.send", "projects.create", "tasks.start", "tasks.approve", "tasks.accept"]}
+            raise EngineError("timeout", "providers.list did not answer within 120 s")
+
+    monkeypatch.setattr(workspace, "engine_client", lambda: Client())
+    monkeypatch.setattr(server.management, "engine_capabilities", lambda command: {
+        "available": True, "version": "0.13.0.dev5", "conversation": True, "typed_api": True, "new_project": True, "detail": ""})
+    monkeypatch.setattr(server.management, "configured_model", lambda path: {"provider": "ollama", "model": "m"})
+    monkeypatch.setattr(server.management, "local_ollama_models", lambda: {"models": ["m"], "running": True, "detail": ""})
+    status = workspace.engine_status(refresh=True)
+    assert status["chat_available"] is True and not status["engine"].get("typed_api_failed")
+    assert status["providers"] == [] and calls == ["engine.info", "providers.list"]
