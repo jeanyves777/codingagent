@@ -3,8 +3,8 @@
   Update both the installed Coding Brain engine and the native Windows desktop from one
   published GitHub release. Launched by the desktop Update button in a separate console.
 .DESCRIPTION
-  Never uses branch-head / workflow artifacts. Refuses unsigned *metadata*? No: release metadata
-  is GitHub-hosted; the desktop installer itself must match SHA256SUMS in the tagged release.
+  Never uses branch-head / workflow artifacts. The desktop installer must match the
+  SHA256SUMS manifest from the same published, tagged GitHub release.
   Keeps engine state and settings through the official Coding Brain updater. Never modifies
   running desktop files: asks the user to close the GUI first.
 #>
@@ -39,14 +39,14 @@ function Fetch-Asset([object]$release, [string]$name, [string]$folder) {
   return $destination
 }
 function Expected-Sha256([string]$sumFile, [string]$filename) {
-  $matches = @()
+  $found = @()
   foreach ($line in (Get-Content -LiteralPath $sumFile)) {
     if ($line -match '^([0-9a-fA-F]{64})\s+(.+)$' -and $Matches[2] -ceq $filename) {
-      $matches += $Matches[1].ToLowerInvariant()
+      $found += $Matches[1].ToLowerInvariant()
     }
   }
-  if ($matches.Count -ne 1) { throw "SHA256SUMS has no unique checksum for $filename" }
-  return $matches[0]
+  if ($found.Count -ne 1) { throw "SHA256SUMS has no unique checksum for $filename" }
+  return $found[0]
 }
 function Verify-Asset([string]$filename, [string]$folder, [string]$sums) {
   $path = Join-Path $folder $filename
