@@ -40,7 +40,9 @@ THANKS = re.compile(r"(?i)^\s*(thanks|thank\s+you|thx|merci|cheers|ok(ay)?|great
                     r"(\s+(so\s+much|a\s+lot|very\s+much))?\s*[!.]*\s*$")
 FAREWELL = re.compile(r"(?i)^\s*(bye|goodbye|see\s+you|exit|quit|q)\s*[!.]*\s*$")
 HELP = re.compile(r"(?i)^\s*(help|\?|what\s+can\s+you\s+do\??|how\s+do\s+(i|you)\s+use\s+(this|you)\??)\s*$")
-PROJECTS = re.compile(r"(?i)\b(what|which|list|show|my|all)\b[^?]*\bprojects?\b|^\s*projects?\s*\??\s*$")
+PROJECTS = re.compile(r"(?i)\b(what|which|list|show|my|all)\b[^?]*\bprojects?\b|^\s*projects?\s*\??\s*$"
+                      r"|\bany\s+projects?\b|\bprojects?\s+(exists?|are\s+there)\b"
+                      r"|\bdo\s+i\s+have\s+(any\s+)?projects?\b|\bhow\s+many\s+projects?\b")
 CREATE = re.compile(r"(?i)^\s*(please\s+)?(can\s+you\s+)?(create|build|make|start|generate|scaffold|develop|write)"
                     r"\s+(me\s+)?(a|an|new|the)?\s*\w+.*\b(app|application|website|site|tool|game|api|service|"
                     r"program|script|cli|dashboard|bot|project)\b")
@@ -358,9 +360,10 @@ class Assistant:
     def render_projects(self) -> str:
         items = [item for item in self.projects()]
         if not items:
-            return ("No projects yet. Open a project folder and run `codingbrain`, or ask me to create one "
-                    "(\"create a task manager app\").")
-        lines = [f"Projects on this computer ({len(items)}):"]
+            return ("No projects yet registered with Coding Brain. Your folders are never scanned, so projects "
+                    "you have not opened with it are not listed: open a project folder and run `codingbrain`, "
+                    "or ask me to create one (\"create a task manager app\").")
+        lines = [f"Projects registered with Coding Brain ({len(items)}):"]
         for number, item in enumerate(items, 1):
             when = time.strftime("%Y-%m-%d", time.localtime(item["last_opened"])) if item["last_opened"] else "?"
             tasks = ", ".join(f"{count} {status}" for status, count in sorted(item["tasks"].items())) or "no tasks"
@@ -376,35 +379,102 @@ class Assistant:
             return f"{project['name']}: no tasks yet."
         return f"{project['name']} ({project['root']}):\n" + "\n".join("  " + task_line(task) for task in tasks[:10])
 
-    def resolve_project(self, route: Route, text: str) -> dict | None:
-        """The project a request is about: named, the current folder, or found by its files;
-        otherwise ask (and remember the request until answered)."""
+    def candidates(self, route: Route, text: str) -> tuple[dict | None, list[dict], bool]:
+        """(the project, the options to choose from, whether it was inferred from file names).
+        Read-only: no question is asked and no state changes."""
         items = [item for item in self.projects() if item["exists"]]
         lowered = text.lower()
         named = [item for item in items if route.project and item["name"].lower() == str(route.project).lower()] or \
                 [item for item in items if re.search(rf"(?<![\w-]){re.escape(item['name'].lower())}(?![\w-])", lowered)]
         if len(named) == 1:
-            return self.focus_on(named[0])
+            return named[0], [], False
         if self.focus and not named:
-            return self.focus
+            return self.focus, [], False
         if self.repository and not named:
-            return self.focus_on(self.project_for(self.repository))
+            return self.project_for(self.repository), [], False
         words = keywords(text)
         scored = sorted(((file_hits(Path(item["root"]), words), item) for item in (named or items)),
                         key=lambda pair: -pair[0]) if words else []
-        candidates = [item for hits, item in scored if hits] or named or items
-        if len(candidates) == 1 and (scored and scored[0][0]):
-            self.out(f"(This looks like {candidates[0]['name']} at {candidates[0]['root']}.)")
-            return self.focus_on(candidates[0])
-        if not candidates:
+        options = [item for hits, item in scored if hits] or named or items
+        if len(options) == 1 and (scored and scored[0][0]):
+            return options[0], [], True
+        return None, options[:9], False
+
+    def resolve_project(self, route: Route, text: str) -> dict | None:
+        """The project a request is about: named, the current folder, or found by its files;
+        otherwise ask (and remember the request until answered)."""
+        project, options, inferred = self.candidates(route, text)
+        if project:
+            if inferred:
+                self.out(f"(This looks like {project['name']} at {project['root']}.)")
+            return self.focus_on(project)
+        if not options:
             self.pending = Pending("choose_project", route.intent, route.goal or text)
             self.say("Which project do you mean? Give its folder path (no projects are registered yet).")
             return None
-        self.pending = Pending("choose_project", route.intent, route.goal or text, options=candidates[:9])
+        self.pending = Pending("choose_project", route.intent, route.goal or text, options=options)
         self.say("Which project do you mean?\n" + "\n".join(
-            f"  {number}. {item['name']}  ({item['root']})" for number, item in enumerate(candidates[:9], 1))
+            f"  {number}. {item['name']}  ({item['root']})" for number, item in enumerate(options, 1))
             + "\nAnswer with a number, a name or a folder path.")
         return None
+
+    def respond(self, message: str, project_id: str | None = None) -> dict:
+        """One message, answered for a program (the desktop app, `codingbrain api`). Nothing is ever
+        executed here: work comes back as a proposed `action` that the caller must confirm and
+        start explicitly (projects.create / tasks.start)."""
+        text = clean(message)
+        if project_id:
+            self.focus = next((item for item in self.projects() if item["id"] == project_id), self.focus)
+        if not text:
+            return {"intent": "chat", "source": "rule", "reply": "", "action": None, "needs": None, "options": []}
+        captured = []
+        speak, self.out = self.out, (lambda line="": captured.append(str(line)))
+        result = {"action": None, "needs": None, "options": [], "project_id": self.focus_id()}
+        try:
+            route = self.route(text)
+            result.update(intent=route.intent, source=route.source)
+            self.history.add("user", text, self.focus_id(), {"intent": route.intent, "source": route.source})
+            if route.reply:
+                self.say(route.reply)
+            elif route.intent == "projects":
+                self.say(self.render_projects())
+            elif route.clarification and route.intent not in {"chat", "question"}:
+                self.say(route.clarification)
+                result["needs"] = "clarification"
+            elif route.intent in {"chat", "question"}:
+                self.converse(text)
+            elif route.intent == "create_project":
+                result["action"] = {"kind": "create_project", "goal": route.goal or text}
+                self.say(f"That sounds like a new application: \"{route.goal or text}\". Confirm to create it.")
+                result["needs"] = "confirmation"
+            else:
+                project, options, _ = self.candidates(route, text)
+                if project is None:
+                    result.update(needs="choose_project", options=[
+                        {key: item[key] for key in ("id", "name", "root")} for item in options],
+                        action={"kind": route.intent, "goal": route.goal or text})
+                    self.say("Which project do you mean?" if options else
+                             "Which project do you mean? Give its folder path (no projects are registered yet).")
+                else:
+                    self.focus_on(project)
+                    result["project_id"] = project["id"]
+                    if route.intent == "status":
+                        self.say(self.render_status(project))
+                    elif route.intent in {"investigate", "plan", "review"}:
+                        self.discuss_project(project, route, text)
+                        self.pending = None  # a program confirms through tasks.start, not "do it"
+                        if route.intent == "plan":
+                            result["action"] = {"kind": "task", "project_id": project["id"], "goal": route.goal or text}
+                    else:
+                        result["action"] = {"kind": "task", "project_id": project["id"], "project": project["name"],
+                                            "root": project["root"], "goal": route.goal or text}
+                        result["needs"] = "confirmation"
+                        self.say(f"Task for {project['name']} ({project['root']}): {route.goal or text}. "
+                                 "Confirm to start it; nothing changes before you do.")
+        finally:
+            self.out = speak
+        result["reply"] = "\n".join(line for line in captured if not line.startswith("Say \"do it\""))
+        return result
 
     def project_for(self, root: Path) -> dict:
         from .project import project_id

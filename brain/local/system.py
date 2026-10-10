@@ -10,6 +10,7 @@ prompt, and registering a one-time resume after a restart, each only after the u
 Nothing here changes BIOS/UEFI settings, deletes WSL distributions or Docker data, or reads
 credential stores.
 """
+import base64
 import json
 import os
 import platform
@@ -26,6 +27,7 @@ DETACHED = 0x00000008 | 0x00000200 if WINDOWS else 0  # DETACHED_PROCESS | CREAT
 
 WINDOWS_FACTS = r"""
 $ErrorActionPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
 $p = Get-CimInstance Win32_Processor | Select-Object -First 1
 $c = Get-CimInstance Win32_ComputerSystem
 $o = Get-CimInstance Win32_OperatingSystem
@@ -42,7 +44,38 @@ $id = [Security.Principal.WindowsIdentity]::GetCurrent()
   execution_policy = (Get-ExecutionPolicy).ToString()
   model = $c.Model
 } | ConvertTo-Json -Compress
+# Errors are silenced above so that one unavailable value does not stop the rest; if anything
+# failed, say what (plain .NET, which works even when cmdlets do not), for doctor and the installer.
+if ($Error.Count) { [Console]::Error.WriteLine('first error: ' + $Error[$Error.Count - 1].ToString()) }
 """
+
+
+def windows_native_facts() -> dict:
+    """Build, memory and administrator rights straight from Windows APIs: no PowerShell or WMI, so
+    they are known even where that probe is slow, blocked or broken."""
+    facts = {}
+    try:
+        facts["build"] = sys.getwindowsversion().build
+    except AttributeError:
+        return facts
+    import ctypes
+
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong),
+                    ("available", ctypes.c_ulonglong), ("page_total", ctypes.c_ulonglong),
+                    ("page_available", ctypes.c_ulonglong), ("virtual_total", ctypes.c_ulonglong),
+                    ("virtual_available", ctypes.c_ulonglong), ("extended", ctypes.c_ulonglong)]
+    try:
+        status = MemoryStatus(length=ctypes.sizeof(MemoryStatus))
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            facts["ram"] = float(status.total)
+    except (AttributeError, OSError):
+        pass
+    try:
+        facts["admin"] = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        pass
+    return facts
 
 
 def decode(data: bytes) -> str:
@@ -65,14 +98,47 @@ class System:
 
     # probes ---------------------------------------------------------------------------------
     def which(self, name: str) -> str | None:
+        return self.locate(name)[0]
+
+    def locate(self, name: str) -> tuple[str | None, list[str]]:
+        """Find a command without running anything: this process's PATH, then (Windows) the PATH
+        saved in the registry (an installer may have changed it after this process started),
+        npm's configured global prefix (read from NPM_CONFIG_PREFIX and .npmrc files, never by
+        running npm) and the official default locations. Returns the path and every place checked."""
         found = shutil.which(name)
         if found or not WINDOWS:
-            return found
+            return found, ([] if found else ["PATH"])
+        checked = ["PATH"]
+        extensions = (".exe", ".cmd")
+        directories = [*self._registry_path_dirs(), *npm_prefixes()]
+        for directory in directories:
+            for extension in extensions:
+                candidate = Path(directory) / (name + extension)
+                checked.append(str(candidate))
+                if candidate.is_file():
+                    return str(candidate), checked
         for candidate in KNOWN_LOCATIONS.get(name, ()):  # installed, but this session's PATH predates it
-            path = Path(os.path.expandvars(candidate))
+            path = windows_path(candidate)
+            checked.append(str(path))
             if path.is_file():
-                return str(path)
-        return None
+                return str(path), checked
+        return None, list(dict.fromkeys(checked))
+
+    def _registry_path_dirs(self) -> list[str]:
+        """The user and machine PATH as saved in the registry (not this process's copy)."""
+        if not WINDOWS:
+            return []
+        import winreg
+        directories = []
+        for root, key in ((winreg.HKEY_CURRENT_USER, "Environment"),
+                          (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")):
+            try:
+                with winreg.OpenKey(root, key) as handle:
+                    directories += [os.path.expandvars(part) for part in winreg.QueryValueEx(handle, "Path")[0].split(";")
+                                    if part.strip()]
+            except OSError:
+                pass
+        return directories
 
     def exists(self, path: str) -> bool:
         return Path(os.path.expandvars(path)).exists()
@@ -128,7 +194,15 @@ class System:
         shell = self.which("powershell") or self.which("pwsh")
         if not shell:
             return 127, "PowerShell not found"
-        return self.run([shell, "-NoProfile", "-NonInteractive", "-Command", script], timeout=timeout)
+        # -EncodedCommand (UTF-16LE, base64): a multi-line script passed with -Command through the
+        # Windows command line can arrive cut at the first line break and run as nothing at all.
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        # Started from PowerShell 7 (pwsh), the inherited PSModulePath points Windows PowerShell 5.1
+        # at PowerShell 7's own modules, which it cannot load: ConvertTo-Json, Get-CimInstance and
+        # others then fail and the script exits 1 with nothing to show. Without the variable,
+        # each PowerShell builds its own default module path.
+        env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+        return self.run([shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], timeout=timeout, env=env)
 
     def facts(self) -> dict:
         if self._facts is None:
@@ -137,9 +211,14 @@ class System:
             if WINDOWS:
                 code, out = self.powershell(WINDOWS_FACTS, timeout=60)
                 try:
-                    facts.update(json.loads(out.strip().splitlines()[-1]) if code == 0 else {})
-                except (ValueError, IndexError):
-                    pass
+                    if code != 0:
+                        raise ValueError(f"exit {code}")
+                    facts.update(json.loads([line for line in out.splitlines() if line.strip().startswith("{")][-1]))
+                except (ValueError, IndexError) as error:
+                    # Say why (doctor and the installer show it) instead of silently having no facts.
+                    facts["probe_error"] = f"PowerShell facts probe failed ({error}): {out.strip()[-400:]}"
+                facts.update({key: value for key, value in windows_native_facts().items()
+                              if facts.get(key) in (None, "", 0)})
             else:
                 facts.update({"caption": f"{platform.system()} {platform.release()}", "build": None,
                               "admin": hasattr(os, "geteuid") and os.geteuid() == 0})
@@ -282,6 +361,35 @@ class System:
         return time.time()
 
 
+def windows_path(template: str) -> Path:
+    """%VARIABLE% expansion that behaves the same on Windows and in simulated-Windows tests."""
+    import re
+    expanded = re.sub(r"%([^%]+)%", lambda match: os.environ.get(match.group(1), match.group(0)), template)
+    return Path(expanded.replace("\\", os.sep))
+
+
+def npm_prefixes() -> list[str]:
+    """npm's global bin folders on Windows, from configuration files only (npm is never run):
+    NPM_CONFIG_PREFIX, then `prefix=` in the user's and npm's global .npmrc, then the default."""
+    prefixes = []
+    if os.environ.get("NPM_CONFIG_PREFIX"):
+        prefixes.append(os.environ["NPM_CONFIG_PREFIX"])
+    candidates = [Path(os.environ.get("USERPROFILE") or Path.home()) / ".npmrc"]
+    if os.environ.get("APPDATA"):
+        candidates.append(Path(os.environ["APPDATA"]) / "npm" / "etc" / "npmrc")
+    for rc in candidates:
+        try:
+            for line in rc.read_text(encoding="utf-8", errors="replace").splitlines()[:200]:
+                key, _, value = line.partition("=")
+                if key.strip().lower() == "prefix" and value.strip():
+                    prefixes.append(os.path.expandvars(value.strip().strip('"')))
+        except OSError:
+            continue
+    if os.environ.get("APPDATA"):
+        prefixes.append(str(Path(os.environ["APPDATA"]) / "npm"))
+    return list(dict.fromkeys(prefixes))
+
+
 # Default install locations, used when an installer has updated PATH only for new terminals.
 KNOWN_LOCATIONS = {
     "git": (r"%ProgramFiles%\Git\cmd\git.exe", r"%LOCALAPPDATA%\Programs\Git\cmd\git.exe"),
@@ -292,8 +400,10 @@ KNOWN_LOCATIONS = {
     "tesseract": (r"%ProgramFiles%\Tesseract-OCR\tesseract.exe",),
     "node": (r"%ProgramFiles%\nodejs\node.exe",),
     "npm": (r"%ProgramFiles%\nodejs\npm.cmd",),
-    "claude": (r"%USERPROFILE%\.local\bin\claude.exe",),
-    "codex": (r"%APPDATA%\npm\codex.cmd",),
+    "claude": (r"%USERPROFILE%\.local\bin\claude.exe", r"%LOCALAPPDATA%\Microsoft\WinGet\Links\claude.exe"),
+    "codex": (r"%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe",  # the standalone Codex for Windows
+              r"%APPDATA%\npm\codex.cmd", r"%LOCALAPPDATA%\Microsoft\WinGet\Links\codex.exe",
+              r"%USERPROFILE%\.local\bin\codex.exe"),
 }
 
 

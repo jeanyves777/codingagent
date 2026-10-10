@@ -100,6 +100,9 @@ def preflight(system, layout: Layout, profile: str) -> dict:
         if not report["winget"]:
             report["warnings"].append("winget is not available: install 'App Installer' from the Microsoft Store to "
                                       "let Coding Brain install components; otherwise each is explained for you")
+        if facts.get("probe_error"):
+            report["warnings"].append("Windows details (virtualization, CPU) could not be read, so they show as "
+                                      f"unknown: {facts['probe_error'][:300]}")
         if facts.get("execution_policy") in {"Restricted", "AllSigned"}:
             report["warnings"].append(f"PowerShell execution policy is {facts['execution_policy']}: the launcher and "
                                       "updates use .cmd files and are not affected; scripts you run need -ExecutionPolicy Bypass")

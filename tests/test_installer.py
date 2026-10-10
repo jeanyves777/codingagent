@@ -419,12 +419,36 @@ def test_real_preflight_on_this_machine(layout):
     from brain.local.system import System
     system = System()
     facts = preflight(system, layout, "full")
+    print(json.dumps({**facts, "raw": system.facts()}, indent=2, default=str))  # in the log even on failure
     assert not facts["simulated"]
     assert facts["disk_free_gb"] > 0
     assert facts["virtualization"]["state"] in {"enabled", "possibly_disabled", "unknown"}
     if sys.platform == "win32":
         assert facts["build"] and facts["winget"] is not None and facts["ram_gb"]
-    print(json.dumps(facts, indent=2, default=str))
+        # The PowerShell probe supplies the virtualization signals and must work on a real Windows VM.
+        assert not system.facts().get("probe_error"), system.facts()["probe_error"]
+
+
+def test_powershell_scripts_are_passed_encoded_so_no_line_is_lost(monkeypatch):
+    """A multi-line script given with -Command through the Windows command line can arrive cut at
+    its first line break and run as nothing (exit 1, no output): the facts probe failed that way on
+    every Windows runner. -EncodedCommand carries the whole script exactly."""
+    import base64
+    from brain.local.system import WINDOWS_FACTS, System
+    seen = []
+    system = System()
+    monkeypatch.setattr(system, "which", lambda name: "powershell.exe" if name == "powershell" else None)
+    environments = []
+    monkeypatch.setattr(system, "run", lambda arguments, timeout=60, env=None: seen.append(arguments)
+                        or environments.append(env) or (0, "{}"))
+    monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")  # as inherited from pwsh
+    system.powershell(WINDOWS_FACTS)
+    arguments = seen[0]
+    # Windows PowerShell must not inherit PowerShell 7's module path (it cannot load those modules).
+    assert not any(key.upper() == "PSMODULEPATH" for key in environments[0]) and "PATH" in {
+        key.upper() for key in environments[0]}
+    assert "-Command" not in arguments and arguments[-2] == "-EncodedCommand"
+    assert base64.b64decode(arguments[-1]).decode("utf-16-le") == WINDOWS_FACTS
 
 
 @pytest.mark.skipif(not os.environ.get("CODINGBRAIN_TEST_WINGET"), reason="set CODINGBRAIN_TEST_WINGET=1 (Windows with winget)")

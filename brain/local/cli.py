@@ -1117,6 +1117,15 @@ def cmd_new(args, layout):
     return 0 if task.get("status") in {"accepted", "passed", "completed"} else 1
 
 
+def cmd_api(args, layout):
+    """The typed engine API for programs such as the desktop app (brain.local.engine)."""
+    from .engine import Engine, describe, serve_stdio
+    if args.describe or not args.stdio:
+        print(json.dumps(describe(), indent=2))
+        return 0
+    return serve_stdio(Engine(layout, Path.cwd()))
+
+
 def cmd_selftest(args, layout):
     result = run_selftest(layout, args.json)
     if args.json:
@@ -1464,6 +1473,9 @@ def main(argv=None) -> int:
     new_output = new_parser.add_mutually_exclusive_group()
     for flag in ("--verbose", "--quiet", "--plain", "--json"):
         new_output.add_argument(flag, action="store_true")
+    api_parser = commands.add_parser("api", help="the typed engine API for programs (JSON lines over stdio)")
+    api_parser.add_argument("--stdio", action="store_true", help="serve requests on stdin/stdout")
+    api_parser.add_argument("--describe", action="store_true", help="print the API schema")
     chat_parser = commands.add_parser("chat", help="talk to Coding Brain (the default when no command is given); "
                                       "with a message: answer it and exit")
     chat_parser.add_argument("message", nargs="*")
@@ -1566,7 +1578,7 @@ def main(argv=None) -> int:
     handlers = {"init": cmd_init, "status": cmd_status, "tasks": cmd_tasks, "resume": cmd_resume,
                 "accept": cmd_accept, "run": cmd_run, "doctor": cmd_doctor, "setup": cmd_setup,
                 "update": cmd_update, "rollback": cmd_rollback, "migrate": cmd_migrate,
-                "post-install": cmd_post_install, "memory": cmd_memory, None: cmd_shell, "chat": cmd_shell,
+                "post-install": cmd_post_install, "memory": cmd_memory, None: cmd_shell, "chat": cmd_shell, "api": cmd_api,
                 "attachments": cmd_attachments, "inspect-ui": cmd_inspect_ui, "activity": cmd_activity,
                 "watch": cmd_watch, "trace": cmd_trace, "snapshots": cmd_snapshots, "snapshot": cmd_snapshot,
                 "install": cmd_install, "selftest": cmd_selftest, "new": cmd_new,
