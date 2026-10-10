@@ -8,7 +8,7 @@ This workstream implements a **real desktop window** using Microsoft Edge WebVie
 2. The window launches a private server **in the active installed Coding Brain Python environment** (`%LOCALAPPDATA%\CodingBrain\app\versions\<version>\venv\Scripts\python.exe`). It never executes user text in a shell.
 3. Server binds an operating-system-selected port on `127.0.0.1`, returns a one-time 256-bit token to its parent via a private pipe, and accepts only authenticated API calls.
 4. Chat uses the installed conversational Brain if available. Simple greetings work even on v0.9.0; older versions cannot answer general questions until the conversational backend release is installed.
-5. Running a coding goal calls the **existing Brain service**: safe Git worktree, requirement generation, proposal, exact diff, explicit user approval, isolated Docker tests, explicit acceptance on a new branch. This path uses typed Python API calls instead of brittle terminal prompt parsing or `--yes`. Task activity comes from real stored engine events plus truthful waiting heartbeats.
+5. Chat, new projects and coding goals all go through the **engine API** (`codingbrain api --stdio`, API 1.0; see [engine-api.md](engine-api.md)): safe Git worktree, requirement generation, proposal, exact diff, explicit user approval bound to the proposal's digest, isolated Docker tests, explicit acceptance on a new branch. No terminal prompt parsing and no `--yes`. Task activity is the engine's live journal for that task, plus truthful waiting heartbeats.
 6. Goal-first project creation is supported if the installed Brain version includes it, and also requires explicit approval. It never overwrites an existing project path.
 7. Project file browsing is read-only, bounded, refuses symlinks/junctions, path escapes and common credential files.
 
@@ -127,6 +127,28 @@ project context and setup/provider entry points; it does not pretend to be a ven
 The browser-layout CI job runs real Chromium interactions at full-screen, 1366px laptop,
 and narrow widths, checks alignment and page overflow, and uploads screenshots. That is
 **browser evidence, not a substitute for a manual real-WebView2 Windows GUI test**.
+
+## Engine API integration
+
+The desktop owns no orchestration. `desktop_ui/engine_client.py` starts one engine process
+(`python -m brain.local api --stdio`) from the installed Python and speaks the typed API;
+`desktop_ui/core.py` maps the window's flow onto it:
+
+| Window | Engine API |
+| --- | --- |
+| Chat | `conversation.send` (never executes; proposed work is shown with how to authorize it) |
+| New project (after approval in the window) | `projects.create`, then the task flow with `new_project` |
+| Run task | `projects.register`, `tasks.start` |
+| Approve or decline the proposal | `tasks.approve` with the digest of the proposal that was shown |
+| Protected tool request | `tasks.tool_decision` with the request id |
+| Accept | `tasks.accept` (a new branch; the checked-out branch is unchanged) |
+| Stop | `tasks.stop` over the same engine session; the running step ends `cancelled` |
+| Activity | the task's live journal events (`op_id`-scoped), heartbeats when quiet |
+
+If the engine process dies, the next call starts a new one from the persisted state; a task whose
+engine died is reported as interrupted, never as passed. Tests: `tests/test_desktop_engine.py`
+(the window's HTTP endpoints, the desktop core and the real engine together, with a fake model
+and sandbox; and the out-of-process client against a real engine process).
 
 For the core/backend agent, see **[`docs/backend-integration-handoff.md`](backend-integration-handoff.md)**.
 It defines the remaining clean-machine installation/bootstrap, stable updater, true global

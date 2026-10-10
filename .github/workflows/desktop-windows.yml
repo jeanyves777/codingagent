@@ -7,6 +7,10 @@ on:
       - 'tests/test_desktop_ui.py'
       - 'tests/test_desktop_native.py'
       - 'tests/test_desktop_management.py'
+      - 'tests/test_desktop_engine.py'
+      - 'brain/local/engine.py'
+      - 'brain/local/assistant.py'
+      - 'scripts/engine_client_check.py'
       - 'tests/smoke_browser.py'
       - 'docs/backend-integration-handoff.md'
       - 'Start-CodingBrainDesktop.ps1'
@@ -36,7 +40,7 @@ jobs:
       - name: Native service, task approvals and browser API tests
         shell: pwsh
         run: |
-          python -m pytest -q tests/test_desktop_ui.py tests/test_desktop_native.py tests/test_desktop_management.py
+          python -m pytest -q tests/test_desktop_ui.py tests/test_desktop_native.py tests/test_desktop_management.py tests/test_desktop_engine.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --check desktop_ui/static/app.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
