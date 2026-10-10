@@ -429,6 +429,22 @@ def test_real_preflight_on_this_machine(layout):
         assert not system.facts().get("probe_error"), system.facts()["probe_error"]
 
 
+def test_powershell_scripts_are_passed_encoded_so_no_line_is_lost(monkeypatch):
+    """A multi-line script given with -Command through the Windows command line can arrive cut at
+    its first line break and run as nothing (exit 1, no output): the facts probe failed that way on
+    every Windows runner. -EncodedCommand carries the whole script exactly."""
+    import base64
+    from brain.local.system import WINDOWS_FACTS, System
+    seen = []
+    system = System()
+    monkeypatch.setattr(system, "which", lambda name: "powershell.exe" if name == "powershell" else None)
+    monkeypatch.setattr(system, "run", lambda arguments, timeout=60: seen.append(arguments) or (0, "{}"))
+    system.powershell(WINDOWS_FACTS)
+    arguments = seen[0]
+    assert "-Command" not in arguments and arguments[-2] == "-EncodedCommand"
+    assert base64.b64decode(arguments[-1]).decode("utf-16-le") == WINDOWS_FACTS
+
+
 @pytest.mark.skipif(not os.environ.get("CODINGBRAIN_TEST_WINGET"), reason="set CODINGBRAIN_TEST_WINGET=1 (Windows with winget)")
 def test_real_winget_package_ids_exist():
     """Every winget package the installer names is in the official winget source (real query)."""
