@@ -86,6 +86,37 @@ def test_symlink_is_never_followed(client, sandbox, tmp_path):
     assert not any(x["name"] == "link.txt" for x in api.get("/api/tree", headers=headers(w)).json()["entries"])
 
 
+def test_legacy_engine_refuses_new_project_before_creating_a_task(client, monkeypatch):
+    """Regression: v0.9.0 has no brain.local.create and must not raise a traceback."""
+    api, workspace = client
+    monkeypatch.setattr(workspace, "engine_status", lambda: {
+        "engine": {"available": True, "version": "0.9.0", "new_project": False}
+    })
+    request = "CHECK IS ANY PROJECT EXIST"
+    response = api.post("/api/start", headers=headers(workspace),
+                        json={"mode": "new", "message": request})
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "v0.9.0" in detail
+    assert "No task started" in detail
+    assert "Browse folder" in detail
+    assert "ModuleNotFoundError" not in detail
+    assert workspace.jobs == {}
+    assert workspace.active is None
+
+
+def test_new_project_cannot_run_without_an_installed_engine(client, monkeypatch):
+    api, workspace = client
+    monkeypatch.setattr(workspace, "engine_status", lambda: {
+        "engine": {"available": False, "version": None, "new_project": False}
+    })
+    response = api.post("/api/start", headers=headers(workspace),
+                        json={"mode": "new", "message": "Create a task app"})
+    assert response.status_code == 409
+    assert "No task started" in response.json()["detail"]
+    assert not workspace.jobs
+
+
 def test_run_is_explicit_and_cannot_run_outside_git(client):
     api, w = client
     result = api.post("/api/start", headers=headers(w), json={"mode":"run","message":"create tests"})
