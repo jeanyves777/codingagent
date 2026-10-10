@@ -100,7 +100,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Engine dependency installation failed' }
           python -m pip install --disable-pip-version-check 'pytest>=8,<10' 'pytest-asyncio>=0.24,<2' 'pywebview>=5,<7' 'pyinstaller>=6,<7'
           if ($LASTEXITCODE -ne 0) { throw 'Desktop build dependency installation failed' }
-          python -m pytest -q -p no:cacheprovider tests/test_unified_windows_update.py tests/test_desktop_ui.py tests/test_desktop_native.py tests/test_desktop_management.py tests/test_desktop_engine_status.py
+          python -m pytest -q -p no:cacheprovider tests/test_unified_windows_update.py tests/test_desktop_git_live.py tests/test_desktop_ui.py tests/test_desktop_native.py tests/test_desktop_management.py tests/test_desktop_engine_status.py
           if ($LASTEXITCODE -ne 0) { throw 'Desktop compatibility tests failed' }
           # The binary carries the exact version of the engine release used to build it.
           $env:CODINGBRAIN_DESKTOP_VERSION = $env:VERSION
