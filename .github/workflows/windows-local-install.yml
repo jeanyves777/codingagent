@@ -115,9 +115,40 @@ jobs:
             engines-test.log
             ollama.log
 
+  sandbox:
+    # Windows runners cannot run Linux containers: the real Docker sandbox is exercised here, with a
+    # project placed directly in a home folder that also holds Coding Brain's data.
+    name: real Docker sandbox (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the sandbox images
+        run: |
+          # Base images from Docker Hub's Google mirror, with retries: Docker Hub's token service
+          # intermittently times out on hosted runners.
+          for base in $(grep -h '^FROM' brain/local/assets/Dockerfile.sandbox brain/local/assets/Dockerfile.sandbox.node | awk '{print $2}' | sort -u); do
+            for attempt in 1 2 3 4; do
+              if docker pull "mirror.gcr.io/library/$base" && docker tag "mirror.gcr.io/library/$base" "$base"; then break; fi
+              if docker pull "$base"; then break; fi
+              [ "$attempt" = 4 ] && exit 1
+              sleep $((2 ** attempt))
+            done
+          done
+          docker build --pull=false -t coding-brain-sandbox:0.1 -f brain/local/assets/Dockerfile.sandbox brain/local/assets
+          docker build --pull=false -t coding-brain-node-sandbox:0.1 -f brain/local/assets/Dockerfile.sandbox.node brain/local/assets
+      - name: Local installation tests with the real sandbox
+        env:
+          CODINGBRAIN_TEST_DOCKER: "1"
+        run: |
+          python -m pip install --disable-pip-version-check -e ".[dev]"
+          python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_brain.py
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [verify, engines]
+    needs: [verify, engines, sandbox]
     runs-on: windows-latest
     permissions:
       contents: write
