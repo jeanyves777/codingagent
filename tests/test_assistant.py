@@ -108,7 +108,7 @@ def test_what_projects_reads_the_registry_without_a_task(world):
     bot = assistant(world)
     bot.handle("What projects am I working on?")
     text = text_of(bot)
-    assert "calculator" in text and "recipes" in text and "Projects on this computer (2)" in text
+    assert "calculator" in text and "recipes" in text and "Projects registered with Coding Brain (2)" in text
     assert no_tasks_anywhere(world)
 
 

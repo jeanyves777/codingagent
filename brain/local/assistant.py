@@ -358,9 +358,10 @@ class Assistant:
     def render_projects(self) -> str:
         items = [item for item in self.projects()]
         if not items:
-            return ("No projects yet. Open a project folder and run `codingbrain`, or ask me to create one "
-                    "(\"create a task manager app\").")
-        lines = [f"Projects on this computer ({len(items)}):"]
+            return ("No projects yet registered with Coding Brain. Your folders are never scanned, so projects "
+                    "you have not opened with it are not listed: open a project folder and run `codingbrain`, "
+                    "or ask me to create one (\"create a task manager app\").")
+        lines = [f"Projects registered with Coding Brain ({len(items)}):"]
         for number, item in enumerate(items, 1):
             when = time.strftime("%Y-%m-%d", time.localtime(item["last_opened"])) if item["last_opened"] else "?"
             tasks = ", ".join(f"{count} {status}" for status, count in sorted(item["tasks"].items())) or "no tasks"
