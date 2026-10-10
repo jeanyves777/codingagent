@@ -23,7 +23,8 @@ class OpenAICompatibleModel:
         if tools:
             body["tools"] = tools
         headers = {"Authorization": "Bearer " + self.api_key} if self.api_key else {}
-        response = await client.post(self.url + "/chat/completions", json=body, headers=headers)
+        async with accounting.request(role, "openai", self.name):
+            response = await client.post(self.url + "/chat/completions", json=body, headers=headers)
         response.raise_for_status()
         payload = response.json()
         usage = payload.get("usage") or {}

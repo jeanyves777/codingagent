@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.12.0
+
+Live activity, execution traces and snapshots (see docs/live-activity.md).
+
+- **Security (from review):** snapshots store a changed file's content only if it is a regular file
+  inside the task workspace, reached without any symbolic link or Windows junction (reparse point,
+  checked before reading, including on Python 3.11), with no secret-like name or content. Excluded
+  files are listed with the reason and never stored; a restore leaves them at their baseline. The
+  diff is built from stored files only and redacted, artifacts must be images, and `--sensitive`
+  tasks keep paths only.
+- **Journal:** an append-only event journal in telemetry. Events are persisted as they happen,
+  ordered, deduplicated for replayed milestones and redacted. Each event records the task and
+  parent task, the agent, provider and model, the stage, a state (RUNNING, COMPLETED, FAILED,
+  BLOCKED, RETRYING, WAITING_APPROVAL, CANCELLED), the duration, a summary and artifacts.
+- **Instrumentation:** the existing service stages, from goal to acceptance and Git integration,
+  report through the journal. Model calls report start, heartbeat and response for every
+  provider, including the premium CLIs and vision models, with token counts where the provider
+  gives them. The journal also records tool calls, routes, fallbacks, supervisor selection with
+  remaining budgets, model-provided explanations and observed decisions.
+- **Terminal:** `codingbrain run` shows live activity by default, with `--verbose`, `--quiet`,
+  `--plain` and `--json`, and works on Windows PowerShell code pages and without a terminal.
+  New commands: `activity`, `watch`, `trace`, `snapshots`, and
+  `snapshot show|diff|restore|purge`.
+- **Snapshots:** content-addressed and taken at each boundary. They include visual evidence
+  from the multimodal verifier. Restoring always creates a new branch, after asking.
+- **Includes the 0.9.1 fixes:** projects in the home folder, and read-only status commands.
+
 ## 0.11.0
 
 Images, screenshots and documents, plus a visual development loop (see docs/multimodal.md).

@@ -31,12 +31,13 @@ class OrchestrationMixin:
         if group.get("attachments"):
             from .attachments import brief
             goal += "\n\n" + brief(group["attachments"])
-        if self.supervision and self.supervision.plan_orchestrations:
-            consultation = await self._consult(group, "decompose", {"goal": goal})
-            graph = consultation["result"] if consultation else None
-        if graph is None:
-            with accounting.collect(entries):
-                graph = await self.coordinator.decompose(goal)
+        with self.stage(group, "decomposition", agent="coordinator", summary="Splitting the goal into assignments"):
+            if self.supervision and self.supervision.plan_orchestrations:
+                consultation = await self._consult(group, "decompose", {"goal": goal})
+                graph = consultation["result"] if consultation else None
+            if graph is None:
+                with accounting.collect(entries):
+                    graph = await self.coordinator.decompose(goal)
         delegation = Delegation.model_validate(graph)
         validate_graph(delegation)
         group = self.store.get(group_id)

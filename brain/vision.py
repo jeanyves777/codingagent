@@ -222,7 +222,9 @@ class VisionProvider:
         for attempt in (1, 2):
             started = time.monotonic()
             try:
-                raw, usage = await self._infer(prompt, images, schema)
+                async with accounting.request(role, self.provider, self.model,
+                                              f"{role} on {len(images)} image(s), attempt {attempt}"):
+                    raw, usage = await self._infer(prompt, images, schema)
                 error = None
             except ValueError as invalid:  # no JSON object at all
                 raw, usage, error = None, {}, VisionOutputInvalid(f"vision reply was not JSON: {str(invalid)[:120]}")
