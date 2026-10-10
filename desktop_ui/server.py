@@ -239,7 +239,8 @@ class Workspace:
             cli = self.cli_command()
         except ValueError:
             cli = None
-        report = management.installation_probes(cli)
+        status = self.engine_status(refresh=True)  # recheck: a CLI or sign-in may have changed
+        report = management.installation_probes(cli, status.get("providers"))
         if cli:
             # A side-effect-free feature check: old v0.9.0 has no install command.
             found = management.safe_probe([*cli, "install", "--help"], timeout=6)

@@ -62,25 +62,71 @@ IS_WINDOWS = os.name == "nt"
 
 
 def installed_cli(name: str) -> str | None:
-    """Find official CLI launchers even when Windows Desktop inherited a stale PATH.
+    return locate_cli(name)[0]
 
-    npm installs Codex / Claude shims in the user's roaming npm directory; the
-    process may have been started before npm added that folder to PATH. Only
-    inspect fixed per-user launcher locations. Never run a provider to discover it.
-    """
+
+def _registry_path_dirs() -> list[str]:
+    """The user and machine PATH saved in the registry: a CLI installed after this desktop started
+    is on it even though this process's inherited PATH is stale (no reboot needed)."""
+    try:
+        import winreg
+    except ImportError:  # not Windows (or a simulated Windows in tests)
+        return []
+    directories = []
+    for root, key in ((winreg.HKEY_CURRENT_USER, "Environment"),
+                      (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")):
+        try:
+            with winreg.OpenKey(root, key) as handle:
+                directories += [os.path.expandvars(part) for part in winreg.QueryValueEx(handle, "Path")[0].split(";")
+                                if part.strip()]
+        except OSError:
+            pass
+    return directories
+
+
+def _npm_prefixes() -> list[str]:
+    """npm's global bin folders from configuration files only; npm itself is never run."""
+    prefixes = []
+    if os.environ.get("NPM_CONFIG_PREFIX"):
+        prefixes.append(os.environ["NPM_CONFIG_PREFIX"])
+    rcs = [Path(os.environ.get("USERPROFILE") or Path.home()) / ".npmrc"]
+    if os.environ.get("APPDATA"):
+        rcs.append(Path(os.environ["APPDATA"]) / "npm" / "etc" / "npmrc")
+    for rc in rcs:
+        try:
+            for line in rc.read_text(encoding="utf-8", errors="replace").splitlines()[:200]:
+                key, _, value = line.partition("=")
+                if key.strip().lower() == "prefix" and value.strip():
+                    prefixes.append(os.path.expandvars(value.strip().strip('"')))
+        except OSError:
+            continue
+    if os.environ.get("APPDATA"):
+        prefixes.append(str(Path(os.environ["APPDATA"]) / "npm"))
+    return list(dict.fromkeys(prefixes))
+
+
+def locate_cli(name: str) -> tuple[str | None, list[str]]:
+    """Fallback for engines without the typed API (with API 1.0, providers.list from the installed
+    engine is authoritative). Same order as the engine: this PATH, the registry PATH, npm's
+    configured prefix, official launcher folders. Nothing is executed to find a CLI, and finding
+    one never means signed in or connected. Returns the path and every location checked."""
     found = shutil.which(name)
-    if found:
-        return found
-    if not IS_WINDOWS or name not in {"claude", "codex", "gemini"}:
-        return None
-    roaming = os.environ.get("APPDATA")
+    if found or not IS_WINDOWS:
+        return found, ([] if found else ["PATH"])
+    checked = ["PATH"]
+    folders = [*_registry_path_dirs(), *(_npm_prefixes() if name in {"claude", "codex", "gemini"} else [])]
     local = os.environ.get("LOCALAPPDATA")
-    candidates = []
-    if roaming:
-        candidates.extend((Path(roaming) / "npm" / (name + suffix) for suffix in (".cmd", ".exe")))
     if local:
-        candidates.append(Path(local) / "Microsoft" / "WinGet" / "Links" / (name + ".exe"))
-    return next((str(candidate) for candidate in candidates if candidate.is_file()), None)
+        folders.append(str(Path(local) / "Microsoft" / "WinGet" / "Links"))
+    if name in {"claude", "codex"}:
+        folders.append(str(Path(os.environ.get("USERPROFILE") or Path.home()) / ".local" / "bin"))
+    for folder in dict.fromkeys(folders):
+        for suffix in (".exe", ".cmd"):
+            candidate = Path(folder) / (name + suffix)
+            checked.append(str(candidate))
+            if candidate.is_file():
+                return str(candidate), checked
+    return None, checked
 
 
 def is_key_set(name: str) -> bool:
@@ -201,16 +247,30 @@ def configured_model(config_path: Path) -> dict:
     except (OSError, ValueError, TypeError, AttributeError):
         return {"provider": "unknown", "model": ""}
 
-def installation_probes(cli_command: list[str] | None = None) -> dict:
-    """Cheap preflight: installation presence, not fake deep readiness."""
+def installation_probes(cli_command: list[str] | None = None, engine_providers: list[dict] | None = None) -> dict:
+    """Cheap preflight: installation presence, not fake deep readiness. For Claude and Codex the
+    installed engine's providers.list (API 1.0) wins over this desktop's own lookup."""
     required = ("git", "python", "docker", "ollama", "claude", "codex")
+    engine_view = {item.get("id"): item for item in engine_providers or []}
     components = []
     for name in required:
-        binary = installed_cli(name)
-        if name == "python" and not binary:
-            binary = installed_cli("python3") or sys.executable
-        components.append({"id":name, "name":name.title(), "installed":bool(binary),
-                           "detail":"Found on this computer" if binary else "Missing from PATH"})
+        described = engine_view.get(name) if name in {"claude", "codex"} else None
+        if described is not None:
+            path, checked = described.get("cli_path"), described.get("checked") or []
+            installed, source = bool(described.get("installed")), "engine"
+        else:
+            path, checked = locate_cli(name)
+            if name == "python" and not path:
+                path = installed_cli("python3") or sys.executable
+            installed, source = bool(path), "desktop"
+        if installed:
+            detail = f"Found at {path}" if path else "Found by the installed engine"
+        else:
+            places = [item for item in checked if item != "PATH"]
+            detail = ("Not found on PATH" + (f" or in {len(places)} other locations checked" if places else "")
+                      + ". Installed it recently? Use Recheck; restart the desktop only if it is still missing.")
+        components.append({"id": name, "name": name.title(), "installed": installed, "detail": detail,
+                           "path": path, "checked": checked[:40], "source": source})
     engine = bool(cli_command)
     return {"engine_installed":engine,"components":components,
             "full_installer_available":False,
