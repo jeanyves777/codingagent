@@ -69,6 +69,29 @@ and before acceptance. Each snapshot records:
 Snapshots are stored under the project's data folder, never in the project. Identical content is
 stored once.
 
+### What a snapshot stores, and what it never stores
+
+A changed file's content is stored only if all of these hold:
+
+- it is a regular file inside the task workspace;
+- no folder on its path, and not the file itself, is a symbolic link, junction or other reparse
+  point (checked on every Windows Python, including 3.11);
+- its name does not look like a secret or credential (`.env`, keys, `credentials.json` and similar);
+- its text holds no credential: no known key format (API keys, access tokens, private keys, JWTs),
+  no password, token, secret or API key assigned a quoted literal, and in configuration files
+  (`.yaml`, `.toml`, `.ini`, `.json`, `.env` and similar) none assigned any value. Ordinary code such
+  as `token = request.headers.get(...)` is stored.
+
+The checks run before the file is opened or hashed, and the opened file must be the one that was
+checked. Anything else is listed in the snapshot's manifest with the reason it was excluded, and
+its content is never stored. A restore leaves such a file at its baseline version and says so; it
+never writes a redacted copy in its place.
+
+The diff is built only from stored files, and it is redacted. Screenshots and other artifacts are
+stored only if they are image files. They show the app preview as rendered, so anything visible on
+that page is in the image. For a task run with `--sensitive`, a snapshot keeps only the changed
+paths: no file content, no diff and no screenshots.
+
 ## Where the data lives
 
 | Data | Location |
@@ -76,8 +99,9 @@ stored once.
 | Journal | `data\projects\<project>\telemetry.sqlite3` |
 | Snapshots | `data\projects\<project>\snapshots\` |
 
-Secrets are redacted before anything is written. Both keep growing until you purge them with
-`snapshot purge`.
+Journal entries and snapshot metadata are redacted before they are written, and snapshot file
+content follows the rules above. Both keep growing until you purge them with `snapshot purge`,
+which also deletes every stored object that no remaining snapshot references.
 
 ## Heartbeats
 
