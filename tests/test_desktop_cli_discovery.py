@@ -72,3 +72,12 @@ def test_e_the_installed_engine_wins_over_the_desktop_lookup(windows):
     assert codex["installed"] is False and codex["source"] == "engine"
     assert claude["installed"] and claude["path"].endswith("claude.exe") and claude["source"] == "engine"
     assert windows["ran"] == []  # detection never runs a CLI, signs in or spends premium budget
+
+
+def test_standalone_codex_for_windows_without_npm(windows, monkeypatch):
+    """The owner's PC: %LOCALAPPDATA%\\Programs\\OpenAI\\Codex\\bin\\codex.exe, npm not installed."""
+    import os
+    from pathlib import Path
+    expected = place(Path(os.environ["LOCALAPPDATA"]) / "Programs" / "OpenAI" / "Codex" / "bin", "codex.exe")
+    row = codex_row(management.installation_probes(None))
+    assert row["installed"] and row["path"] == expected

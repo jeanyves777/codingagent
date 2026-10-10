@@ -117,6 +117,8 @@ def locate_cli(name: str) -> tuple[str | None, list[str]]:
     folders = [*_registry_path_dirs(), *(_npm_prefixes() if name in {"claude", "codex", "gemini"} else [])]
     local = os.environ.get("LOCALAPPDATA")
     if local:
+        if name == "codex":  # the standalone Codex for Windows
+            folders.append(str(Path(local) / "Programs" / "OpenAI" / "Codex" / "bin"))
         folders.append(str(Path(local) / "Microsoft" / "WinGet" / "Links"))
     if name in {"claude", "codex"}:
         folders.append(str(Path(os.environ.get("USERPROFILE") or Path.home()) / ".local" / "bin"))
