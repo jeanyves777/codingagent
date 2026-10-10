@@ -146,3 +146,52 @@ def test_provider_cards_reflect_actual_core_enabled_state(tmp_path, monkeypatch)
     assert flags['claude'] is True
     assert flags['codex'] is False
     assert flags['grok'] is None
+
+
+def test_doctor_option_detection_is_help_only_and_no_secret_output(monkeypatch):
+    seen = []
+
+    class FakeResult:
+        returncode = 0
+        stdout = 'usage: codingbrain doctor [-h] [--full] [--json]'
+
+    def fake_run(args, **kwargs):
+        seen.append((args, kwargs))
+        return FakeResult()
+
+    monkeypatch.setattr(management.subprocess, 'run', fake_run)
+    assert management.supports_cli_option(['codingbrain'], 'doctor', '--full')
+    assert seen[0][0] == ['codingbrain', 'doctor', '--help']
+    assert seen[0][1]['stdin'] is subprocess.DEVNULL
+    assert management.maintenance_args('doctor', ['codingbrain'], deep_doctor=False) == ['codingbrain', 'doctor']
+    assert management.maintenance_args('doctor', ['codingbrain'], deep_doctor=True) == ['codingbrain', 'doctor', '--full']
+    with pytest.raises(ValueError):
+        management.supports_cli_option(['codingbrain'], 'install', '--yes')
+
+
+def test_legacy_doctor_uses_basic_only_and_labels_capabilities(tmp_path, monkeypatch):
+    c, w = session(tmp_path)
+    probes=[]
+    monkeypatch.setattr(management, 'safe_probe', lambda args, timeout=6: True)
+    monkeypatch.setattr(management, 'supports_cli_option', lambda cli, op, flag: (probes.append((cli, op, flag)), False)[1])
+    r = c.get('/api/setup', headers=token(w)).json()['readiness']
+    assert r['full_installer_available'] is True
+    assert r['deep_doctor_available'] is False
+    assert 'Basic check' in r['doctor_note']
+    runs=[]
+    monkeypatch.setattr(w, '_execute', lambda job: runs.append(job.command))
+    action = c.post('/api/system/action?action=doctor', headers=token(w), json={'confirmed':True})
+    assert action.status_code == 200
+    assert action.json()['diagnostic_level'] == 'basic'
+    assert w.jobs[action.json()['job']['id']].command == ['codingbrain', 'doctor']
+    assert all(flag == '--full' and op == 'doctor' for _,op,flag in probes)
+
+
+def test_current_doctor_uses_deep_when_supported(tmp_path, monkeypatch):
+    c, w = session(tmp_path)
+    monkeypatch.setattr(management, 'supports_cli_option', lambda *args: True)
+    monkeypatch.setattr(w, '_execute', lambda job: None)
+    r = c.post('/api/system/action?action=doctor', headers=token(w), json={'confirmed':True})
+    assert r.status_code == 200
+    assert r.json()['diagnostic_level'] == 'deep'
+    assert w.jobs[r.json()['job']['id']].command == ['codingbrain', 'doctor', '--full']

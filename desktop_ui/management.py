@@ -126,6 +126,22 @@ def installation_probes(cli_command: list[str] | None = None) -> dict:
             "full_installer_note":"Full installer is part of the pending Coding Brain backend release."}
 
 
+def supports_cli_option(cli_command: list[str], command: str, option: str) -> bool:
+    """Inspect help only; never invoke a potentially expensive flag as a capability probe.
+
+    Stable v0.9.0 has `doctor` but no `doctor --full`. The UI must not claim
+    deep verification on that release or run an unsupported command.
+    """
+    if command != "doctor" or option != "--full":
+        raise ValueError("Unsupported capability probe")
+    try:
+        result = subprocess.run([*cli_command, command, "--help"], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, errors="replace", timeout=8, check=False)
+        return result.returncode == 0 and "--full" in result.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 ALLOWED_ACTIONS = {
     "check_updates": ("update", "--check"),
     "update_engine": ("update",),
@@ -136,10 +152,12 @@ ALLOWED_ACTIONS = {
 }
 
 
-def maintenance_args(action: str, cli_command: list[str]) -> list[str]:
+def maintenance_args(action: str, cli_command: list[str], *, deep_doctor: bool = True) -> list[str]:
     """Allowlist prevents arbitrary shell invocation through HTTP input."""
     if action not in ALLOWED_ACTIONS:
         raise ValueError("Unsupported system action")
+    if action == "doctor" and not deep_doctor:
+        return [*cli_command, "doctor"]  # honest basic check on v0.9.0
     return [*cli_command, *ALLOWED_ACTIONS[action]]
 
 

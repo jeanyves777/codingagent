@@ -79,7 +79,7 @@ The Windows CI validates the actual installer by installing it into a temporary 
 
 ## First-run setup and provider control center (next desktop build)
 
-The desktop first-run experience is now a guided **Control Center** with three tabs: **Setup**, **AI Providers**, and **Updates**. It does not assume that software found on PATH is proven operational. Basic preflight marks only detection; the **Deep system test** explicitly delegates real readiness checks to `codingbrain doctor --full`.
+The desktop first-run experience is now a guided **Control Center** with three tabs: **Setup**, **AI Providers**, and **Updates**. It does not assume that software found on PATH is proven operational. Basic preflight marks only detection. The diagnostic button detects what the installed CLI actually supports: newer backends run **Deep system test** (`codingbrain doctor --full`), while stable v0.9.0 uses a clearly labeled **Basic system check** (`codingbrain doctor`), never an unsupported flag.
 
 The **Install & verify full system** button delegates to Coding Brain's official guided `codingbrain install --profile full`, including Docker, WSL, Ollama, its model, optional Claude/Codex CLIs, and other supported dependencies. It is only enabled if the installed backend exposes that command (introduced in the pending installer PR #8). Installation runs in a **visible Windows console**, with the backend installer retaining full vendor-license consent, elevation, restart/resume checks, and authentication interaction. There is **no silent `--yes`**, remote-script execution, or independent installation framework in the UI.
 
@@ -144,3 +144,11 @@ The setup window, provider actions, updater, and chat composer expose async stat
 - Failures: connectivity errors expose an error state; after three polling failures the UI warns the operation might still be active rather than claiming cancellation. No automatic retry initiates a second installer or coding task.
 
 Regressions: `python tests/smoke_loading_browser.py` simulates deliberately unresolved API requests in Chromium and verifies live loading, resolution, failure, retry, duplicate-submit prevention, and zero JavaScript exceptions. It runs alongside `tests/smoke_browser.py` in `.github/workflows/desktop-windows.yml`.
+
+## Desktop-native approvals and legacy diagnostic support
+
+The Control Center and task stop/AI-provider controls never use browser-origin `window.confirm`, `window.alert` or `window.prompt`. They display a Coding Brain `<dialog>` with explicit action and Cancel buttons. Default keyboard focus is Cancel. Escape, dismissing the backdrop, and Cancel all decline; no protected endpoint is called unless the user affirmatively selects the action. The backend still requires explicit `{confirmed:true}` for system changes and provider sign-in. This is a user-interface improvement, **not** a bypass of the engine's existing digest-bound plan approvals.
+
+Older Coding Brain installations lack `doctor --full`; desktop probes `codingbrain doctor --help` without running a real test to detect whether the option is supported. On older versions, the UI labels the command **Basic system check** and submits only `codingbrain doctor`, reporting it as a basic check even if it passes. Full model and sandbox readiness remain unverified pending a backend upgrade. On newer installations the deep command is used. The backend itself performs the option check, so calling the local UI API directly cannot force an unsupported `--full` flag.
+
+Regression evidence: `python tests/smoke_confirm_browser.py` rejects all native browser dialogs and exercises explicit confirmation, Escape/Cancel refusal, provider sign-in, and legacy doctor labeling. `tests/test_desktop_management.py` tests both capability branches, option probing through `--help`, and allowlisted maintenance commands.

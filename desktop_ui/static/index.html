@@ -114,6 +114,20 @@
       <section id="control-updates" class="control-page" hidden><div class="setup-hero"><div class="setup-emblem">↻</div><div><h3>Stay up to date</h3><p>Updates are pulled from Coding Brain's verified stable release channel. Draft PRs are not installed.</p></div></div><div class="control-actions"><button class="primary-button" id="check-updates" type="button">Check for updates</button><button class="secondary-button" id="apply-update" type="button">Install latest stable</button><button class="secondary-button" id="repair-install" type="button">Repair installation</button></div><div id="maintenance-log" class="maintenance-log" role="log" aria-live="polite">No update check has run yet.</div></section>
     </div>
   </dialog>
+  <!-- A native HTML dialog styled as part of Coding Brain; not a window.alert/confirm.
+       A click on Continue is the *only* affirmative result. Cancel and Escape refuse. -->
+  <dialog id="action-dialog" class="action-dialog" aria-labelledby="action-heading" aria-describedby="action-description">
+    <form method="dialog" class="action-card">
+      <div class="action-symbol" aria-hidden="true">◇</div>
+      <span class="eyebrow">CODING BRAIN · CONFIRM ACTION</span>
+      <h2 id="action-heading">Confirm action</h2>
+      <p id="action-description">Confirm what Coding Brain should do.</p>
+      <div class="action-controls">
+        <button id="action-cancel" class="secondary-button" type="submit" value="cancel">Cancel</button>
+        <button id="action-approve" class="primary-button" type="submit" value="proceed">Continue</button>
+      </div>
+    </form>
+  </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
 </body>
 </html>

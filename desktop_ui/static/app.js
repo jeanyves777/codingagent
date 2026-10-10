@@ -108,6 +108,32 @@
     return result;
   }
 
+  // Every privileged action uses a Coding Brain dialog, never a browser-native
+  // confirm/alert/prompt. Dismissal, Escape and the default button all mean NO.
+  function confirmAction(title, detail, confirmLabel = 'Continue', destructive = false) {
+    const dialog = $('action-dialog');
+    if (dialog.open) return Promise.resolve(false);
+    $('action-heading').textContent = title;
+    $('action-description').textContent = detail;
+    $('action-approve').textContent = confirmLabel;
+    $('action-approve').classList.toggle('destructive', destructive);
+    dialog.returnValue = 'cancel';
+    return new Promise(resolve => {
+      const onClose = () => {
+        dialog.removeEventListener('close', onClose);
+        resolve(dialog.returnValue === 'proceed');
+      };
+      dialog.addEventListener('close', onClose);
+      dialog.showModal();
+      $('action-cancel').focus();
+    });
+  }
+
+  $('action-dialog').addEventListener('click', event => {
+    // Click outside the card closes the dialog without authorizing anything.
+    if (event.target === $('action-dialog')) $('action-dialog').close('cancel');
+  });
+
   function toast(message) {
     $('toast').textContent = message;
     $('toast').hidden = false;
@@ -503,7 +529,7 @@
   $('refresh').addEventListener('click', refresh);
   $('preview-close').addEventListener('click', () => $('preview').hidden = true);
   $('stop-task').addEventListener('click', async () => {
-    if (!activeJob || !confirm('Stop the active Coding Brain session?')) return;
+    if (!activeJob || !await confirmAction('Stop the active task?', 'Coding Brain will request cancellation at a safe boundary. Unsaved task progress may be interrupted.', 'Stop task', true)) return;
     try { await api(`/api/jobs/${activeJob}/stop`, 'POST'); await poll(); }
     catch(e) { toast(e.message); }
   });
@@ -588,6 +614,9 @@
     $('setup-message').textContent = `${installed} of ${all} key tools were detected. ` + readiness.full_installer_note;
     $('full-setup').disabled = !readiness.full_installer_available;
     $('full-setup').title = readiness.full_installer_available ? 'Run official guided full installation' : readiness.full_installer_note;
+    const deep = readiness.deep_doctor_available !== false;
+    $('deep-check').textContent = deep ? 'Deep system test' : 'Basic system check';
+    $('deep-check').title = deep ? 'Verify the configured model and Docker sandbox' : 'The installed backend supports basic health checks only. Update Coding Brain for deep verification.';
     $('setup-components').setAttribute('aria-busy', 'false');
     $('setup-components').replaceChildren();
     for (const entry of readiness.components) {
@@ -627,7 +656,7 @@
       if (provider.sign_in_available) {
         const sign = document.createElement('button'); sign.textContent = 'Sign in / reconnect';
         sign.addEventListener('click', async () => {
-          if (!confirm(`Open the official ${provider.name} CLI sign-in?`)) return;
+          if (!await confirmAction(`Connect ${provider.name}`, 'Launch the official provider sign-in flow in a separate console. Coding Brain does not collect your password or session credentials.', 'Open sign-in')) return;
           busyButton(sign, true);
           feedback('busy', `Opening ${provider.name} sign-in`, 'Launching the official provider CLI. Account sign-in takes place outside Coding Brain.');
           try {
@@ -642,7 +671,7 @@
         const toggle = document.createElement('button'); toggle.textContent = provider.supervisor_enabled ? 'Disable supervisor' : 'Enable supervisor';
         toggle.addEventListener('click', async () => {
           const enabling = !provider.supervisor_enabled;
-          if (!confirm(`${enabling ? 'Enable' : 'Disable'} ${provider.name} as a governed Coding Brain supervisor? Existing budget limits remain in effect.`)) return;
+          if (!await confirmAction(`${enabling ? 'Enable' : 'Disable'} ${provider.name}`, `Change ${provider.name} supervisor routing? Existing budget limits and approvals remain in effect.`, enabling ? 'Enable supervisor' : 'Disable supervisor', !enabling)) return;
           busyButton(toggle, true);
           feedback('busy', `Saving ${provider.name} routing`, 'Applying the supervisor setting through the existing Coding Brain backend.');
           try {
@@ -708,9 +737,14 @@
       doctor:'Run deep checks of your local model, Docker sandbox and providers? This can take a minute.'
     };
     if (activeMaintenance) { toast('A setup or update operation is already running.'); return; }
-    if (!confirm(explanations[action] || 'Continue?')) return;
+    const legacyDoctor = action === 'doctor' && setupCache?.readiness?.deep_doctor_available === false;
+    if (!await confirmAction(
+      legacyDoctor ? 'Run basic health check?' : (maintenanceNames[action] || 'System operation') + '?',
+      legacyDoctor ? 'Your installed Coding Brain does not support doctor --full. A basic health check will run instead; upgrade the backend for deep model and sandbox tests.' : (explanations[action] || 'Continue?'),
+      action === 'check_updates' ? 'Check updates' : action === 'doctor' ? 'Run check' : 'Continue',
+      false)) return;
     activeMaintenance = action;
-    const name = maintenanceNames[action] || 'System operation';
+    let name = legacyDoctor ? 'Basic system check' : (maintenanceNames[action] || 'System operation');
     const button = $(maintenanceButtons[action]);
     busyButton(button, true);
     feedback('busy', `${name} starting`, 'Waiting for the official Coding Brain backend.');
@@ -718,6 +752,11 @@
     if (action === 'doctor' || action === 'check_updates') $('maintenance-log').textContent = 'Connecting to Coding Brain…';
     try {
       const data = await api(`/api/system/action?action=${encodeURIComponent(action)}`,'POST',{confirmed:true});
+      // The backend decides the actual supported diagnostic level, not an optimistic UI assumption.
+      if (action === 'doctor' && data.diagnostic_level === 'basic') {
+        name = 'Basic system check';
+        feedback('busy', `${name} running`, 'Your installed engine lacks deep verification. Checking the basic health indicators that it supports.');
+      }
       if (data.opened_terminal) {
         $('maintenance-log').textContent = data.message || `${name} opened in a separate terminal.`;
         feedback('info', `${name} launched`, 'Continue in the official terminal. Completion cannot be verified from this window; refresh checks after it finishes.');
@@ -755,7 +794,7 @@
             stopPolling();
             if (status === 'completed') {
               if (action === 'doctor' || action === 'check_updates') await reloadControl();
-              feedback('success', `${name} completed`, 'The backend operation finished. Review its output below.');
+              feedback('success', `${name} completed`, action === 'doctor' && data.diagnostic_level === 'basic' ? 'Basic checks finished. Deep model and Docker verification requires a newer Coding Brain backend. Review the output below.' : 'The backend operation finished. Review its output below.');
             } else {
               feedback('error', `${name} ${status}`, update.job.error || 'See the operation output below. You can retry.');
             }

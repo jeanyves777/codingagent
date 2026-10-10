@@ -25,7 +25,8 @@ with sync_playwright() as p:
     page = browser.new_page(viewport={'width': 1504, 'height': 1002})
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
-    page.on('dialog', lambda dialog: dialog.accept())
+    # Browser-origin alerts/confirmations are banned: all consent lives in the app.
+    page.on('dialog', lambda dialog: (_ for _ in ()).throw(AssertionError('Native browser dialog opened: ' + dialog.message)))
     page.set_content(html)
     page.evaluate('''() => {
       location.hash = 'token=loading-browser-smoke';
@@ -90,6 +91,9 @@ with sync_playwright() as p:
     # A real backend job remains pending: control center shows an in-progress button/status.
     page.locator('#control-tab-updates').click()
     page.locator('#check-updates').click()
+    assert page.locator('#action-dialog').is_visible()
+    assert page.evaluate('window.__demo.actions') == 0, 'No action before explicit consent'
+    page.locator('#action-approve').click()
     page.locator('#control-feedback-title').get_by_text('Update check running').wait_for()
     assert page.locator('#check-updates.is-loading').is_disabled()
     assert page.locator('#control-feedback-elapsed').is_visible()
@@ -105,6 +109,7 @@ with sync_playwright() as p:
     # Retry succeeds based on actual backend status, no fake success on launch.
     page.evaluate('window.__demo.jobState="completed"')
     page.locator('#check-updates').click()
+    page.locator('#action-approve').click()
     page.locator('#control-feedback[data-state="success"]').wait_for(timeout=3500)
     assert page.locator('#check-updates').is_enabled()
     page.locator('#control-close').click()

@@ -156,6 +156,10 @@ class Workspace:
             report["full_installer_available"] = found is True
             report["full_installer_note"] = ("Install and repair through Coding Brain's own guided installer" if found is True
                     else "First publish/update to a Coding Brain release containing the full installer")
+        # Detect option support rather than inferring it from an installed CLI version.
+        report["deep_doctor_available"] = bool(cli and management.supports_cli_option(cli, "doctor", "--full"))
+        report["doctor_note"] = ("Deep engine verification available" if report["deep_doctor_available"]
+                                 else "Basic check available; full model/sandbox tests require a backend update")
         report["onboarding_completed"] = self.first_run_completed()
         return report
 
@@ -197,7 +201,9 @@ class Workspace:
             raise ValueError("Coding Brain rejected this supervisor setting")
 
     def maintenance(self, action: str) -> dict:
-        command = management.maintenance_args(action, self.cli_command())
+        cli = self.cli_command()
+        deep_doctor = management.supports_cli_option(cli, "doctor", "--full") if action == "doctor" else True
+        command = management.maintenance_args(action, cli, deep_doctor=deep_doctor)
         if action in {"install_full", "update_engine", "repair"}:
             # New console owns prompts, elevation and restarts. No silent consent.
             management.launch_interactive_windows(command)
@@ -209,7 +215,8 @@ class Workspace:
             self.jobs[job.id] = job
             self.active = job.id
         threading.Thread(target=self._execute, args=(job,), daemon=True).start()
-        return {"opened_terminal":False, "job":job.view()}
+        return {"opened_terminal":False, "job":job.view(),
+                "diagnostic_level": ("deep" if deep_doctor else "basic") if action == "doctor" else None}
 
 
     def cli_command(self) -> list[str]:
