@@ -20,6 +20,7 @@ runner, and web projects plain HTML/CSS/JS with node:test for their logic. A goa
 third-party packages ends with a precise blocker naming them; dependency acquisition needs your
 explicit network approval and is never granted quietly (docs/new-project.md).
 """
+import os
 import json
 import re
 import subprocess
@@ -261,8 +262,7 @@ def create_project(layout: Layout, goal: str, name: str | None = None, root: str
         _git("add", "-A", cwd=target)
         _git("commit", "-q", "-m", f"Scaffold for {stack} (codingbrain new)\n\nGoal: {goal}", cwd=target)
     except Exception:
-        import shutil
-        shutil.rmtree(target, ignore_errors=True)  # only the folder this command just created
+        remove_tree(target)  # only the folder this command just created
         if created_root:
             try:
                 folder_root.rmdir()
@@ -327,3 +327,21 @@ def report(record: dict, task: dict) -> str:
         else:
             lines.append(f"The project is ready; start building with `cd {record['path']}; codingbrain run \"...\"`.")
     return "\n".join(lines)
+
+
+def remove_tree(path: Path) -> None:
+    """shutil.rmtree that also removes read-only files: Git marks its object files read-only, and on
+    Windows rmtree cannot delete them, which left a half-created project behind."""
+    import shutil
+    import stat
+
+    def writable_then_retry(function, failed, _info):
+        try:
+            os.chmod(failed, stat.S_IWRITE)
+            function(failed)
+        except OSError:
+            pass
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=writable_then_retry)
+    else:
+        shutil.rmtree(path, onerror=writable_then_retry)

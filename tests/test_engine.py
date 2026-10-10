@@ -22,6 +22,19 @@ def git(path, *arguments):
 
 
 @pytest.fixture
+def tmp_path():
+    """A short temporary root. Git on Windows refuses a $GIT_DIR close to MAX_PATH (260), and
+    pytest's per-test folders under the runner's temp directory plus the engine's data layout reach
+    it (CI: '$GIT_DIR' too big). This is a documented limit for very deep folders on Windows
+    (docs/engine-api.md); these tests are about the API, not about path length."""
+    import shutil
+    import tempfile
+    root = Path(tempfile.mkdtemp(prefix="cbe-")).resolve()
+    yield root
+    shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.fixture
 def world(tmp_path, monkeypatch):
     import os
     environment = dict(os.environ)  # building a real service writes the project's settings here

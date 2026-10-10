@@ -45,6 +45,34 @@ $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 """
 
 
+def windows_native_facts() -> dict:
+    """Build, memory and administrator rights straight from Windows APIs: no PowerShell or WMI, so
+    they are known even where that probe is slow, blocked or broken."""
+    facts = {}
+    try:
+        facts["build"] = sys.getwindowsversion().build
+    except AttributeError:
+        return facts
+    import ctypes
+
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong),
+                    ("available", ctypes.c_ulonglong), ("page_total", ctypes.c_ulonglong),
+                    ("page_available", ctypes.c_ulonglong), ("virtual_total", ctypes.c_ulonglong),
+                    ("virtual_available", ctypes.c_ulonglong), ("extended", ctypes.c_ulonglong)]
+    try:
+        status = MemoryStatus(length=ctypes.sizeof(MemoryStatus))
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            facts["ram"] = float(status.total)
+    except (AttributeError, OSError):
+        pass
+    try:
+        facts["admin"] = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        pass
+    return facts
+
+
 def decode(data: bytes) -> str:
     """Command output; wsl.exe writes UTF-16 on many Windows versions."""
     if data[:2] in (b"\xff\xfe", b"\xfe\xff") or (len(data) > 4 and data[1:4:2] == b"\x00\x00"):
@@ -170,9 +198,14 @@ class System:
             if WINDOWS:
                 code, out = self.powershell(WINDOWS_FACTS, timeout=60)
                 try:
-                    facts.update(json.loads(out.strip().splitlines()[-1]) if code == 0 else {})
-                except (ValueError, IndexError):
-                    pass
+                    if code != 0:
+                        raise ValueError(f"exit {code}")
+                    facts.update(json.loads(out.strip().splitlines()[-1]))
+                except (ValueError, IndexError) as error:
+                    # Say why (doctor and the installer show it) instead of silently having no facts.
+                    facts["probe_error"] = f"PowerShell facts probe failed ({error}): {out.strip()[-400:]}"
+                facts.update({key: value for key, value in windows_native_facts().items()
+                              if facts.get(key) in (None, "", 0)})
             else:
                 facts.update({"caption": f"{platform.system()} {platform.release()}", "build": None,
                               "admin": hasattr(os, "geteuid") and os.geteuid() == 0})
