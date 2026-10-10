@@ -89,6 +89,9 @@ jobs:
           # conversation, structured errors for invalid requests, registration, and a killed engine
           # restarted from its persisted state. No model or sandbox on this runner (no task here).
           $env:CODINGBRAIN_HOME = Join-Path $env:RUNNER_TEMP 'cb-api'
+          # A model name is configured (registration requires it); nothing listens at this URL.
+          python -m brain.local setup --non-interactive --model qwen2.5-coder:7b --url http://127.0.0.1:9
+          if ($LASTEXITCODE -ne 0) { throw "setup exited $LASTEXITCODE" }
           python scripts/engine_client_check.py
           if ($LASTEXITCODE -ne 0) { throw "engine client check exited $LASTEXITCODE" }
       - name: Installer on a real Windows runner (preflight, plan, readiness, winget package ids)

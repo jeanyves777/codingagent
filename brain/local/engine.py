@@ -399,9 +399,39 @@ class Engine:
             done()
 
 
+def isolate_stdio():
+    """Keep the protocol pipes to this process. The engine starts child processes (git, the
+    sandbox, model CLIs); a child must neither inherit the request pipe nor write into the response
+    stream. On Windows it is worse than noise: while the reader thread waits on the stdin pipe,
+    starting any child that inherits stdin (subprocess duplicates the standard handles) blocks until
+    the next request line arrives, so a request that runs git would never be answered.
+
+    Returns private (reader, writer) for the protocol; the standard handles become NUL (stdin)
+    and stderr (stdout) for everything else, including stray prints."""
+    import io
+    import os
+    sys.stdout.flush()
+    reader = io.TextIOWrapper(io.FileIO(os.dup(0), "rb"), encoding="utf-8", errors="replace")
+    writer = io.TextIOWrapper(io.FileIO(os.dup(1), "wb"), encoding="utf-8", newline="\n", write_through=True)
+    null = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(null, 0)
+    os.close(null)
+    os.dup2(2, 1)
+    if sys.platform == "win32":  # make sure children see the new standard handles
+        import ctypes
+        import msvcrt
+        ctypes.windll.kernel32.SetStdHandle(-10, msvcrt.get_osfhandle(0))  # STD_INPUT_HANDLE
+        ctypes.windll.kernel32.SetStdHandle(-11, msvcrt.get_osfhandle(1))  # STD_OUTPUT_HANDLE
+    sys.stdin = open(os.devnull, encoding="utf-8")
+    sys.stdout = sys.stderr
+    return reader, writer
+
+
 def serve_stdio(engine: Engine, reader=None, writer=None):
     """JSON lines on stdin/stdout. Requests run concurrently, so tasks.stop can arrive while
     tasks.approve is still testing; output lines are never interleaved."""
+    if reader is None and writer is None:
+        reader, writer = isolate_stdio()
     reader = reader or sys.stdin
     writer = writer or sys.stdout
     write_lock = threading.Lock()

@@ -326,3 +326,41 @@ def test_restart_recovers_from_the_journal_without_duplicates(world, monkeypatch
         assert [item["id"] for item in restarted.call("tasks.list", {"project_id": pid})] == [task["id"]]
     finally:
         restarted.close()
+
+
+def test_child_processes_never_touch_the_protocol_pipes(tmp_path):
+    """While the reader waits on the request pipe, the engine starts a child process (as git and
+    the sandbox are started). The child gets NUL as stdin and stderr as stdout: it is started at
+    once (on Windows, inheriting the pipe blocked until the next request line), cannot read a
+    request, and cannot write into the response stream; stray prints go to stderr too."""
+    import os
+    import sys
+    script = tmp_path / "engine_side.py"
+    script.write_text(
+        "import subprocess, sys, threading\n"
+        "from brain.local.engine import isolate_stdio\n"
+        "reader, writer = isolate_stdio()\n"
+        "lines = []\n"
+        "thread = threading.Thread(target=lambda: lines.append(reader.readline()))\n"
+        "thread.start()  # a read is now pending on the request pipe\n"
+        "child = subprocess.run([sys.executable, '-c', 'import sys; print(\"child-out\"); "
+        "print(\"stdin:\", repr(sys.stdin.read()), file=sys.stderr)'], timeout=30)\n"
+        "print('stray print')\n"
+        "writer.write('{\"ok\": true, \"child\": %d}\\n' % child.returncode)\n"
+        "thread.join(30)\n"
+        "writer.write('{\"echo\": %r}\\n' % lines[0].strip())\n", encoding="utf-8")
+    process = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                               env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])})
+    import threading
+    first = []
+    reading = threading.Thread(target=lambda: first.append(process.stdout.readline()), daemon=True)
+    reading.start()
+    reading.join(60)  # arrives before any request is sent: the child was not blocked
+    if not first:
+        process.kill()
+        pytest.fail("starting a child process blocked on the request pipe")
+    assert json.loads(first[0]) == {"ok": True, "child": 0}
+    out, err = process.communicate("request-1\n", timeout=60)
+    assert out.splitlines() == ["{\"echo\": 'request-1'}"]  # the child did not consume the request
+    assert "child-out" in err and "stray print" in err and "stdin: ''" in err

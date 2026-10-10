@@ -31,6 +31,10 @@ The same operations are available in-process as `brain.local.engine.Engine(...).
   `codingbrain watch` shows. Each event has its stage, agent, model, status, duration and summary.
   Events are what really happened; nothing is estimated or invented. The first line the server
   writes is a `ready` event that carries the API version.
+- **Pipes:** the engine keeps stdin and stdout to itself. Processes it starts (git, the sandbox,
+  model CLIs) get NUL as stdin and stderr as stdout, so they can neither take a request line nor
+  corrupt the response stream. On Windows this also prevents a hang: a child inheriting the
+  request pipe could not start until the next request arrived.
 - **Concurrency:** requests run concurrently, so `tasks.stop` works while `tasks.approve` is
   testing, over the same session. `tasks.stop` answers at once (`cancellation_requested`); the
   running `tasks.approve` then returns the task with status `cancelled` once it stops at a safe
