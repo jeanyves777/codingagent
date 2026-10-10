@@ -10,6 +10,7 @@ prompt, and registering a one-time resume after a restart, each only after the u
 Nothing here changes BIOS/UEFI settings, deletes WSL distributions or Docker data, or reads
 credential stores.
 """
+import base64
 import json
 import os
 import platform
@@ -26,6 +27,7 @@ DETACHED = 0x00000008 | 0x00000200 if WINDOWS else 0  # DETACHED_PROCESS | CREAT
 
 WINDOWS_FACTS = r"""
 $ErrorActionPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
 $p = Get-CimInstance Win32_Processor | Select-Object -First 1
 $c = Get-CimInstance Win32_ComputerSystem
 $o = Get-CimInstance Win32_OperatingSystem
@@ -42,6 +44,9 @@ $id = [Security.Principal.WindowsIdentity]::GetCurrent()
   execution_policy = (Get-ExecutionPolicy).ToString()
   model = $c.Model
 } | ConvertTo-Json -Compress
+# Errors are silenced above so that one unavailable value does not stop the rest; if anything
+# failed, say what (plain .NET, which works even when cmdlets do not), for doctor and the installer.
+if ($Error.Count) { [Console]::Error.WriteLine('first error: ' + $Error[$Error.Count - 1].ToString()) }
 """
 
 
@@ -189,7 +194,15 @@ class System:
         shell = self.which("powershell") or self.which("pwsh")
         if not shell:
             return 127, "PowerShell not found"
-        return self.run([shell, "-NoProfile", "-NonInteractive", "-Command", script], timeout=timeout)
+        # -EncodedCommand (UTF-16LE, base64): a multi-line script passed with -Command through the
+        # Windows command line can arrive cut at the first line break and run as nothing at all.
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        # Started from PowerShell 7 (pwsh), the inherited PSModulePath points Windows PowerShell 5.1
+        # at PowerShell 7's own modules, which it cannot load: ConvertTo-Json, Get-CimInstance and
+        # others then fail and the script exits 1 with nothing to show. Without the variable,
+        # each PowerShell builds its own default module path.
+        env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+        return self.run([shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], timeout=timeout, env=env)
 
     def facts(self) -> dict:
         if self._facts is None:
@@ -200,7 +213,7 @@ class System:
                 try:
                     if code != 0:
                         raise ValueError(f"exit {code}")
-                    facts.update(json.loads(out.strip().splitlines()[-1]))
+                    facts.update(json.loads([line for line in out.splitlines() if line.strip().startswith("{")][-1]))
                 except (ValueError, IndexError) as error:
                     # Say why (doctor and the installer show it) instead of silently having no facts.
                     facts["probe_error"] = f"PowerShell facts probe failed ({error}): {out.strip()[-400:]}"
