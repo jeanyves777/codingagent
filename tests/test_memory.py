@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from brain.local import config as settings
-from brain.local.memory import MemoryStore, ProjectMemory, claude_project_dir, discover
+from brain.local.memory import MemoryStore, ProjectMemory, claude_project_dir, discover, parse_source
 from brain.local.paths import Layout
 from brain.local.project import detect
 
@@ -339,3 +339,79 @@ def test_memory_schema_is_versioned(tmp_path):
         db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION + 1),))
     with pytest.raises(RuntimeError, match="newer than this version supports"):
         MemoryStore(tmp_path / "m.sqlite3", "p")
+
+
+def link(target: Path, at: Path, directory=False):
+    at.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(target, at, target_is_directory=directory)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are not available here (Windows without Developer Mode)")
+
+
+def test_symlinked_project_sources_never_import_outside_text(world, tmp_path):
+    """An in-project CLAUDE.md, rule file or docs folder that links elsewhere is never read, so
+    text outside the project cannot reach project memory without the private-source consent."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "private.md").write_text("# Private\n\n- OUTSIDE-ONLY marker rule from another place.\n")
+    (outside / "adr").mkdir()
+    (outside / "adr" / "0009-x.md").write_text("# ADR 9: OUTSIDE-ONLY decision\n\nStatus: Accepted\n\n## Decision\n\n"
+                                               "OUTSIDE-ONLY decision text.\n")
+    root = world["project"]
+    (root / "CLAUDE.md").unlink()
+    link(outside / "private.md", root / "CLAUDE.md")
+    link(outside / "private.md", root / ".claude" / "rules" / "linked.md")
+    link(outside / "adr", root / "docs" / "decisions", directory=True)
+    refs = [item["ref"] for item in discover(root)]
+    assert not any(ref.endswith(("CLAUDE.md", "linked.md", "0009-x.md")) and str(root.resolve()) in ref for ref in refs)
+    memory = memory_for(world, root)
+    memory.import_sources()
+    assert not any("OUTSIDE-ONLY" in text for text in texts(memory))
+
+
+def test_a_source_swapped_for_a_link_after_discovery_is_not_read(world, tmp_path):
+    """Time of check, time of use: the import re-validates the path."""
+    outside = tmp_path / "outside.md"
+    outside.write_text("# X\n\n- SWAPPED-IN outside rule.\n")
+    root = world["project"]
+    source = next(item for item in discover(root) if item["ref"].endswith("CLAUDE.md"))
+    (root / "CLAUDE.md").unlink()
+    link(outside, root / "CLAUDE.md")
+    assert parse_source(source, root) == []
+
+
+def test_secret_names_from_custom_instruction_globs_are_never_opened(world, monkeypatch):
+    root = world["project"]
+    write(root, {"opencode.json": json.dumps({"instructions": ["config/*.md", "keys/*"]}),
+                 "config/team.md": "# Team\n\n- Review every migration.\n",
+                 "config/api-secret.md": f"- token {SECRET}\n", "keys/deploy.pem": "-----BEGIN PRIVATE KEY-----\n"})
+    opened = []
+    real_open, real_read_bytes, real_read_text = os.open, Path.read_bytes, Path.read_text
+    monkeypatch.setattr(os, "open", lambda path, *a, **k: opened.append(str(path)) or real_open(path, *a, **k))
+    monkeypatch.setattr(Path, "read_bytes", lambda self: opened.append(str(self)) or real_read_bytes(self))
+    monkeypatch.setattr(Path, "read_text", lambda self, *a, **k: opened.append(str(self)) or real_read_text(self, *a, **k))
+    refs = [item["ref"] for item in discover(root)]
+    assert any(ref.endswith("team.md") for ref in refs)
+    assert not any(name in ref for ref in refs + opened for name in ("api-secret.md", "deploy.pem"))
+    memory = memory_for(world, root)
+    memory.import_sources()
+    assert not any(name in path for path in opened for name in ("api-secret.md", "deploy.pem"))
+    assert not any(SECRET in text for text in texts(memory))
+
+
+def test_private_memory_linked_into_the_project_still_needs_consent(world):
+    """A link from the project to the user's private Claude memory does not turn it into an
+    automatically imported project file; the private source itself still waits for consent."""
+    claude_memory = claude_project_dir(world["project"]) / "memory"
+    claude_memory.mkdir(parents=True)
+    (claude_memory / "notes.md").write_text("# Notes\n\n- PRIVATE-NOTE prefer tabs.\n")
+    link(claude_memory / "notes.md", world["project"] / "GEMINI.md")
+    memory = memory_for(world, world["project"])
+    totals = memory.import_sources()
+    assert not any("PRIVATE-NOTE" in text for text in texts(memory))
+    private = [item for item in memory.scan() if item["ref"].endswith("notes.md")]
+    assert private and all(item["scope"] == "agent_private" and not item["authorized"] for item in private)
+    assert totals["awaiting_authorization"] >= 1
+    memory.import_sources(authorize=[item["id"] for item in private])
+    assert any("PRIVATE-NOTE" in text for text in texts(memory))
