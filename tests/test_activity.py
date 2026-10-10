@@ -374,6 +374,8 @@ def test_secrets_are_redacted_from_journal_and_snapshots(tmp_path, monkeypatch):
     snapshots = json.dumps([brain.snapshots.show(item["id"]) for item in brain.snapshots.list(task["id"])])
     for text in (journal, snapshots):
         assert secret not in text and "hunter2" not in text and "[redacted]" in text
+    stored = persisted(tmp_path / "data" / "snapshots")  # the objects and the index, not only show()
+    assert secret.encode() not in stored and b"hunter2" not in stored
 
 
 # 11-13. Terminal output: legacy code pages, no TTY, visible failures ------------------------------------
@@ -493,3 +495,173 @@ def test_docker_errors_are_sandbox_problems_not_repairs(tmp_path, monkeypatch):
     task = asyncio.run(flow())
     assert task["status"] == "failed" and not task.get("failure_log")  # no repair spent on a Docker error
     assert not [event for event in brain.telemetry.journal(limit=1000) if event["phase"] == "repair"]
+
+
+# 14. Snapshot storage safety: links, junctions, secrets, sensitive tasks ------------------------------
+
+def git_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for command in (["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "T"]):
+        subprocess.run(["git", "-C", str(workspace), *command], check=True)
+    (workspace / "main.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(workspace), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(workspace), "commit", "-qm", "base"], check=True)
+    base = subprocess.run(["git", "-C", str(workspace), "rev-parse", "HEAD"], capture_output=True, text=True,
+                          check=True).stdout.strip()
+    return workspace, base
+
+
+def persisted(store_root: Path) -> bytes:
+    """Every byte the snapshot store has written: objects, index and anything else."""
+    return b"".join(path.read_bytes() for path in store_root.rglob("*") if path.is_file())
+
+
+def git_status(workspace: Path) -> str:
+    return subprocess.run(["git", "-C", str(workspace), "status", "--porcelain=v1", "-uall"], capture_output=True,
+                          text=True, check=True).stdout
+
+
+def watch_reads(monkeypatch):
+    """Record every path the code under test opens or reads."""
+    opened = []
+    real_open, real_read_bytes, real_read_text = os.open, Path.read_bytes, Path.read_text
+    monkeypatch.setattr(os, "open", lambda path, *a, **k: opened.append(os.path.realpath(path)) or real_open(path, *a, **k))
+    monkeypatch.setattr(Path, "read_bytes", lambda self: opened.append(os.path.realpath(self)) or real_read_bytes(self))
+    monkeypatch.setattr(Path, "read_text", lambda self, *a, **k: opened.append(os.path.realpath(self)) or
+                        real_read_text(self, *a, **k))
+    return opened
+
+
+@pytest.mark.parametrize("git", [True, False], ids=["git", "baseline-copy"])
+def test_snapshot_never_reads_a_link_to_a_file_or_folder_outside(tmp_path, monkeypatch, git):
+    from brain.snapshots import SnapshotStore
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("OUTSIDE-SENTINEL-7731")
+    if git:
+        workspace, base = git_workspace(tmp_path)
+    else:  # a snapshot workspace: compared with the baseline copy next to it
+        workspace, base = tmp_path / "task" / "workspace", None
+        workspace.mkdir(parents=True)
+        (tmp_path / "task" / "baseline").mkdir()
+        (tmp_path / "task" / "baseline" / "main.py").write_text("x = 1\n")
+        (workspace / "main.py").write_text("x = 1\n")
+    try:
+        os.symlink(outside / "secret.txt", workspace / "link.txt")
+        os.symlink(outside, workspace / "linked-folder", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("creating symbolic links needs a privilege on this system (junctions are tested separately)")
+    (workspace / "main.py").write_text("x = 2\n")
+    status = git_status(workspace) if git else None
+    store = SnapshotStore(tmp_path / "store")
+    opened = watch_reads(monkeypatch)
+    snapshot = store.show(store.capture({"id": "t1", "base_commit": base}, workspace, "after_changes"))
+    monkeypatch.undo()
+    manifest = {item["path"]: item for item in snapshot["manifest"]}
+    assert manifest["link.txt"]["excluded"] == "symbolic link or junction" and "sha256" not in manifest["link.txt"]
+    assert not any(path.startswith("linked-folder/") and "sha256" in item for path, item in manifest.items())
+    assert "sha256" in manifest["main.py"] and "+x = 2" in store.get(snapshot["diff"]).decode()
+    assert not any(path.startswith(os.path.realpath(outside)) for path in opened)  # never opened, not just not kept
+    assert b"OUTSIDE-SENTINEL" not in persisted(tmp_path / "store")
+    # Refusing the read changed nothing in the user's workspace.
+    assert os.readlink(workspace / "link.txt") == str(outside / "secret.txt")
+    assert (outside / "secret.txt").read_text() == "OUTSIDE-SENTINEL-7731"
+    if git:
+        assert git_status(workspace) == status
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are a Windows feature")
+def test_snapshot_windows_junction_in_the_workspace_is_never_followed(tmp_path, monkeypatch):
+    """A directory junction (no Developer Mode needed) inside the task workspace that points outside
+    must not be read through, on every Windows Python including 3.11 (no Path.is_junction): neither
+    from Git's status nor from the baseline-copy walk."""
+    from brain.snapshots import SnapshotStore
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "data.txt").write_text("JUNCTION-SENTINEL-4419")
+    workspace, base = git_workspace(tmp_path)
+    copy = tmp_path / "task" / "workspace"
+    copy.mkdir(parents=True)
+    (tmp_path / "task" / "baseline").mkdir()
+    for root in (workspace, copy):
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(root / "vendor"), str(outside)],
+                              capture_output=True, text=True)
+        assert made.returncode == 0, made.stdout + made.stderr
+        assert os.lstat(root / "vendor").st_file_attributes & 0x400  # it really is a reparse point
+    status = git_status(workspace)
+    store = SnapshotStore(tmp_path / "store")
+    opened = watch_reads(monkeypatch)
+    snapshots = [store.show(store.capture({"id": "t1", "base_commit": base}, workspace, "after_changes")),
+                 store.show(store.capture({"id": "t2"}, copy, "after_changes"))]
+    monkeypatch.undo()
+    for snapshot in snapshots:
+        assert not any("sha256" in item for item in snapshot["manifest"] if item["path"].startswith("vendor"))
+    assert not any(path.lower().startswith(os.path.realpath(outside).lower()) for path in opened)
+    assert b"JUNCTION-SENTINEL" not in persisted(tmp_path / "store")
+    assert git_status(workspace) == status and (outside / "data.txt").read_text() == "JUNCTION-SENTINEL-4419"
+
+
+def test_snapshot_stores_no_secret_file_secret_content_or_non_image_artifact(tmp_path):
+    from brain.snapshots import SnapshotStore
+    key, token = "sk-live-AbCdEf0123456789ZyXwVuTs", "plain-token-998877"
+    workspace, base = git_workspace(tmp_path)
+    (workspace / ".env").write_text(f"OPENAI_API_KEY={key}\n")
+    (workspace / "credentials.json").write_text(f'{{"token": "{token}"}}')
+    (workspace / "settings.py").write_text(f'API_KEY = "{key}"\n')
+    (workspace / "app.yaml").write_text("database:\n  password: hunter2hunter2\n")
+    (workspace / "auth.py").write_text('token = request.headers.get("Authorization")\n')  # ordinary code
+    (workspace / "main.py").write_text("x = 2\n")
+    leak, image = tmp_path / "leak.png", tmp_path / "desktop.png"
+    leak.write_text(f"not really an image {key}")
+    image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 32)
+    store = SnapshotStore(tmp_path / "store")
+    snapshot = store.show(store.capture({"id": "t1", "base_commit": base}, workspace, "after_changes", artifacts=[
+        {"path": str(leak), "kind": "screenshot", "viewport": "mobile"},
+        {"path": str(image), "kind": "screenshot", "viewport": "desktop"}]))
+    manifest = {item["path"]: item for item in snapshot["manifest"]}
+    assert manifest[".env"]["excluded"] == manifest["credentials.json"]["excluded"] == "secret-like file name"
+    assert manifest["settings.py"]["excluded"] == manifest["app.yaml"]["excluded"] == "contains secret-like content"
+    assert all("sha256" not in manifest[path] for path in (".env", "credentials.json", "settings.py", "app.yaml"))
+    assert store.get(manifest["auth.py"]["sha256"]) == (workspace / "auth.py").read_bytes()
+    diff = store.get(snapshot["diff"]).decode()
+    assert "+x = 2" in diff and ".env" not in diff and "settings.py" not in diff
+    artifacts = {item["viewport"]: item for item in snapshot["artifacts"]}
+    assert artifacts["mobile"]["excluded"] == "not an image file" and "sha256" not in artifacts["mobile"]
+    assert store.get(artifacts["desktop"]["sha256"]) == image.read_bytes()
+    stored = persisted(tmp_path / "store")
+    assert key.encode() not in stored and token.encode() not in stored and b"OPENAI_API_KEY" not in stored
+    assert b"hunter2hunter2" not in stored
+
+
+def test_sensitive_task_snapshots_keep_paths_only(tmp_path):
+    from brain.snapshots import SnapshotStore
+    workspace, base = git_workspace(tmp_path)
+    (workspace / "main.py").write_text("x = 2  # SENSITIVE-BODY\n")
+    image = tmp_path / "desktop.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 32)
+    store = SnapshotStore(tmp_path / "store")
+    snapshot = store.show(store.capture({"id": "t1", "base_commit": base, "attachments_sensitive": True}, workspace,
+                                        "after_changes", artifacts=[{"path": str(image), "kind": "screenshot"}]))
+    assert snapshot["manifest"] == [{"path": "main.py", "change": "modified",
+                                     "excluded": "sensitive task: content is not kept"}]
+    assert snapshot["diff"] is None and "sha256" not in snapshot["artifacts"][0]
+    assert not [path for path in (tmp_path / "store" / "objects").rglob("*") if path.is_file()]
+    assert b"SENSITIVE-BODY" not in persisted(tmp_path / "store")
+
+
+def test_restore_writes_stored_files_and_leaves_excluded_ones_at_baseline(tmp_path):
+    from brain.snapshots import SnapshotStore
+    workspace, base = git_workspace(tmp_path)
+    (workspace / "main.py").write_text("x = 2\n")
+    (workspace / "settings.py").write_text('API_KEY = "sk-live-AbCdEf0123456789ZyXwVuTs"\n')
+    store = SnapshotStore(tmp_path / "store")
+    snapshot_id = store.capture({"id": "t1", "base_commit": base}, workspace, "after_changes")
+    status = git_status(workspace)
+    commit = store.restore(snapshot_id, workspace, "codingbrain/restore-test")
+    files = subprocess.run(["git", "-C", str(workspace), "ls-tree", "--name-only", commit], capture_output=True,
+                           text=True, check=True).stdout.split()
+    shown = subprocess.run(["git", "-C", str(workspace), "show", f"{commit}:main.py"], capture_output=True,
+                           text=True, check=True).stdout
+    assert shown == "x = 2\n" and "settings.py" not in files  # never written as a redacted copy
+    assert git_status(workspace) == status  # the working tree is untouched

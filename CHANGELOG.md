@@ -4,6 +4,12 @@
 
 Live activity, execution traces and snapshots (see docs/live-activity.md).
 
+- **Security (from review):** snapshots store a changed file's content only if it is a regular file
+  inside the task workspace, reached without any symbolic link or Windows junction (reparse point,
+  checked before reading, including on Python 3.11), with no secret-like name or content. Excluded
+  files are listed with the reason and never stored; a restore leaves them at their baseline. The
+  diff is built from stored files only and redacted, artifacts must be images, and `--sensitive`
+  tasks keep paths only.
 - **Journal:** an append-only event journal in telemetry. Events are persisted as they happen,
   ordered, deduplicated for replayed milestones and redacted. Each event records the task and
   parent task, the agent, provider and model, the stage, a state (RUNNING, COMPLETED, FAILED,

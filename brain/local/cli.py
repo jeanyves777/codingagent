@@ -562,6 +562,11 @@ def cmd_snapshot(args, layout):
                 return 1
             commit = store.restore(snapshot["id"], context.root, branch)
             print(f"Restored on new branch {branch} at {commit[:10]}.")
+            skipped = [item for item in snapshot["manifest"] if item.get("excluded")]
+            if skipped:
+                print("Not stored in the snapshot, so left at their baseline version on that branch:")
+                for item in skipped:
+                    print(f"  {item['path']} ({item['excluded']})")
         elif args.action == "purge":
             if args.task:
                 removed = store.purge(task_id=args.task)

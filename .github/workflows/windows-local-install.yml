@@ -65,6 +65,9 @@ jobs:
           $attach = python -m pytest -q -p no:cacheprovider -rs tests/test_multimodal.py -k windows_junction_in_the_path 2>&1 | Out-String
           Write-Host $attach
           if ($LASTEXITCODE -ne 0 -or $attach -notmatch '2 passed' -or $attach -match 'skipped') { throw 'the Windows attachment junction regression did not run and pass' }
+          $snapshot = python -m pytest -q -p no:cacheprovider -rs tests/test_activity.py -k snapshot_windows_junction 2>&1 | Out-String
+          Write-Host $snapshot
+          if ($LASTEXITCODE -ne 0 -or $snapshot -notmatch '1 passed' -or $snapshot -match 'skipped') { throw 'the Windows snapshot junction regression did not run and pass' }
       - name: Build an older and a newer release
         shell: pwsh
         run: |
