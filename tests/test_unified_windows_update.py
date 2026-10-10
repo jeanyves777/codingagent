@@ -108,14 +108,85 @@ def test_draft_preview_and_invalid_tags_cannot_drive_stable_update(monkeypatch, 
         updates.release_status("0.12.0")
 
 
-def test_desktop_windows_updater_is_packaged_and_never_runs_branch_head():
+def test_update_script_pins_stable_release_and_verified_preview_artifact():
     script = Path(__file__).resolve().parents[1] / "desktop_ui" / "Update-CodingBrain.ps1"
     source = script.read_text(encoding="utf-8")
-    assert "releases/latest" in source and "releases/tags/v$version" in source
+    assert "releases/latest" in source and "releases/tags/$tag" in source
     assert "SHA256SUMS" in source and "Verify-Asset 'CodingBrain-Setup.exe'" in source
-    assert "update --version $version" in source
-    assert "Read-Host 'Press Enter after closing Coding Brain Desktop'" in source
-    assert not re.search(r"\b(?:Invoke-Expression|iex)\b", source, re.I)
+    assert "update --version $version" in source and "update --source $source" in source
+    assert "Read-Host 'Press Enter after closing the desktop window'" in source
+    assert "ValidateSet('stable', 'preview')" in source
+    assert "head_sha -ceq $head" in source and "$_.conclusion -ceq 'success'" in source
+    assert "Installed engine $installed is newer" in source
+    assert not re.search(r"\\b(?:Invoke-Expression|iex)\\b", source, re.I)
+
+
+def test_preview_success_belongs_to_current_branch_head(monkeypatch, tmp_path):
+    head = "a" * 40
+    monkeypatch.setattr(updates, "VERSION_FILE", tmp_path / "no-version.json")
+
+    def github(url):
+        if "/git/ref/heads/preview" in url:
+            return {"object": {"sha": head}}
+        if "/actions/runs?" in url:
+            return {"workflow_runs": [{
+                "name": updates.PREVIEW_WORKFLOW_NAME, "head_branch": "preview",
+                "head_sha": head, "status": "completed", "conclusion": "success",
+                "run_number": 7, "id": 123,
+                "html_url": "https://github.com/jeanyves777/codingagent/actions/runs/123",
+            }]}
+        if "/actions/runs/123/artifacts" in url:
+            return {"artifacts": [{"name": "CodingBrain-Preview-0.13.0.dev7", "expired": False}]}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(updates, "_json", github)
+    result = updates.release_status("0.11.0", channel="preview")
+    assert result["unreleased"] is True and result["channel"] == "preview"
+    assert result["latest"] == "0.13.0.dev7"
+    assert result["preview_run_id"] == 123 and result["preview_source_commit"] == head
+    assert result["engine_update_available"] and result["desktop_update_available"]
+    assert "releases/tag/" not in result["release_url"]
+
+
+@pytest.mark.parametrize("problem", ["stale", "failed", "missing", "expired"])
+def test_preview_denies_stale_failing_or_expired_ci(monkeypatch, problem):
+    head = "a" * 40
+
+    def github(url):
+        if "/git/ref/heads/preview" in url:
+            return {"object": {"sha": head}}
+        if "/actions/runs?" in url:
+            return {"workflow_runs": [{
+                "name": updates.PREVIEW_WORKFLOW_NAME, "head_branch": "preview",
+                "head_sha": "b"*40 if problem == "stale" else head,
+                "status": "completed", "conclusion": "failure" if problem == "failed" else "success",
+                "run_number": 7, "id": 123,
+            }]}
+        if "/actions/runs/123/artifacts" in url:
+            return {"artifacts": [] if problem == "missing" else
+                    [{"name": "CodingBrain-Preview-0.13.0.dev7", "expired": problem == "expired"}]}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(updates, "_json", github)
+    with pytest.raises(ValueError):
+        updates.release_status("0.11.0", channel="preview")
+
+
+def test_stable_release_not_offered_as_downgrade_from_preview(monkeypatch, tmp_path):
+    local = tmp_path / "desktop.json"
+    local.write_text('{"version":"0.13.0.dev5"}')
+    monkeypatch.setattr(updates, "VERSION_FILE", local)
+    monkeypatch.setattr(updates, "_json", lambda url: {
+        "tag_name": "v0.11.0", "prerelease": False, "draft": False,
+        "assets": [{"name": "SHA256SUMS"}, {"name": "release.json"}]
+    })
+    result = updates.release_status("0.13.0.dev5", "stable")
+    assert not result["any_update_available"]
+
+
+def test_unsupported_channel_is_rejected():
+    with pytest.raises(ValueError, match="Unsupported"):
+        updates.release_status("0.11.0", channel="arbitrary")
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell")
@@ -146,3 +217,6 @@ def test_desktop_update_button_hands_off_to_pinned_dual_component_updater(tmp_pa
     assert called[0][:4] == ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass"]
     assert "-EnginePython" in called[0] and engine in called[0]
     assert called[0][called[0].index("-File")+1].endswith("Update-CodingBrain.ps1")
+    assert called[0][-2:] == ["-Channel", "stable"]
+    w.maintenance("update_engine", channel="preview")
+    assert called[1][-2:] == ["-Channel", "preview"]
