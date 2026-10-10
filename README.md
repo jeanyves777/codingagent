@@ -34,6 +34,13 @@ Install once and use `codingbrain` in any project; update with `codingbrain upda
 instructions: [docs/windows-install.md](docs/windows-install.md). Release process:
 [RELEASING.md](RELEASING.md).
 
+## Talk to it
+
+Run `codingbrain` from any folder and talk naturally. A greeting gets a greeting, and a question
+gets an answer. "Create a task manager app" starts a new project, and "fix the calculator bug"
+proposes a task in the right project. Work starts only after you confirm. See
+[docs/assistant.md](docs/assistant.md).
+
 ## Start a new application from one sentence
 
 ```powershell
