@@ -34,6 +34,7 @@ Source: "..\..\dist\CodingBrainDesktop\*"; DestDir: "{app}"; Flags: ignoreversio
 #ifdef WithEngine
 Source: "{#EngineBundle}\*"; DestDir: "{app}\engine"; Flags: ignoreversion
 Source: "Setup-CodingBrain.ps1"; DestDir: "{app}\engine"; Flags: ignoreversion
+Source: "Verify-CodingBrainEngine.py"; DestDir: "{app}\engine"; Flags: ignoreversion
 #endif
 
 [Tasks]
