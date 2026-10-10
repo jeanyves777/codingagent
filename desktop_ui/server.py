@@ -249,11 +249,13 @@ class Workspace:
         self._engine_status_cache = (now, report)
         return report
 
-    def update_status(self) -> dict:
-        """An uncached GitHub stable-release check for both installed components."""
+    def update_status(self, channel: str = "stable") -> dict:
+        """An uncached GitHub release check; preview is explicit and untagged."""
         from .updates import release_status
+        if channel not in {"stable", "preview"}:
+            raise ValueError("Invalid update channel")
         engine = self.engine_status()["engine"]
-        return release_status(engine.get("version"))
+        return release_status(engine.get("version"), channel=channel)
 
     def installation_status(self) -> dict:
         try:
@@ -340,7 +342,11 @@ class Workspace:
         if result.returncode:
             raise ValueError("Coding Brain rejected this supervisor setting")
 
-    def maintenance(self, action: str) -> dict:
+    def maintenance(self, action: str, channel: str = "stable") -> dict:
+        if channel not in {"stable", "preview"}:
+            raise ValueError("Unsupported update channel")
+        if channel == "preview" and action != "update_engine":
+            raise ValueError("Preview channel is only supported for an explicit update")
         cli = self.cli_command()
         deep_doctor = management.supports_cli_option(cli, "doctor", "--full") if action == "doctor" else True
         command = management.maintenance_args(action, cli, deep_doctor=deep_doctor)
@@ -353,7 +359,10 @@ class Workspace:
             if not helper.is_file():
                 raise ValueError("Desktop update helper missing from this installation; reinstall a verified desktop build")
             command = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(helper),
-                       "-EnginePython", cli[0], "-BrainHome", str(self._brain_home())]
+                       "-EnginePython", cli[0], "-BrainHome", str(self._brain_home()),
+                       "-Channel", channel]
+        if action == "update_engine" and channel == "preview" and not (os.name == "nt" and command[0].lower().endswith("powershell.exe")):
+            raise ValueError("This desktop build cannot install preview engine + native packages together")
         if action in {"install_full", "update_engine", "repair"}:
             # New console owns prompts, elevation and restarts. No silent consent.
             management.launch_interactive_windows(command)
@@ -674,9 +683,9 @@ def create_app(state: Workspace | None = None) -> FastAPI:
         return state.engine_status(refresh=refresh)
 
     @app.get("/api/updates/status", dependencies=[Depends(auth)])
-    def update_status():
+    def update_status(channel: str = "stable"):
         try:
-            return state.update_status()
+            return state.update_status(channel)
         except (OSError, ValueError) as error:
             raise HTTPException(503, f"Could not check GitHub's stable releases: {type(error).__name__}") from error
 
@@ -690,11 +699,11 @@ def create_app(state: Workspace | None = None) -> FastAPI:
         return {"ok":True,"onboarding_completed":state.first_run_completed()}
 
     @app.post("/api/system/action", dependencies=[Depends(auth)])
-    def system_action(action: str, body: ConfirmAction):
+    def system_action(action: str, body: ConfirmAction, channel: str = "stable"):
         if not body.confirmed:
             raise HTTPException(409, "Confirm the operation before starting it")
         try:
-            return state.maintenance(action)
+            return state.maintenance(action, channel=channel)
         except (ValueError, OSError) as error:
             raise HTTPException(409, str(error)) from error
 
