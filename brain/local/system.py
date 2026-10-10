@@ -65,14 +65,47 @@ class System:
 
     # probes ---------------------------------------------------------------------------------
     def which(self, name: str) -> str | None:
+        return self.locate(name)[0]
+
+    def locate(self, name: str) -> tuple[str | None, list[str]]:
+        """Find a command without running anything: this process's PATH, then (Windows) the PATH
+        saved in the registry (an installer may have changed it after this process started),
+        npm's configured global prefix (read from NPM_CONFIG_PREFIX and .npmrc files, never by
+        running npm) and the official default locations. Returns the path and every place checked."""
         found = shutil.which(name)
         if found or not WINDOWS:
-            return found
+            return found, ([] if found else ["PATH"])
+        checked = ["PATH"]
+        extensions = (".exe", ".cmd")
+        directories = [*self._registry_path_dirs(), *npm_prefixes()]
+        for directory in directories:
+            for extension in extensions:
+                candidate = Path(directory) / (name + extension)
+                checked.append(str(candidate))
+                if candidate.is_file():
+                    return str(candidate), checked
         for candidate in KNOWN_LOCATIONS.get(name, ()):  # installed, but this session's PATH predates it
-            path = Path(os.path.expandvars(candidate))
+            path = windows_path(candidate)
+            checked.append(str(path))
             if path.is_file():
-                return str(path)
-        return None
+                return str(path), checked
+        return None, list(dict.fromkeys(checked))
+
+    def _registry_path_dirs(self) -> list[str]:
+        """The user and machine PATH as saved in the registry (not this process's copy)."""
+        if not WINDOWS:
+            return []
+        import winreg
+        directories = []
+        for root, key in ((winreg.HKEY_CURRENT_USER, "Environment"),
+                          (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")):
+            try:
+                with winreg.OpenKey(root, key) as handle:
+                    directories += [os.path.expandvars(part) for part in winreg.QueryValueEx(handle, "Path")[0].split(";")
+                                    if part.strip()]
+            except OSError:
+                pass
+        return directories
 
     def exists(self, path: str) -> bool:
         return Path(os.path.expandvars(path)).exists()
@@ -282,6 +315,35 @@ class System:
         return time.time()
 
 
+def windows_path(template: str) -> Path:
+    """%VARIABLE% expansion that behaves the same on Windows and in simulated-Windows tests."""
+    import re
+    expanded = re.sub(r"%([^%]+)%", lambda match: os.environ.get(match.group(1), match.group(0)), template)
+    return Path(expanded.replace("\\", os.sep))
+
+
+def npm_prefixes() -> list[str]:
+    """npm's global bin folders on Windows, from configuration files only (npm is never run):
+    NPM_CONFIG_PREFIX, then `prefix=` in the user's and npm's global .npmrc, then the default."""
+    prefixes = []
+    if os.environ.get("NPM_CONFIG_PREFIX"):
+        prefixes.append(os.environ["NPM_CONFIG_PREFIX"])
+    candidates = [Path(os.environ.get("USERPROFILE") or Path.home()) / ".npmrc"]
+    if os.environ.get("APPDATA"):
+        candidates.append(Path(os.environ["APPDATA"]) / "npm" / "etc" / "npmrc")
+    for rc in candidates:
+        try:
+            for line in rc.read_text(encoding="utf-8", errors="replace").splitlines()[:200]:
+                key, _, value = line.partition("=")
+                if key.strip().lower() == "prefix" and value.strip():
+                    prefixes.append(os.path.expandvars(value.strip().strip('"')))
+        except OSError:
+            continue
+    if os.environ.get("APPDATA"):
+        prefixes.append(str(Path(os.environ["APPDATA"]) / "npm"))
+    return list(dict.fromkeys(prefixes))
+
+
 # Default install locations, used when an installer has updated PATH only for new terminals.
 KNOWN_LOCATIONS = {
     "git": (r"%ProgramFiles%\Git\cmd\git.exe", r"%LOCALAPPDATA%\Programs\Git\cmd\git.exe"),
@@ -292,8 +354,10 @@ KNOWN_LOCATIONS = {
     "tesseract": (r"%ProgramFiles%\Tesseract-OCR\tesseract.exe",),
     "node": (r"%ProgramFiles%\nodejs\node.exe",),
     "npm": (r"%ProgramFiles%\nodejs\npm.cmd",),
-    "claude": (r"%USERPROFILE%\.local\bin\claude.exe",),
-    "codex": (r"%APPDATA%\npm\codex.cmd",),
+    "claude": (r"%USERPROFILE%\.local\bin\claude.exe", r"%LOCALAPPDATA%\Microsoft\WinGet\Links\claude.exe"),
+    "codex": (r"%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe",  # the standalone Codex for Windows
+              r"%APPDATA%\npm\codex.cmd", r"%LOCALAPPDATA%\Microsoft\WinGet\Links\codex.exe",
+              r"%USERPROFILE%\.local\bin\codex.exe"),
 }
 
 

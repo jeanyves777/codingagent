@@ -16,6 +16,9 @@ on:
       - "tests/installer_fakes.py"
       - "tests/test_new.py"
       - "tests/test_assistant.py"
+      - "tests/test_engine.py"
+      - "tests/test_cli_discovery.py"
+      - "scripts/engine_client_check.py"
       - ".github/workflows/windows-local-install.yml"
   workflow_dispatch:
   push:
@@ -60,7 +63,7 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check -e ".[dev]"
           $env:CODINGBRAIN_TRANSCRIPTS = "$PWD\transcripts\${{ matrix.os }}-${{ matrix.python }}-${{ matrix.shell }}"
-          python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_memory.py tests/test_multimodal.py tests/test_activity.py tests/test_installer.py tests/test_new.py tests/test_assistant.py
+          python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_memory.py tests/test_multimodal.py tests/test_activity.py tests/test_installer.py tests/test_new.py tests/test_assistant.py tests/test_engine.py tests/test_cli_discovery.py
           Get-ChildItem transcripts -Recurse -Filter run-*.txt | ForEach-Object { python scripts/render_transcript.py $_.FullName ($_.FullName -replace '\.txt$', '.png') "Windows, Python ${{ matrix.python }}, ${{ matrix.shell }}" }
       - name: Conversational assistant through a real Windows console pipe, from the home folder
         run: |
@@ -81,6 +84,17 @@ jobs:
           if (Get-ChildItem $env:CODINGBRAIN_HOME -Recurse -Filter brain.sqlite3 -ErrorAction SilentlyContinue) {
             throw 'a conversation created a task store'
           }
+      - name: Engine API through a real stdio client, with this runner's installed Python
+        run: |
+          # The engine runs as a separate process, as the desktop app starts it: handshake, info,
+          # conversation, structured errors for invalid requests, registration, and a killed engine
+          # restarted from its persisted state. No model or sandbox on this runner (no task here).
+          $env:CODINGBRAIN_HOME = Join-Path $env:RUNNER_TEMP 'cb-api'
+          # A model name is configured (registration requires it); nothing listens at this URL.
+          python -m brain.local setup --non-interactive --model qwen2.5-coder:7b --url http://127.0.0.1:9
+          if ($LASTEXITCODE -ne 0) { throw "setup exited $LASTEXITCODE" }
+          python scripts/engine_client_check.py
+          if ($LASTEXITCODE -ne 0) { throw "engine client check exited $LASTEXITCODE" }
       - name: Installer on a real Windows runner (preflight, plan, readiness, winget package ids)
         shell: pwsh
         run: |
@@ -259,6 +273,18 @@ jobs:
         env:
           CODINGBRAIN_CAPABILITY_REPORT: ${{ github.workspace }}/goal-first-capability.json
         run: python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py tests/test_new.py -k real 2>&1 | tee installer-real.log
+      - name: Engine API with a real task (real stdio client, real model, real sandbox)
+        if: always()
+        shell: bash
+        run: |
+          # The contract (digest-bound single-use approval, task-scoped live events, accept) is a
+          # gate; whether the model's fix passes its tests is reported (exit 2) without failing it.
+          export CODINGBRAIN_HOME="$RUNNER_TEMP/cb-real"
+          set +e
+          python scripts/engine_client_check.py --task 2>&1 | tee engine-client.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" = 2 ]; then echo "::warning::Engine API contract held; the real model's change did not pass (see engine-client.log)"; exit 0; fi
+          exit "$code"
       - name: Real-model goal-first capability (reported, not a merge gate; required before production-ready)
         if: always()
         continue-on-error: true
@@ -294,6 +320,7 @@ jobs:
             doctor-full.json
             installer-real.log
             goal-first-capability.json
+            engine-client.log
             ollama.log
 
   release:
