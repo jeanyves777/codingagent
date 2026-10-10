@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 API_VERSION = "1.0"
@@ -25,9 +26,11 @@ class EngineError(RuntimeError):
 
 
 class EngineClient:
-    def __init__(self, python: str | None = None, cwd: str | None = None, env: dict | None = None,
+    def __init__(self, command: list[str] | None = None, cwd: str | None = None, env: dict | None = None,
                  start_timeout: float = 120):
-        self.python = python or sys.executable
+        # The installed engine's own launcher (Workspace.cli_command), never this UI process's
+        # Python: readiness and behavior come from the engine the user actually has installed.
+        self.command = list(command or [sys.executable, "-m", "brain.local"])
         self.cwd = cwd or str(Path.home())
         self.env = env
         self.start_timeout = start_timeout
@@ -46,17 +49,22 @@ class EngineClient:
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         self.ready.clear()
-        self.process = subprocess.Popen(
-            [self.python, "-m", "brain.local", "api", "--stdio"], cwd=self.cwd,
-            env={**(self.env or os.environ), "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", bufsize=1, **kwargs)
+        try:
+            self.process = subprocess.Popen(
+                [*self.command, "api", "--stdio"], cwd=self.cwd,
+                env={**(self.env or os.environ), "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace", bufsize=1, **kwargs)
+        except OSError as error:
+            raise EngineError("unavailable", f"the installed Coding Brain engine could not start ({type(error).__name__})") from error
         process = self.process
         threading.Thread(target=self._read, args=(process,), daemon=True).start()
         threading.Thread(target=self._read_stderr, args=(process,), daemon=True).start()
-        if not self.ready.wait(self.start_timeout):
-            self.close()
-            raise EngineError("unavailable", "the Coding Brain engine did not start: " + "".join(self.stderr_tail)[-800:])
+        deadline = time.monotonic() + self.start_timeout
+        while not self.ready.wait(0.2):
+            if process.poll() is not None or time.monotonic() > deadline:  # exited (e.g. no `api`) or hung
+                self.close()
+                raise EngineError("unavailable", "the Coding Brain engine did not start: " + "".join(self.stderr_tail)[-800:])
 
     def ensure(self):
         with self.lock:

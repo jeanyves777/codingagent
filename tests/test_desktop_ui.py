@@ -110,6 +110,9 @@ def test_chat_never_falls_back_to_engineering_task(client):
 
 def test_acceptance_requires_actual_prompt(client):
     api, w = client
+    # No engine is installed here, so the typed path refuses to start at all (see
+    # test_desktop_engine_status); the legacy CLI path still creates a job to decide on.
+    w.use_core = False
     result = api.post("/api/start", headers=headers(w), json={"mode":"chat","message":"hello"})
     job_id = result.json()["id"]
     assert api.post(f"/api/jobs/{job_id}/decision", headers=headers(w), json={"allow":True}).status_code == 409

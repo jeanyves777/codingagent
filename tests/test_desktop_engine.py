@@ -49,7 +49,14 @@ def tmp_path():
 
 @pytest.fixture
 def desktop(world, monkeypatch):
-    monkeypatch.setattr(core, "shared", lambda: InProcess(world["engine"]))
+    from desktop_ui import management
+    client = InProcess(world["engine"])
+    monkeypatch.setattr(core, "shared", lambda: client)
+    monkeypatch.setattr(Workspace, "engine_client", lambda self: client)
+    monkeypatch.setattr(management, "engine_capabilities", lambda cli: {
+        "available": True, "version": "0.12.0", "conversation": True, "typed_api": True, "task_command": True,
+        "detail": "probe"})
+    monkeypatch.setattr(management, "local_ollama_models", lambda: {"running": False, "models": [], "detail": "off"})
     workspace = Workspace(home=world["home"], executable="unused")
     http = TestClient(create_app(workspace))
     headers = {"X-CodingBrain-Token": workspace.secret}

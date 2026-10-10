@@ -58,8 +58,29 @@ def safe_probe(command: list[str], *, timeout: float = 7) -> bool | None:
         return None
 
 
+IS_WINDOWS = os.name == "nt"
+
+
 def installed_cli(name: str) -> str | None:
-    return shutil.which(name)
+    """Find official CLI launchers even when Windows Desktop inherited a stale PATH.
+
+    npm installs Codex / Claude shims in the user's roaming npm directory; the
+    process may have been started before npm added that folder to PATH. Only
+    inspect fixed per-user launcher locations. Never run a provider to discover it.
+    """
+    found = shutil.which(name)
+    if found:
+        return found
+    if not IS_WINDOWS or name not in {"claude", "codex", "gemini"}:
+        return None
+    roaming = os.environ.get("APPDATA")
+    local = os.environ.get("LOCALAPPDATA")
+    candidates = []
+    if roaming:
+        candidates.extend((Path(roaming) / "npm" / (name + suffix) for suffix in (".cmd", ".exe")))
+    if local:
+        candidates.append(Path(local) / "Microsoft" / "WinGet" / "Links" / (name + ".exe"))
+    return next((str(candidate) for candidate in candidates if candidate.is_file()), None)
 
 
 def is_key_set(name: str) -> bool:
@@ -86,11 +107,11 @@ def providers_snapshot(probe: Callable[[list[str]], bool | None] = safe_probe) -
         elif provider.id == "claude":
             result = auth.get("claude")
             status = "authenticated" if result is True else "sign-in-needed" if result is False else "auth-unverified" if binary else "not-installed"
-            detail = "CLI authenticated" if result is True else "Use official Claude CLI to sign in" if binary else "Install from full setup"
+            detail = "Official Claude CLI confirmed sign-in" if result is True else "Sign in with the official Claude CLI" if result is False else "Auth check did not complete" if binary else "CLI not found. If Claude works in PowerShell, restart this desktop or refresh your PATH."
         elif provider.id == "codex":
             result = auth.get("codex")
             status = "authenticated" if result is True else "sign-in-needed" if result is False else "auth-unverified" if binary else "not-installed"
-            detail = "CLI authenticated" if result is True else "Sign in with ChatGPT" if binary else "Install from full setup"
+            detail = "Official Codex CLI confirmed ChatGPT sign-in" if result is True else "Sign in with ChatGPT through Codex" if result is False else "Auth check did not complete" if binary else "Codex CLI not found in desktop PATH or user launcher folders. Restart this desktop after installing it."
         elif provider.id == "gemini":
             status = "installed" if binary else "not-installed"
             detail = "Sign in within Gemini CLI; autonomous core routing not implemented" if binary else "Gemini CLI not installed"
@@ -106,9 +127,79 @@ def providers_snapshot(probe: Callable[[list[str]], bool | None] = safe_probe) -
         entries.append({"id":provider.id,"name":provider.label,"group":provider.group,"description":provider.description,
                         "status":status,"detail":detail,"adapter":provider.adapter,"docs":provider.docs,
                         "sign_in_available":bool(provider.login and binary),
+                        "authenticated":bool(status == "authenticated"),
                         "core_enabled": provider.adapter in {"local", "supervisor"}})
     return entries
 
+
+
+def engine_capabilities(cli_command: list[str] | None) -> dict:
+    """Read-only checks of the *installed* Coding Brain, never of this UI process.
+
+    A running loopback UI is NOT evidence of a working engine, chat capability,
+    or a live Ollama model. Do not infer support merely from a version number.
+    """
+    result = {"available": False, "version": None, "conversation": False,
+              "typed_api": False, "task_command": False, "detail": "Coding Brain is not installed"}
+    if not cli_command:
+        return result
+    try:
+        version = subprocess.run([*cli_command, "version"], stdin=subprocess.DEVNULL,
+                                 capture_output=True, text=True, errors="replace", timeout=6,
+                                 check=False)
+        if version.returncode:
+            result["detail"] = "Installed Coding Brain could not start; repair its Python environment"
+            return result
+        import re
+        match = re.search(r"\b(?:codingbrain\s+)?v?(\d+\.\d+(?:\.\d+){0,2}(?:[.a-z0-9+-]+)?)\b",
+                          version.stdout, re.I)
+        result["version"] = match.group(1) if match else None
+        result["available"] = True
+        result["task_command"] = True  # availability of run command != sandbox/model readiness
+        result["detail"] = "Engine responds to version probe; execution readiness is not yet verified"
+        for command, key in (("chat", "conversation"), ("api", "typed_api")):
+            try:
+                probe = subprocess.run([*cli_command, command, "--help"],
+                                       stdin=subprocess.DEVNULL, capture_output=True,
+                                       text=True, errors="replace", timeout=6, check=False)
+                result[key] = probe.returncode == 0 and "usage:" in probe.stdout.lower()
+            except (OSError, subprocess.TimeoutExpired):
+                result[key] = False
+        if result["typed_api"]:
+            result["conversation"] = True
+        return result
+    except (OSError, subprocess.TimeoutExpired):
+        result["detail"] = "Could not start installed Coding Brain; check its Python environment"
+        return result
+
+
+def local_ollama_models() -> dict:
+    """Read-only local Ollama tags; no inference request, no proxy, no remote host."""
+    from urllib.request import ProxyHandler, Request, build_opener
+    from urllib.error import HTTPError, URLError
+    result = {"running": False, "models": [], "detail": "Ollama service is not reachable on localhost:11434"}
+    try:
+        request = Request("http://127.0.0.1:11434/api/tags", headers={"Accept": "application/json"})
+        with build_opener(ProxyHandler({})).open(request, timeout=2) as response:
+            payload = json.load(response)
+        result["running"] = True
+        result["models"] = [str(item["name"])[:160] for item in payload.get("models", [])[:100]
+                            if isinstance(item, dict) and isinstance(item.get("name"), str)]
+        result["detail"] = "Ollama is reachable; a model generation test is still required for full readiness"
+    except (ValueError, TypeError, KeyError, HTTPError, URLError, TimeoutError, OSError):
+        pass
+    return result
+
+
+def configured_model(config_path: Path) -> dict:
+    """Return only non-sensitive model names and routing type, never configuration secrets."""
+    try:
+        configuration = json.loads(config_path.read_text(encoding="utf-8"))
+        models = configuration.get("models") or {}
+        return {"provider": str(models.get("provider") or "unknown")[:80],
+                "model": str(models.get("model") or "")[:160]}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {"provider": "unknown", "model": ""}
 
 def installation_probes(cli_command: list[str] | None = None) -> dict:
     """Cheap preflight: installation presence, not fake deep readiness."""
@@ -126,6 +217,22 @@ def installation_probes(cli_command: list[str] | None = None) -> dict:
             "full_installer_note":"Full installer is part of the pending Coding Brain backend release."}
 
 
+def supports_cli_option(cli_command: list[str], command: str, option: str) -> bool:
+    """Inspect help only; never invoke a potentially expensive flag as a capability probe.
+
+    Stable v0.9.0 has `doctor` but no `doctor --full`. The UI must not claim
+    deep verification on that release or run an unsupported command.
+    """
+    if command != "doctor" or option != "--full":
+        raise ValueError("Unsupported capability probe")
+    try:
+        result = subprocess.run([*cli_command, command, "--help"], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, errors="replace", timeout=8, check=False)
+        return result.returncode == 0 and "--full" in result.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 ALLOWED_ACTIONS = {
     "check_updates": ("update", "--check"),
     "update_engine": ("update",),
@@ -136,10 +243,12 @@ ALLOWED_ACTIONS = {
 }
 
 
-def maintenance_args(action: str, cli_command: list[str]) -> list[str]:
+def maintenance_args(action: str, cli_command: list[str], *, deep_doctor: bool = True) -> list[str]:
     """Allowlist prevents arbitrary shell invocation through HTTP input."""
     if action not in ALLOWED_ACTIONS:
         raise ValueError("Unsupported system action")
+    if action == "doctor" and not deep_doctor:
+        return [*cli_command, "doctor"]  # honest basic check on v0.9.0
     return [*cli_command, *ALLOWED_ACTIONS[action]]
 
 

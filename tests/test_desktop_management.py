@@ -146,3 +146,93 @@ def test_provider_cards_reflect_actual_core_enabled_state(tmp_path, monkeypatch)
     assert flags['claude'] is True
     assert flags['codex'] is False
     assert flags['grok'] is None
+
+
+def test_doctor_option_detection_is_help_only_and_no_secret_output(monkeypatch):
+    seen = []
+
+    class FakeResult:
+        returncode = 0
+        stdout = 'usage: codingbrain doctor [-h] [--full] [--json]'
+
+    def fake_run(args, **kwargs):
+        seen.append((args, kwargs))
+        return FakeResult()
+
+    monkeypatch.setattr(management.subprocess, 'run', fake_run)
+    assert management.supports_cli_option(['codingbrain'], 'doctor', '--full')
+    assert seen[0][0] == ['codingbrain', 'doctor', '--help']
+    assert seen[0][1]['stdin'] is subprocess.DEVNULL
+    assert management.maintenance_args('doctor', ['codingbrain'], deep_doctor=False) == ['codingbrain', 'doctor']
+    assert management.maintenance_args('doctor', ['codingbrain'], deep_doctor=True) == ['codingbrain', 'doctor', '--full']
+    with pytest.raises(ValueError):
+        management.supports_cli_option(['codingbrain'], 'install', '--yes')
+
+
+def test_legacy_doctor_uses_basic_only_and_labels_capabilities(tmp_path, monkeypatch):
+    c, w = session(tmp_path)
+    probes=[]
+    monkeypatch.setattr(management, 'safe_probe', lambda args, timeout=6: True)
+    monkeypatch.setattr(management, 'supports_cli_option', lambda cli, op, flag: (probes.append((cli, op, flag)), False)[1])
+    r = c.get('/api/setup', headers=token(w)).json()['readiness']
+    assert r['full_installer_available'] is True
+    assert r['deep_doctor_available'] is False
+    assert 'Basic check' in r['doctor_note']
+    runs=[]
+    monkeypatch.setattr(w, '_execute', lambda job: runs.append(job.command))
+    action = c.post('/api/system/action?action=doctor', headers=token(w), json={'confirmed':True})
+    assert action.status_code == 200
+    assert action.json()['diagnostic_level'] == 'basic'
+    assert w.jobs[action.json()['job']['id']].command == ['codingbrain', 'doctor']
+    assert all(flag == '--full' and op == 'doctor' for _,op,flag in probes)
+
+
+def test_current_doctor_uses_deep_when_supported(tmp_path, monkeypatch):
+    c, w = session(tmp_path)
+    monkeypatch.setattr(management, 'supports_cli_option', lambda *args: True)
+    monkeypatch.setattr(w, '_execute', lambda job: None)
+    r = c.post('/api/system/action?action=doctor', headers=token(w), json={'confirmed':True})
+    assert r.status_code == 200
+    assert r.json()['diagnostic_level'] == 'deep'
+    assert w.jobs[r.json()['job']['id']].command == ['codingbrain', 'doctor', '--full']
+
+
+def test_authentication_and_supervisor_routing_are_separate(tmp_path, monkeypatch):
+    """A user is connected only if official CLI auth succeeded AND routing is enabled."""
+    w = Workspace(home=tmp_path, executable='codingbrain')
+    cfg = tmp_path / '.local' / 'CodingBrain' / 'config'
+    cfg.mkdir(parents=True)
+    (cfg / 'config.json').write_text(json.dumps({
+        'supervisors': {'claude': {'enabled': True}, 'codex': {'enabled': False}}
+    }), encoding='utf-8')
+    fake = [
+        {'id':'claude', 'name':'Claude Code','status':'authenticated', 'authenticated':True},
+        {'id':'codex','name':'OpenAI Codex','status':'authenticated', 'authenticated':True},
+    ]
+    monkeypatch.setattr(management,'providers_snapshot',lambda: [p.copy() for p in fake])
+    states={p['id']:p for p in w.configured_providers()}
+    assert states['claude']['connection_state']=='connected'
+    assert states['codex']['connection_state']=='signed-in'
+    fake[0].update(status='auth-unverified',authenticated=False)
+    assert w.configured_providers()[0]['connection_state']=='unverified'
+    fake[0].update(status='not-installed')
+    assert w.configured_providers()[0]['connection_state']=='not-installed'
+
+
+def test_windows_user_cli_shims_can_be_detected_after_stale_path(tmp_path, monkeypatch):
+    """A packaged desktop often lacks npm's late-added PATH; only safe fixed paths are checked."""
+    monkeypatch.setattr(management, 'IS_WINDOWS', True)
+    monkeypatch.setattr(management.shutil, 'which', lambda name: None)
+    monkeypatch.setenv('APPDATA', str(tmp_path / 'Roaming'))
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path / 'Local'))
+    shim = tmp_path / 'Roaming' / 'npm' / 'codex.cmd'
+    shim.parent.mkdir(parents=True)
+    shim.write_text('@echo off\n')
+    assert management.installed_cli('codex') == str(shim)
+    assert management.installed_cli('claude') is None
+    assert management.installed_cli('node') is None
+    shim.unlink()
+    winget = tmp_path / 'Local' / 'Microsoft' / 'WinGet' / 'Links' / 'codex.exe'
+    winget.parent.mkdir(parents=True)
+    winget.touch()
+    assert management.installed_cli('codex') == str(winget)

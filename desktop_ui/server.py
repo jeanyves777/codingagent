@@ -144,6 +144,96 @@ class Workspace:
         staging.write_text(json.dumps({"completed": bool(complete)}), encoding="utf-8")
         os.replace(staging, self.state_path)
 
+    def _brain_home(self) -> Path:
+        if self._home_override:
+            return self.home / ".local" / "CodingBrain"
+        return Path(os.environ.get("CODINGBRAIN_HOME") or
+                    (Path(os.environ.get("LOCALAPPDATA", str(self.home / "AppData" / "Local"))) / "CodingBrain"))
+
+    def engine_client(self):
+        """The one typed-API transport, started from the installed engine's own interpreter."""
+        from .engine_client import EngineClient
+        command = self.cli_command()
+        with self._engine_lock():
+            client = getattr(self, "_engine", None)
+            if client is None or client.command != command:
+                if client is not None:
+                    client.close()
+                client = self._engine = EngineClient(command=command, cwd=str(self.home))
+            return client
+
+    def _engine_lock(self):
+        lock = getattr(self, "_engine_lock_object", None)
+        if lock is None:
+            lock = self._engine_lock_object = threading.Lock()
+        return lock
+
+    def _typed_status(self, core: dict) -> dict | None:
+        """With API 1.0 installed, versions and provider readiness come from the engine itself
+        (engine.info, providers.list), not from CLI probes or modules bundled into this UI."""
+        from .engine_client import EngineError
+        try:
+            client = self.engine_client()
+            info = client.call("engine.info", {}, None, 60)
+            providers = client.call("providers.list", {}, None, 120)
+        except (EngineError, ValueError) as error:
+            core.update(typed_api=False, conversation=False,
+                        detail=f"The installed engine's typed API did not start: {str(error)[:300]}")
+            return None
+        core.update(version=info.get("engine_version") or core.get("version"), api_version=info.get("api_version"),
+                    conversation=True, detail=f"Typed engine API {info.get('api_version')} (engine {info.get('engine_version')})")
+        return {"providers": providers}
+
+    def engine_status(self, refresh: bool = False) -> dict:
+        """Truthful installed-engine/model readiness; the local UI is a separate process.
+
+        Cache cheap probes briefly so a slow provider CLI doesn't freeze chat or activity.
+        """
+        now = time.monotonic()
+        cached = getattr(self, "_engine_status_cache", None)
+        if not refresh and cached and now - cached[0] < 20:
+            return cached[1]
+        try:
+            command = self.cli_command()
+        except ValueError:
+            command = None
+        core = management.engine_capabilities(command)
+        typed = self._typed_status(core) if core.get("typed_api") else None
+        model = management.configured_model(self._brain_home() / "config" / "config.json")
+        ollama = management.local_ollama_models()
+        wanted = model["model"]
+        names = ollama["models"]
+        # Ollama usually uses ':latest' for the default tag. Do not treat a
+        # configured model as ready just because the Ollama executable exists.
+        available = (model["provider"] == "ollama" and bool(wanted) and
+                     any(name == wanted or (":" not in wanted and name == wanted + ":latest") for name in names))
+        chat = bool(core["available"] and core["conversation"])
+        if not core["available"]:
+            title, detail = "Coding Brain engine unavailable", core["detail"]
+            next_action = "setup"
+        elif not chat:
+            title = f"Engine v{core['version'] or '?'} needs the conversational release"
+            detail = "Desktop UI is connected, but this installed engine cannot handle general chat. The development PR is not an installed release."
+            next_action = "updates"
+        elif model["provider"] == "ollama" and not available:
+            title = "Local coding model not ready"
+            detail = (f"Configured model {wanted} is not installed or Ollama is stopped." if wanted else
+                      "Choose and install a local model through Coding Brain setup.")
+            next_action = "setup"
+        else:
+            title = "Engine and chat interface available"
+            detail = "Provider readiness and actual model generation require a deep system test."
+            next_action = None
+        report = {"bridge_online": True, "engine": core, "model": {
+            "provider": model["provider"], "name": wanted, "ready": available,
+            "ollama_running": ollama["running"], "installed_models": names,
+            "detail": ollama["detail"] if model["provider"] == "ollama" else "Provider readiness not verified"},
+            "chat_available": chat, "title": title, "detail": detail, "next_action": next_action}
+        if typed:
+            report["providers"] = typed["providers"]
+        self._engine_status_cache = (now, report)
+        return report
+
     def installation_status(self) -> dict:
         try:
             cli = self.cli_command()
@@ -156,26 +246,58 @@ class Workspace:
             report["full_installer_available"] = found is True
             report["full_installer_note"] = ("Install and repair through Coding Brain's own guided installer" if found is True
                     else "First publish/update to a Coding Brain release containing the full installer")
+        # Detect option support rather than inferring it from an installed CLI version.
+        report["deep_doctor_available"] = bool(cli and management.supports_cli_option(cli, "doctor", "--full"))
+        report["doctor_note"] = ("Deep engine verification available" if report["deep_doctor_available"]
+                                 else "Basic check available; full model/sandbox tests require a backend update")
         report["onboarding_completed"] = self.first_run_completed()
         return report
 
     def configured_providers(self) -> list[dict]:
         providers = management.providers_snapshot()
-        if self._home_override:
-            base = self.home / ".local" / "CodingBrain"
-        elif os.name == "nt":
-            base = Path(os.environ.get("CODINGBRAIN_HOME") or
-                        (Path(os.environ.get("LOCALAPPDATA", str(self.home / "AppData" / "Local"))) / "CodingBrain"))
-        else:
-            base = Path(os.getenv("CODINGBRAIN_HOME") or (self.home / ".local" / "CodingBrain"))
+        base = self._brain_home()
         try:
             conf = json.loads((base / "config" / "config.json").read_text(encoding="utf-8"))
             supervisors = conf.get("supervisors", {})
         except (OSError, ValueError, TypeError):
             supervisors = {}
+        status = self.engine_status()
+        local = status["model"]
+        engine_view = {item["id"]: item for item in status.get("providers") or []}
         for provider in providers:
+            described = engine_view.get(provider["id"])
+            if described and provider["id"] in {"claude", "codex"}:
+                # The installed engine's own view (providers.list) wins over this UI's CLI probes.
+                signed_in = described.get("authentication") == "signed_in"
+                provider["authenticated"] = signed_in
+                provider["status"] = ("not-installed" if not described.get("installed") else "authenticated" if signed_in
+                                      else "sign-in-needed" if described.get("authentication") == "signed_out"
+                                      else "auth-unverified")
+                provider["engine_readiness"] = described.get("readiness")
+                provider["source"] = "engine"
+                provider["detail"] = (f"Installed engine reports {described.get('readiness')}"
+                                      + (f": {described['last_error']}" if described.get("last_error") else ""))[:400]
+                supervisors = {**supervisors, provider["id"]: {"enabled": bool(described.get("enabled"))}}
+            if provider["id"] == "ollama":
+                provider["model_name"] = local["name"]
+                provider["model_ready"] = local["ready"]
+                provider["ollama_running"] = local["ollama_running"]
+                provider["detail"] = (f"Model {local['name']} is available via Ollama (generation not verified)"
+                                      if local["ready"] else
+                                      f"Configured model {local['name'] or '(none)'} is unavailable or Ollama is stopped")
+                provider["status"] = "model-detected" if local["ready"] else "model-not-ready"
             if provider["id"] in {"claude", "codex"}:
-                provider["supervisor_enabled"] = bool(supervisors.get(provider["id"], {}).get("enabled"))
+                enabled = bool(supervisors.get(provider["id"], {}).get("enabled"))
+                provider["supervisor_enabled"] = enabled
+                # Signing in and actually being enabled are independent facts.
+                # Never tell the UI it is connected merely because a CLI exists.
+                provider["connection_state"] = (
+                    "connected" if provider["authenticated"] and enabled else
+                    "signed-in" if provider["authenticated"] else
+                    "needs-sign-in" if provider["status"] == "sign-in-needed" else
+                    "not-installed" if provider["status"] == "not-installed" else
+                    "unverified"
+                )
         return providers
 
     def sign_in(self, provider_id: str) -> None:
@@ -197,7 +319,9 @@ class Workspace:
             raise ValueError("Coding Brain rejected this supervisor setting")
 
     def maintenance(self, action: str) -> dict:
-        command = management.maintenance_args(action, self.cli_command())
+        cli = self.cli_command()
+        deep_doctor = management.supports_cli_option(cli, "doctor", "--full") if action == "doctor" else True
+        command = management.maintenance_args(action, cli, deep_doctor=deep_doctor)
         if action in {"install_full", "update_engine", "repair"}:
             # New console owns prompts, elevation and restarts. No silent consent.
             management.launch_interactive_windows(command)
@@ -209,7 +333,8 @@ class Workspace:
             self.jobs[job.id] = job
             self.active = job.id
         threading.Thread(target=self._execute, args=(job,), daemon=True).start()
-        return {"opened_terminal":False, "job":job.view()}
+        return {"opened_terminal":False, "job":job.view(),
+                "diagnostic_level": ("deep" if deep_doctor else "basic") if action == "doctor" else None}
 
 
     def cli_command(self) -> list[str]:
@@ -223,7 +348,7 @@ class Workspace:
                 raise ValueError("Batch-based CLI launchers are not supported by the UI bridge")
             return [self.executable]
         if os.name == "nt":
-            local = Path(os.environ.get("LOCALAPPDATA", self.home / "AppData" / "Local")) / "CodingBrain"
+            local = self._brain_home()
             current = local / "app" / "current.json"
             try:
                 version = json.loads(current.read_text(encoding="utf-8"))["version"]
@@ -340,25 +465,24 @@ class Workspace:
             job = Job(mode, str(self.project) if self.project else None, command)
             self.jobs[job.id] = job
             self.active = job.id
-        # Typed service calls preserve the existing engine's permission model.
-        # Fall back to the legacy CLI only on machines without an importable brain;
-        # it cannot approve protected actions non-interactively.
+        # Chat, new projects and tasks go through the installed engine's typed API (one transport,
+        # the engine's own approval rules). Without it, nothing is faked: no canned greeting, and
+        # protected execution does not start.
         if self.use_core:
-            try:
-                from .core import supported, run as core_run, chat as core_chat, create_new
-                if supported():
-                    job.core = True
-                    job.on_project_created = lambda p: self.choose(p)
-                    target = core_run if mode == "run" else create_new if mode == "new" else core_chat
-                    threading.Thread(target=target, args=(job,), daemon=True).start()
-                    return job
-            except ImportError:
-                pass
-        if mode in {"new", "run"} and self.use_core:
-            del self.jobs[job.id]
-            if self.active == job.id:
-                self.active = None
-            raise ValueError("The installed Coding Brain engine is unavailable; protected execution did not start")
+            status = self.engine_status()
+            if status["engine"].get("typed_api"):
+                from .core import run as core_run, chat as core_chat, create_new
+                job.core = True
+                job.engine = self.engine_client()
+                job.on_project_created = lambda p: self.choose(p)
+                target = core_run if mode == "run" else create_new if mode == "new" else core_chat
+                threading.Thread(target=target, args=(job,), daemon=True).start()
+                return job
+            if mode in {"new", "run"} or not status["engine"].get("conversation"):
+                del self.jobs[job.id]
+                if self.active == job.id:
+                    self.active = None
+                raise ValueError(f"{status['title']}. {status['detail']} Nothing was started.")
         threading.Thread(target=self._execute, args=(job,), daemon=True).start()
         return job
 
@@ -471,6 +595,10 @@ def create_app(state: Workspace | None = None) -> FastAPI:
         return {"project": {"name": state.project.name, "path": str(state.project),
                             "git": state.git_branch(state.project)} if state.project else None,
                 "projects": state.projects(), "active": active.view() if active else None}
+
+    @app.get("/api/engine/status", dependencies=[Depends(auth)])
+    def engine_status(refresh: bool = False):
+        return state.engine_status(refresh=refresh)
 
     @app.get("/api/setup", dependencies=[Depends(auth)])
     def setup_status():

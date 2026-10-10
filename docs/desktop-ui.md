@@ -79,7 +79,7 @@ The Windows CI validates the actual installer by installing it into a temporary 
 
 ## First-run setup and provider control center (next desktop build)
 
-The desktop first-run experience is now a guided **Control Center** with three tabs: **Setup**, **AI Providers**, and **Updates**. It does not assume that software found on PATH is proven operational. Basic preflight marks only detection; the **Deep system test** explicitly delegates real readiness checks to `codingbrain doctor --full`.
+The desktop first-run experience is now a guided **Control Center** with three tabs: **Setup**, **AI Providers**, and **Updates**. It does not assume that software found on PATH is proven operational. Basic preflight marks only detection. The diagnostic button detects what the installed CLI actually supports: newer backends run **Deep system test** (`codingbrain doctor --full`), while stable v0.9.0 uses a clearly labeled **Basic system check** (`codingbrain doctor`), never an unsupported flag.
 
 The **Install & verify full system** button delegates to Coding Brain's official guided `codingbrain install --profile full`, including Docker, WSL, Ollama, its model, optional Claude/Codex CLIs, and other supported dependencies. It is only enabled if the installed backend exposes that command (introduced in the pending installer PR #8). Installation runs in a **visible Windows console**, with the backend installer retaining full vendor-license consent, elevation, restart/resume checks, and authentication interaction. There is **no silent `--yes`**, remote-script execution, or independent installation framework in the UI.
 
@@ -145,6 +145,12 @@ The desktop owns no orchestration. `desktop_ui/engine_client.py` starts one engi
 | Stop | `tasks.stop` over the same engine session; the running step ends `cancelled` |
 | Activity | the task's live journal events (`op_id`-scoped), heartbeats when quiet |
 
+Readiness (`GET /api/engine/status`) comes from the installed engine: with API 1.0 installed, the
+version comes from `engine.info` and Claude/Codex readiness from `providers.list`, run by the
+installed engine's interpreter (never a module bundled into the UI). The CLI probes remain only for
+older installed engines such as v0.9.0, where chat is reported unavailable and refused, with no
+canned greeting, and protected execution never starts.
+
 If the engine process dies, the next call starts a new one from the persisted state; a task whose
 engine died is reported as interrupted, never as passed. Tests: `tests/test_desktop_engine.py`
 (the window's HTTP endpoints, the desktop core and the real engine together, with a fake model
@@ -154,3 +160,78 @@ For the core/backend agent, see **[`docs/backend-integration-handoff.md`](backen
 It defines the remaining clean-machine installation/bootstrap, stable updater, true global
 conversation, multi-provider backend adapters, typed activity and task lifecycle, and
 Windows end-to-end verification contracts. Those gaps are **not claimed implemented in the UI**.
+
+## Truthful async loading and progress (desktop UI)
+
+The setup window, provider actions, updater, and chat composer expose async states. The UI does **not** invent percentages, fake stages, or mark launched external terminals as completed installations.
+
+- First-run/readiness probe: `control-feedback` announces the probe and elapsed time, plus accessible skeletons in the component grid. Refresh is disabled while its request is pending. The full-install button is unavailable until capability discovery confirms it is supported.
+- System actions: only explicitly confirmed operations launch. While an API-backed operation is pending, the corresponding button is disabled and displays a spinner. The UI polls the backend job, shows real output, and releases the button on success or failure. When an official terminal opens, the UI states **launched**, not **completed**, and directs users to finish in that terminal.
+- Provider sign-in: opens official CLI after approval, shows a temporary launching state, and asks the user to refresh authentication status afterward. No password/token/session content is captured.
+- Chat: a typing message and spinner appear only while a request or task is outstanding, and are removed when a backend output arrives or execution ends. Repeated Enter/send cannot start duplicate work.
+- Failures: connectivity errors expose an error state; after three polling failures the UI warns the operation might still be active rather than claiming cancellation. No automatic retry initiates a second installer or coding task.
+
+Regressions: `python tests/smoke_loading_browser.py` simulates deliberately unresolved API requests in Chromium and verifies live loading, resolution, failure, retry, duplicate-submit prevention, and zero JavaScript exceptions. It runs alongside `tests/smoke_browser.py` in `.github/workflows/desktop-windows.yml`.
+
+## Desktop-native approvals and legacy diagnostic support
+
+The Control Center and task stop/AI-provider controls never use browser-origin `window.confirm`, `window.alert` or `window.prompt`. They display a Coding Brain `<dialog>` with explicit action and Cancel buttons. Default keyboard focus is Cancel. Escape, dismissing the backdrop, and Cancel all decline; no protected endpoint is called unless the user affirmatively selects the action. The backend still requires explicit `{confirmed:true}` for system changes and provider sign-in. This is a user-interface improvement, **not** a bypass of the engine's existing digest-bound plan approvals.
+
+Older Coding Brain installations lack `doctor --full`; desktop probes `codingbrain doctor --help` without running a real test to detect whether the option is supported. On older versions, the UI labels the command **Basic system check** and submits only `codingbrain doctor`, reporting it as a basic check even if it passes. Full model and sandbox readiness remain unverified pending a backend upgrade. On newer installations the deep command is used. The backend itself performs the option check, so calling the local UI API directly cannot force an unsupported `--full` flag.
+
+Regression evidence: `python tests/smoke_confirm_browser.py` rejects all native browser dialogs and exercises explicit confirmation, Escape/Cancel refusal, provider sign-in, and legacy doctor labeling. `tests/test_desktop_management.py` tests both capability branches, option probing through `--help`, and allowlisted maintenance commands.
+
+
+## Subscription provider connection and rechecks
+
+The provider screen distinguishes **CLI installation**, **vendor authentication**, and
+**Coding Brain supervisor routing**. Claude or Codex is labeled `Connected` only when
+its *official CLI status check succeeds* and the supervisor is enabled in the
+Coding Brain configuration. A CLI that is signed in but disabled is labeled
+`Authenticated — supervisor disabled`; installed without verified CLI auth is
+never claimed connected. The screen provides **Recheck connections** and a
+specific **Recheck connection** action for authenticated providers rather than
+asking users to sign in again. After an explicit launch of an official CLI
+sign-in, read-only status checks repeat for up to two minutes while the panel
+is open; launching a terminal is never treated as successful authentication.
+
+Windows packaged applications sometimes inherit PATH from before npm/winget
+added CLI shims. Provider discovery first uses PATH and then checks fixed
+per-user npm shims and WinGet links; this does not run external executables to
+find them and does not read or store account tokens. If a CLI cannot be found,
+restart the desktop after installing it, then select **Recheck connections**.
+
+Test: `python tests/smoke_provider_browser.py` and
+`python -m pytest -q tests/test_desktop_management.py`.
+
+
+## Installed engine and model readiness (desktop integration)
+
+The green **Desktop connected** footer confirms only the loopback UI bridge,
+**not** that the installed Coding Brain engine, its local Qwen model, or its
+premium supervisors are ready. The header checks the **installed** engine
+through read-only CLI capability probes (`codingbrain version`,
+`codingbrain chat --help`, `codingbrain api --help`); the model pill shows the
+configured model from the installed engine's own configuration. Ollama model
+availability comes from local `http://127.0.0.1:11434/api/tags`, not merely
+the presence of `ollama.exe`. No inference requests, remote network calls or
+system changes occur during these probes. A detected model still requires a
+deep doctor/self-test to demonstrate actual generation.
+
+A v0.9.0 engine cannot handle ordinary questions through the new chat
+interface. The UI shows a non-green warning and an Update link rather than
+pretending the local bridge is a connected brain. The conversational/API PRs
+must be merged, released and installed before general chat is available on a
+normal Windows installation.
+
+Claude Code and Codex each display independent readiness: CLI found, official
+sign-in verified, and supervisor enabled in Coding Brain's configuration.
+An authenticated premium supervisor is **not** automatically the primary
+chat model. The composer displays distinct provider chips without exposing
+account credentials.
+
+**Backend integration requirement for PR #17:** Prefer typed `engine.info`
+and `providers.list` over CLI capability probes once the versioned engine API
+is shipped; preserve the honest UI-facing fields and human approvals. The
+Windows acceptance test must cover a real Qwen inference turn, authenticated
+premium supervisors, and recovery after upgrading an older engine.

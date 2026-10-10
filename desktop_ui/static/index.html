@@ -28,7 +28,7 @@
           <span class="breadcrumb" id="project-breadcrumb">Global conversation</span>
         </div>
         <div class="header-actions">
-          <button class="connection-pill" id="header-setup" title="Check Coding Brain installation"><span class="dot green"></span> Local workspace</button>
+          <button class="connection-pill" id="header-setup" title="View installed engine readiness"><span class="dot" id="engine-dot"></span><span id="engine-label">Checking engine…</span></button>
           <button class="icon-btn explorer-reopen" id="open-explorer" title="Open project explorer" aria-label="Open project explorer" aria-controls="explorer" aria-expanded="true" type="button">▱</button>
           <button class="icon-btn" id="refresh" title="Refresh" aria-label="Refresh">↻</button>
           <div class="profile-anchor">
@@ -44,6 +44,12 @@
           </div>
         </div>
       </header>
+      <div class="engine-banner" id="engine-banner" role="status" aria-live="polite" hidden>
+        <span class="engine-banner-mark" id="engine-banner-mark" aria-hidden="true">!</span>
+        <div class="engine-banner-copy"><strong id="engine-banner-title">Checking local brain…</strong><span id="engine-banner-detail"></span></div>
+        <button type="button" id="engine-banner-action" class="engine-banner-action">Open setup</button>
+        <button type="button" id="engine-banner-close" aria-label="Hide readiness notice" title="Dismiss notice">×</button>
+      </div>
       <div class="columns">
         <main class="conversation" aria-label="Coding Brain conversation">
           <div class="thread" id="thread" role="log" aria-live="polite" aria-relevant="additions text">
@@ -70,7 +76,7 @@
               <div class="composer-bottom">
                 <div class="composer-options">
                   <button class="project-chip" id="project-picker"><span class="folder-glyph">▱</span><span id="project-label">Choose project</span><span class="chevron">⌄</span></button>
-                  <button class="model-chip" id="model-label" title="View your coding providers">◈ &nbsp; Coding Brain <span class="chevron">⌄</span></button>
+                  <button class="model-chip" id="model-label" title="Inspect the installed local model and supervisors" aria-label="Inspect configured models">◈ &nbsp; Checking models… <span class="chevron">⌄</span></button>
                   <span class="mode-toggle" role="group" aria-label="Message mode">
                     <button id="mode-chat" class="active" aria-pressed="true">Chat</button><button id="mode-run" aria-pressed="false">Run task</button><button id="mode-new" aria-pressed="false">New project</button>
                   </span>
@@ -79,6 +85,11 @@
               </div>
             </div>
             <p class="hint">Enter to send · Shift+Enter for a new line <span class="hint-separator">·</span> Protected actions require your approval</p>
+            <div class="readiness-chips" id="readiness-chips" role="status" aria-label="Installed model and supervisor readiness">
+              <span id="readiness-local">◈ Local model: checking…</span>
+              <span id="readiness-claude">Claude: checking…</span>
+              <span id="readiness-codex">Codex: checking…</span>
+            </div>
           </section>
         </main>
         <aside class="explorer" id="explorer" aria-label="Project explorer">
@@ -104,10 +115,29 @@
     <div class="control-shell">
       <div class="control-head"><div><span class="eyebrow">CODING BRAIN · CONTROL CENTER</span><h2 id="control-heading">Set up your coding workspace</h2><p id="control-subtitle">Check your local engine, install requirements and connect optional providers.</p></div><button class="icon-btn" id="control-close" aria-label="Close control center">✕</button></div>
       <nav class="control-tabs" aria-label="Control center views"><button id="control-tab-setup" class="active" type="button">Setup</button><button id="control-tab-providers" type="button">AI Providers</button><button id="control-tab-updates" type="button">Updates</button></nav>
-      <section id="control-setup" class="control-page"><div class="setup-hero"><div class="setup-emblem">◇</div><div><h3>One brain. Everything connected.</h3><p id="setup-message">Checking the installed environment…</p></div></div><div id="setup-components" class="component-grid"></div><div class="control-actions"><button class="primary-button" id="full-setup" type="button">Install & verify full system</button><button class="secondary-button" id="setup-check" type="button">Refresh checks</button><button class="secondary-button" id="deep-check" type="button">Deep system test</button><button class="secondary-button" id="setup-continue" type="button">Continue to workspace</button></div><p class="control-note">System changes run through the official Coding Brain installer after your approval. Restart/elevation and account sign-in may require your interaction.</p></section>
-      <section id="control-providers" class="control-page" hidden><div class="panel-heading"><h3>Models and connected agents</h3><p>Local Qwen stays the default worker. Subscription agents can assist within your budgets; additional services require supported adapters.</p></div><div id="provider-list" class="provider-list"></div><p class="control-note">Signing in is handled by each provider's official CLI. This app never asks for, saves, or displays account passwords, session cookies, or API keys.</p></section>
+      <div id="control-feedback" class="control-feedback" role="status" aria-live="polite" aria-atomic="true" hidden>
+        <span id="control-feedback-icon" class="control-feedback-icon" aria-hidden="true"></span>
+        <div class="control-feedback-copy"><strong id="control-feedback-title">Checking system requirements</strong><p id="control-feedback-detail">Reading the installed Coding Brain environment…</p></div>
+        <span id="control-feedback-elapsed" class="control-feedback-elapsed" hidden></span>
+      </div>
+      <section id="control-setup" class="control-page"><div class="setup-hero"><div class="setup-emblem">◇</div><div><h3>Your Coding Brain environment</h3><p id="setup-message">Checking the installed environment…</p></div></div><div id="setup-components" class="component-grid"></div><div class="control-actions"><button class="primary-button" id="full-setup" type="button">Install & verify full system</button><button class="secondary-button" id="setup-check" type="button">Refresh checks</button><button class="secondary-button" id="deep-check" type="button">Deep system test</button><button class="secondary-button" id="setup-continue" type="button">Continue to workspace</button></div><p class="control-note">System changes run through the official Coding Brain installer after your approval. Restart/elevation and account sign-in may require your interaction.</p></section>
+      <section id="control-providers" class="control-page" hidden><div class="panel-heading provider-heading"><div><h3>Models and connected agents</h3><p>Sign-in and supervisor activation are verified separately. Local Qwen remains the default worker.</p></div><button type="button" class="secondary-button" id="refresh-providers" aria-label="Recheck provider connections">↻ &nbsp; Recheck connections</button></div><div id="provider-list" class="provider-list" aria-live="polite"></div><p class="control-note">Signing in is handled by each provider's official CLI. This app never asks for, saves, or displays account passwords, session cookies, or API keys.</p></section>
       <section id="control-updates" class="control-page" hidden><div class="setup-hero"><div class="setup-emblem">↻</div><div><h3>Stay up to date</h3><p>Updates are pulled from Coding Brain's verified stable release channel. Draft PRs are not installed.</p></div></div><div class="control-actions"><button class="primary-button" id="check-updates" type="button">Check for updates</button><button class="secondary-button" id="apply-update" type="button">Install latest stable</button><button class="secondary-button" id="repair-install" type="button">Repair installation</button></div><div id="maintenance-log" class="maintenance-log" role="log" aria-live="polite">No update check has run yet.</div></section>
     </div>
+  </dialog>
+  <!-- A native HTML dialog styled as part of Coding Brain; not a window.alert/confirm.
+       A click on Continue is the *only* affirmative result. Cancel and Escape refuse. -->
+  <dialog id="action-dialog" class="action-dialog" aria-labelledby="action-heading" aria-describedby="action-description">
+    <form method="dialog" class="action-card">
+      <div class="action-symbol" aria-hidden="true">◇</div>
+      <span class="eyebrow">CODING BRAIN · CONFIRM ACTION</span>
+      <h2 id="action-heading">Confirm action</h2>
+      <p id="action-description">Confirm what Coding Brain should do.</p>
+      <div class="action-controls">
+        <button id="action-cancel" class="secondary-button" type="submit" value="cancel">Cancel</button>
+        <button id="action-approve" class="primary-button" type="submit" value="proceed">Continue</button>
+      </div>
+    </form>
   </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
 </body>
