@@ -20,6 +20,10 @@
   let engineRefresh = null;
   let controlLoad = null;
   let activeMaintenance = null;
+  let gitReading = false;
+  let gitGeneration = 0;
+  let gitLastSignature = '';
+  let gitLatest = null;
   let maintenancePoll = null;
   let feedbackTimer = null;
   const busyButtons = new WeakMap();
@@ -295,8 +299,123 @@
       value === 'new' ? 'Describe the app you want Coding Brain to create...' : 'Describe a coding goal...';
   }
 
+  function gitEmpty(messageText) {
+    $('git-details').hidden = true;
+    $('git-notice').hidden = false;
+    $('git-notice').textContent = messageText || 'Select a Git project to see branches and recent commits.';
+    $('git-updated').textContent = 'Local Git · Waiting for a project';
+    if (!currentProject) $('branch-name').textContent = '◇ No repository';
+  }
+
+  function gitText(parent, tag, value, className) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    element.textContent = value;
+    parent.append(element);
+    return element;
+  }
+
+  function renderGitSnapshot(snapshot) {
+    if (!snapshot || !snapshot.available) {
+      gitEmpty(snapshot?.reason || 'Git is not available for this project.');
+      $('branch-name').textContent = '◇ No repository';
+      return;
+    }
+    $('git-notice').hidden = true;
+    $('git-details').hidden = false;
+    const signature = JSON.stringify({
+      branch: snapshot.branch, head: snapshot.head, branches: snapshot.branches,
+      commits: snapshot.commits, changes: snapshot.changes, counts: snapshot.counts
+    });
+    $('git-updated').textContent = 'Live · Checked ' +
+      new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit'});
+    $('branch-name').textContent = '◇ ' + (snapshot.branch || 'Detached HEAD');
+    if (signature === gitLastSignature) return;
+    gitLastSignature = signature;
+    $('git-current-branch').textContent = snapshot.branch || 'Unknown branch';
+    $('git-current-head').textContent = snapshot.head ?
+      'HEAD ' + snapshot.head.slice(0, 10) + (snapshot.detached ? ' · Detached' : '') :
+      'No commits yet';
+    const counts = snapshot.counts || {};
+    $('git-summary-staged').textContent = (counts.staged || 0) + ' staged';
+    $('git-summary-modified').textContent = (counts.modified || 0) + ' modified';
+    $('git-summary-untracked').textContent = (counts.untracked || 0) + ' untracked';
+    $('git-changes-count').textContent = (snapshot.changes || []).length +
+      (snapshot.changes_truncated ? '+' : '');
+    const changed = $('git-changes');
+    changed.replaceChildren();
+    if (!snapshot.changes?.length) gitText(changed, 'p', 'Working tree clean', 'git-empty');
+    for (const item of snapshot.changes || []) {
+      const row = document.createElement('div');
+      row.className = 'git-file-row'; row.setAttribute('role', 'listitem');
+      gitText(row, 'span', item.status.trim() || '??',
+        'git-file-status' + (item.conflicted ? ' git-conflict' : item.untracked ? ' git-new' : ''));
+      gitText(row, 'span', item.path, 'git-file-name');
+      changed.append(row);
+    }
+    const branchList = $('git-branches');
+    branchList.replaceChildren();
+    const branches = snapshot.branches || [];
+    $('git-branches-count').textContent = branches.length + (branches.length >= 25 ? '+' : '');
+    if (!branches.length) gitText(branchList, 'p', 'No local branches yet', 'git-empty');
+    for (const name of branches) {
+      const row = document.createElement('div');
+      row.className = 'git-branch-row' + (name === snapshot.branch ? ' current' : '');
+      row.setAttribute('role', 'listitem');
+      gitText(row, 'span', name === snapshot.branch ? '●' : '◇', 'git-branch-mark');
+      gitText(row, 'span', name, 'git-branch-label');
+      branchList.append(row);
+    }
+    const history = $('git-commits');
+    history.replaceChildren();
+    if (!snapshot.commits?.length) gitText(history, 'p', 'No commits yet', 'git-empty');
+    for (const item of snapshot.commits || []) {
+      const row = document.createElement('div');
+      row.className = 'git-commit-row'; row.setAttribute('role', 'listitem');
+      const main = gitText(row, 'span', item.subject || '(empty commit message)', 'git-commit-message');
+      main.title = item.subject || '(empty commit message)';
+      const secondary = document.createElement('span');
+      secondary.className = 'git-commit-meta';
+      const date = new Date(item.date);
+      gitText(secondary, 'span', item.short || item.sha.slice(0, 7), 'git-hash');
+      gitText(secondary, 'span', item.author || 'Unknown', 'git-author');
+      gitText(secondary, 'time', Number.isNaN(date.getTime()) ?
+        '' : date.toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}), '');
+      row.append(secondary);
+      history.append(row);
+    }
+  }
+
+  async function refreshGit(force = false) {
+    if (gitReading || !currentProject || (!force && document.hidden)) return;
+    const projectPath = currentProject.path;
+    const generation = gitGeneration;
+    gitReading = true;
+    try {
+      const result = await api('/api/git/snapshot');
+      // Ignore stale requests after switching projects. No response may overwrite the new repo.
+      if (generation !== gitGeneration || currentProject?.path !== projectPath) return;
+      gitLatest = result;
+      renderGitSnapshot(result);
+    } catch (error) {
+      if (generation === gitGeneration && currentProject?.path === projectPath) {
+        $('git-notice').hidden = false;
+        $('git-notice').textContent = 'Git status temporarily unavailable. Refresh to retry.';
+        $('git-updated').textContent = 'Could not refresh Git';
+      }
+    } finally { gitReading = false; }
+  }
+
   function updateProject(project) {
+    const switched = (currentProject?.path || '') !== (project?.path || '');
     currentProject = project;
+    if (switched) {
+      gitGeneration++;
+      gitLastSignature = '';
+      gitLatest = null;
+      gitEmpty(project ? 'Reading local Git branches and history…' :
+        'Choose a project to view its Git history.');
+    }
     $('project-label').textContent = project ? project.name : 'Choose project';
     $('project-breadcrumb').textContent = project ? project.path : 'Global conversation';
     $('explorer-folder').textContent = project ? project.name : 'No project selected';
@@ -305,8 +424,10 @@
     $('profile-project').textContent = project ? project.name : 'No project selected';
     expanded.clear();
     $('preview').hidden = true;
-    if (project) loadTree();
-    else renderEmptyExplorer();
+    if (project) {
+      loadTree();
+      refreshGit(true);
+    } else renderEmptyExplorer();
   }
 
   function renderEmptyExplorer() {
@@ -530,6 +651,10 @@
           message('CODING BRAIN', text + (job.error ? ` ${job.error}` : ''), 'system');
         }
         activeJob = null;
+        if (currentProject) {
+          refreshGit(true);
+          if (!$('file-panel').hidden) loadTree();
+        }
         return;
       }
     } catch(e) { $('footer-status').textContent = 'Connection lost'; toast(e.message); }
@@ -634,17 +759,24 @@
   for (const item of document.querySelectorAll('[data-suggestion]')) {
     item.addEventListener('click', () => {$('prompt').value = item.dataset.suggestion; $('prompt').focus();});
   }
-  for (const kind of ['files','activity']) {
+  for (const kind of ['files','activity','git']) {
     $('tab-' + kind).addEventListener('click', () => {
-      const fileMode = kind === 'files';
-      $('file-panel').hidden = !fileMode;
-      $('activity-panel').hidden = fileMode;
-      $('tab-files').classList.toggle('active', fileMode);
-      $('tab-activity').classList.toggle('active', !fileMode);
-      $('tab-files').setAttribute('aria-selected', String(fileMode));
-      $('tab-activity').setAttribute('aria-selected', String(!fileMode));
+      for (const tab of ['files','activity','git']) {
+        $('tab-' + tab).classList.toggle('active', tab === kind);
+        $('tab-' + tab).setAttribute('aria-selected', String(tab === kind));
+        $(tab === 'files' ? 'file-panel' : tab === 'activity' ? 'activity-panel' : 'git-panel').hidden = tab !== kind;
+      }
+      if (kind === 'git') {
+        if (gitLatest) renderGitSnapshot(gitLatest);
+        else gitEmpty(currentProject ? 'Checking local Git…' : 'Choose a project to view Git.');
+        refreshGit(true);
+      }
     });
   }
+  $('git-refresh').addEventListener('click', () => refreshGit(true));
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && currentProject) refreshGit(true);
+  });
   $('collapse-explorer').addEventListener('click', () => setExplorerVisibility(false));
   $('open-explorer').addEventListener('click', () => setExplorerVisibility(true));
   $('profile-trigger').addEventListener('click', () => {
@@ -1095,6 +1227,9 @@
   }
 
   setInterval(tickTime, 1000);
+  // Poll only while this desktop is visible. This is near-live local state,
+  // not a remote GitHub watcher or a mutating Git operation.
+  setInterval(() => { if (currentProject && !document.hidden) refreshGit(); }, 3000);
   if (!token) message('CODING BRAIN', 'Missing local session token. Launch this page using python -m desktop_ui.', 'system');
   else { renderEmptyExplorer(); refresh(); firstRun(); }
 })();
