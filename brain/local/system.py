@@ -85,7 +85,7 @@ class System:
                 if candidate.is_file():
                     return str(candidate), checked
         for candidate in KNOWN_LOCATIONS.get(name, ()):  # installed, but this session's PATH predates it
-            path = Path(os.path.expandvars(candidate))
+            path = windows_path(candidate)
             checked.append(str(path))
             if path.is_file():
                 return str(path), checked
@@ -315,6 +315,13 @@ class System:
         return time.time()
 
 
+def windows_path(template: str) -> Path:
+    """%VARIABLE% expansion that behaves the same on Windows and in simulated-Windows tests."""
+    import re
+    expanded = re.sub(r"%([^%]+)%", lambda match: os.environ.get(match.group(1), match.group(0)), template)
+    return Path(expanded.replace("\\", os.sep))
+
+
 def npm_prefixes() -> list[str]:
     """npm's global bin folders on Windows, from configuration files only (npm is never run):
     NPM_CONFIG_PREFIX, then `prefix=` in the user's and npm's global .npmrc, then the default."""
@@ -348,7 +355,8 @@ KNOWN_LOCATIONS = {
     "node": (r"%ProgramFiles%\nodejs\node.exe",),
     "npm": (r"%ProgramFiles%\nodejs\npm.cmd",),
     "claude": (r"%USERPROFILE%\.local\bin\claude.exe", r"%LOCALAPPDATA%\Microsoft\WinGet\Links\claude.exe"),
-    "codex": (r"%APPDATA%\npm\codex.cmd", r"%LOCALAPPDATA%\Microsoft\WinGet\Links\codex.exe",
+    "codex": (r"%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe",  # the standalone Codex for Windows
+              r"%APPDATA%\npm\codex.cmd", r"%LOCALAPPDATA%\Microsoft\WinGet\Links\codex.exe",
               r"%USERPROFILE%\.local\bin\codex.exe"),
 }
 
