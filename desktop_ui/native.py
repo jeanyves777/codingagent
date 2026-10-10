@@ -85,7 +85,8 @@ class BridgeProcess:
     def start(self, timeout: int = 30) -> str:
         if self.child is not None:
             raise RuntimeError("Desktop service is already running")
-        self.stopping.clear()
+        if not getattr(self, "_restarting", False):
+            self.stopping.clear()  # a restart must never undo a stop() that came in meanwhile
         env = os.environ.copy()
         env["PYTHONPATH"] = str(self.root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         kwargs = {"cwd": str(Path.home()), "stdin": subprocess.DEVNULL,
@@ -134,7 +135,17 @@ class BridgeProcess:
         if self._python_override is None:
             # An update may have switched app/current.json to another version while we ran.
             self.python = installed_brain_python()
-        return self.start()
+        if self.stopping.is_set():
+            raise RuntimeError("The desktop is closing")
+        self._restarting = True
+        try:
+            address = self.start()
+        finally:
+            self._restarting = False
+        if self.stopping.is_set():  # the window closed while the new bridge was starting
+            self.stop()
+            raise RuntimeError("The desktop is closing")
+        return address
 
     def watch(self, on_restart, on_failure, poll: float = 1.0):
         """Supervise the bridge until stop(): restart it if it exits and report the new address."""
@@ -148,7 +159,8 @@ class BridgeProcess:
                 try:
                     address = self.restart()
                 except RuntimeError as error:
-                    on_failure(str(error))
+                    if not self.stopping.is_set():
+                        on_failure(str(error))
                     return
                 on_restart(address)
         thread = threading.Thread(target=loop, daemon=True)

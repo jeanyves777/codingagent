@@ -45,8 +45,44 @@ def test_release_contains_matching_desktop_version_and_checksums(tmp_path):
             "coding_brain-0.13.0-py3-none-any.whl"} <= set(entries)
     with pytest.raises(ValueError, match="already finalized"):
         finalize(root, installer, portable)
+
+
+def _verify_asset(folder: Path, filename: str) -> subprocess.CompletedProcess:
+    """Run the updater's own Verify-Asset (and Expected-Sha256) from Update-CodingBrain.ps1."""
+    script = str(Path(__file__).resolve().parents[1] / "desktop_ui" / "Update-CodingBrain.ps1").replace("'", "''")
+    command = (f"$ast=[System.Management.Automation.Language.Parser]::ParseFile('{script}',[ref]$null,[ref]$null);"
+               "foreach($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and "
+               "$n.Name -in @('Expected-Sha256','Verify-Asset')}, $true)) { . ([scriptblock]::Create($f.Extent.Text)) };"
+               f"Verify-Asset '{filename}' '{str(folder).replace(chr(39), chr(39) * 2)}' "
+               f"'{str(folder / 'SHA256SUMS').replace(chr(39), chr(39) * 2)}'")
+    return subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                          capture_output=True, text=True, timeout=60)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="runs the updater's PowerShell checksum check")
+def test_updater_refuses_a_tampered_installer(tmp_path):
+    root = _backend_release(tmp_path)
+    installer, portable = tmp_path / "setup.exe", tmp_path / "portable.zip"
+    installer.write_bytes(b"e" * 2048)
+    portable.write_bytes(b"z" * 2048)
+    finalize(root, installer, portable)
+    accepted = _verify_asset(root, "CodingBrain-Setup.exe")
+    assert accepted.returncode == 0, accepted.stderr
     (root / "CodingBrain-Setup.exe").write_bytes(b"tampered")
-    assert hashlib.sha256((root / "CodingBrain-Setup.exe").read_bytes()).hexdigest() != entries["CodingBrain-Setup.exe"]
+    refused = _verify_asset(root, "CodingBrain-Setup.exe")
+    assert refused.returncode != 0 and "SHA256 mismatch" in refused.stdout + refused.stderr
+
+
+def test_desktop_installer_never_accepts_the_environment_plan_for_the_user():
+    """The installer's setup step must show Coding Brain's plan and ask: -Yes/--yes only when the
+    setup script itself was started unattended with -Yes, never by default."""
+    root = Path(__file__).resolve().parents[1] / "installer" / "windows"
+    iss = (root / "CodingBrainDesktop.iss").read_text(encoding="utf-8")
+    setup_line = next(line for line in iss.splitlines() if "Setup-CodingBrain.ps1" in line and line.startswith("Filename"))
+    assert not re.search(r"(?i)\s-Yes\b", setup_line)
+    script = (root / "Setup-CodingBrain.ps1").read_text(encoding="utf-8")
+    assert not re.search(r"(?i)-Full -Yes|install --full --yes", script)
+    assert "$installYes = if ($Yes)" in script and "$cliYes = if ($Yes)" in script
 
 
 @pytest.mark.parametrize("problem", ["wrong_tag", "missing_exe", "tiny_exe"])

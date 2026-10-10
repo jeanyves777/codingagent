@@ -19,7 +19,9 @@ def _git(project: Path, *args: str, allow_failure: bool = False) -> str:
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
     try:
         result = subprocess.run(
-            ["git", "--no-optional-locks", "-C", str(project), *args],
+            # A repository's own config can name commands that status runs (core.fsmonitor);
+            # this read-only view polls every few seconds and must never start them.
+            ["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", str(project), *args],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             stdin=subprocess.DEVNULL, env=env, timeout=GIT_TIMEOUT, check=False,
         )
@@ -28,6 +30,17 @@ def _git(project: Path, *args: str, allow_failure: bool = False) -> str:
     if result.returncode and not allow_failure:
         raise ValueError("Git could not inspect the selected project")
     return result.stdout if result.returncode == 0 else ""
+
+
+# Repository-local settings that make `git status` run a program: filter drivers (clean/process run
+# while Git re-checks changed files) and a file-system monitor. Reading config runs nothing.
+COMMAND_SETTINGS = r"^(filter\..+\.(clean|smudge|process)|core\.fsmonitor)$"
+
+
+def _repository_runs_commands(project: Path) -> bool:
+    found = _git(project, "config", "--local", "--includes", "--get-regexp", COMMAND_SETTINGS, allow_failure=True)
+    return any(line.split(" ", 1)[0].lower() != "core.fsmonitor" or line.split(" ", 1)[-1].strip().lower()
+               not in {"false", "0", "no", "off", ""} for line in found.splitlines() if line.strip())
 
 
 def _changes(raw: str) -> tuple[list[dict], dict]:
@@ -84,8 +97,16 @@ def git_snapshot(project: Path | None) -> dict:
     branch = head or ("Detached HEAD" if detached else "Unborn branch")
     # Different refreshes may observe different revisions during a commit/checkout:
     # the UI applies each complete snapshot atomically and polls again within 3 seconds.
-    raw_status = _git(project, "status", "--porcelain=v1", "-z", "--untracked-files=normal")
-    changes, counts = _changes(raw_status)
+    paused = None
+    if _repository_runs_commands(project):
+        # Opening a folder must never run a program its own .git/config names (for example a
+        # repository received as an archive). Branches and history are still shown.
+        paused = ("Changed files are not shown: this repository's own Git settings name programs "
+                  "(filters or a file monitor) that checking them would run.")
+        changes, counts = [], {"staged": 0, "modified": 0, "untracked": 0, "conflicted": 0}
+    else:
+        raw_status = _git(project, "status", "--porcelain=v1", "-z", "--untracked-files=normal")
+        changes, counts = _changes(raw_status)
     branches_raw = _git(project, "branch", "--list", "--format=%(refname:short)", allow_failure=True)
     branches = list(dict.fromkeys(x.strip()[:180] for x in branches_raw.splitlines() if x.strip()))[:MAX_BRANCHES]
     commits = []
@@ -107,4 +128,4 @@ def git_snapshot(project: Path | None) -> dict:
             "branches": branches, "commits": commits, "changes": changes,
             "counts": counts, "change_count_shown": len(changes),
             "changes_truncated": sum(counts.values()) > MAX_CHANGES,
-            "unborn": not bool(commit_sha)}
+            "unborn": not bool(commit_sha), "changes_paused": paused}

@@ -19,7 +19,7 @@ param(
   [Parameter(Mandatory = $true)][string]$Bundle,
   [string]$Desktop,
   [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'CodingBrain'),
-  [switch]$Yes
+  [switch]$Yes  # unattended runs only: passed on as -Yes/--yes; without it every plan is shown and asked
 )
 $ErrorActionPreference = 'Stop'
 $Host.UI.RawUI.WindowTitle = 'Coding Brain setup'
@@ -86,10 +86,15 @@ if (-not $Yes) {
   if ($answer -match '^(n|no)$') { Finish 0 'Setup skipped. You can run it later from the desktop: Setup > Install & verify full system.' }
 }
 
+# The environment plan (Docker, models, OCR, supervisors...) is always shown; it is accepted without a
+# question only when this script itself was started with -Yes for an unattended installation.
+$installYes = if ($Yes) { @('-Yes') } else { @() }
+$cliYes = if ($Yes) { @('--yes') } else { @() }
+
 # 2. Engine: fresh install, update, or keep.
 if (-not $installed) {
   Write-Step "Installing the Coding Brain engine $bundled and preparing the full environment"
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Bundle 'install.ps1') -From $Bundle -InstallDir $InstallDir -Full -Yes
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Bundle 'install.ps1') -From $Bundle -InstallDir $InstallDir -Full @installYes
   $code = $LASTEXITCODE
   if ($code -ne 0) { Finish $code "Setup stopped (exit $code). Fix the step above, then run 'codingbrain install --resume' or re-run this installer." }
   $installed = (Get-Content -Raw -LiteralPath $current | ConvertFrom-Json).version
@@ -154,7 +159,7 @@ if ($older -eq '1') {
 
 # Prepare remaining components only after a compatible, verified engine is installed.
 Write-Step 'Preparing the full environment (models, sandbox, OCR, vision, knowledge, supervisors)'
-& $python -I -m brain.local install --full --yes
+& $python -I -m brain.local install --full @cliYes
 $code = $LASTEXITCODE
 if ($code -ne 0) {
   Finish $code "Full environment setup failed (exit $code). Run 'codingbrain install --resume' to continue."

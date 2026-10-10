@@ -538,7 +538,21 @@ class Workspace:
         return {"path": relative, "content": content, "bytes": len(raw)}
 
     def _staging(self) -> Path:
-        return self._brain_home() / "desktop" / "attachments"
+        """Where pasted or dropped files wait for the task. Never inside the engine's home: the engine
+        refuses to attach anything from its own state folder, which made every upload fail on
+        Windows (%LOCALAPPDATA%\\CodingBrain is both the engine home and the desktop's parent)."""
+        if self._home_override:
+            staging = self.home / ".codingbrain-desktop" / "attachments"
+        elif os.name == "nt":
+            staging = Path(os.environ.get("LOCALAPPDATA", str(self.home / "AppData" / "Local"))) / "CodingBrainDesktop" / "attachments"
+        else:
+            staging = Path(os.getenv("XDG_STATE_HOME") or (self.home / ".local" / "state")) / "codingbrain-desktop" / "attachments"
+        brain = self._brain_home().resolve()
+        resolved = staging.resolve()
+        if resolved == brain or brain in resolved.parents:  # e.g. CODINGBRAIN_HOME set above it
+            import tempfile
+            staging = Path(tempfile.gettempdir()) / "codingbrain-desktop-attachments"
+        return staging
 
     @staticmethod
     def attachment_view(path: Path) -> dict:

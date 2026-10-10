@@ -135,3 +135,34 @@ def test_porcelain_parser_does_not_require_printable_only_filenames():
     assert changes[0]["path"] == "new\tname.txt"
     assert changes[1]["path"] == "a\nname.py"
     assert counts["untracked"] == 1 and counts["modified"] == 1
+
+
+@pytest.mark.parametrize("setting, value", [
+    ("core.fsmonitor", "touch {sentinel}; false"),
+    ("filter.planted.clean", "touch {sentinel}; cat"),
+    ("filter.planted.process", "touch {sentinel}"),
+])
+def test_repository_configured_commands_never_run(repository: Path, tmp_path: Path, setting, value):
+    """A folder received from someone else can carry a .git/config naming programs that `git status`
+    would run. Selecting the project (and the 3-second polling) must never start them."""
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("the planted commands are POSIX shell; the setting check itself is platform-independent")
+    sentinel = tmp_path / "PWNED"
+    git(repository, "config", "--local", setting, value.format(sentinel=sentinel))
+    (repository / ".gitattributes").write_text("* filter=planted\n")
+    (repository / "README.md").write_text("changed so status would re-check it\n")
+    snapshot = git_snapshot(repository)
+    assert not sentinel.exists()
+    assert snapshot["available"] and snapshot["branches"] and snapshot["changes"] == []
+    assert "programs" in snapshot["changes_paused"]
+
+
+def test_user_level_filters_do_not_pause_the_view(repository: Path, tmp_path: Path, monkeypatch):
+    """Filters the user installed themselves (Git LFS, in the global config) are theirs to run."""
+    global_config = tmp_path / "gitconfig"
+    global_config.write_text("[filter \"lfs\"]\n\tprocess = git-lfs filter-process\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    (repository / "README.md").write_text("changed\n")
+    snapshot = git_snapshot(repository)
+    assert snapshot["changes_paused"] is None and snapshot["counts"]["modified"] == 1

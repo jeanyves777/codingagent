@@ -143,6 +143,10 @@ def test_uploaded_attachment_is_staged_privately_and_checked(tmp_path):
     path = Path(staged["path"])
     assert path.name == "screen shot.png" and path.read_bytes() == b"\x89PNG data"
     assert workspace._staging() in path.parents  # never outside the private staging folder
+    # The engine refuses anything inside its own home; a staged upload must pass its real check.
+    from brain.attachments import check_path
+    assert workspace._brain_home().resolve() not in path.resolve().parents
+    assert check_path(str(path), forbidden_roots=(workspace._brain_home(),)) == path.resolve()
     refused = client.post("/api/attachments/upload", content=b"KEY", headers={**headers, "X-Filename": "server.key"})
     assert refused.status_code == 400 and "secret" in refused.json()["detail"]
     assert client.post("/api/attachments/upload", content=b"x", headers={**headers, "X-Filename": "tool.exe"}).status_code == 400
@@ -185,3 +189,24 @@ def test_slow_or_failing_provider_check_never_switches_chat_off(tmp_path, monkey
     status = workspace.engine_status(refresh=True)
     assert status["chat_available"] is True and not status["engine"].get("typed_api_failed")
     assert status["providers"] == [] and calls == ["engine.info", "providers.list"]
+
+
+def test_staging_never_falls_inside_the_engine_home(tmp_path, monkeypatch):
+    """If the engine home were set above the desktop's folder (CODINGBRAIN_HOME), staging moves to
+    the temporary folder rather than to a place the engine refuses."""
+    workspace = Workspace(home=tmp_path, executable="not-a-real-binary")
+    monkeypatch.setattr(Workspace, "_brain_home", lambda self: tmp_path)
+    staging = workspace._staging().resolve()
+    assert tmp_path.resolve() not in staging.parents and staging != tmp_path.resolve()
+
+
+def test_a_restart_racing_with_close_never_leaves_a_bridge_running():
+    """The bridge exits as the window closes: the watchdog's restart must not undo stop() and leave
+    a new background bridge nobody stops."""
+    bridge = BridgeProcess(python=Path(sys.executable), root=source_root())
+    bridge.start(timeout=20)
+    bridge.stop()  # the window closed
+    import pytest
+    with pytest.raises(RuntimeError, match="closing"):
+        bridge.restart()  # the watchdog had already decided to restart
+    assert bridge.child is None and bridge.stopping.is_set()

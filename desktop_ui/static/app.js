@@ -471,7 +471,7 @@
     $('git-details').hidden = false;
     const signature = JSON.stringify({
       branch: snapshot.branch, head: snapshot.head, branches: snapshot.branches,
-      commits: snapshot.commits, changes: snapshot.changes, counts: snapshot.counts
+      commits: snapshot.commits, changes: snapshot.changes, counts: snapshot.counts, paused: snapshot.changes_paused
     });
     $('git-updated').textContent = 'Live · Checked ' +
       new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit'});
@@ -492,7 +492,7 @@
       (snapshot.changes_truncated ? '+' : '');
     const changed = $('git-changes');
     changed.replaceChildren();
-    if (!snapshot.changes?.length) gitText(changed, 'p', 'Working tree clean', 'git-empty');
+    if (!snapshot.changes?.length) gitText(changed, 'p', snapshot.changes_paused || 'Working tree clean', 'git-empty');
     for (const item of snapshot.changes || []) {
       const row = document.createElement('div');
       row.className = 'git-file-row'; row.setAttribute('role', 'listitem');

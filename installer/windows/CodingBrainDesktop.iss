@@ -46,9 +46,10 @@ Name: "{autodesktop}\Coding Brain Desktop"; Filename: "{app}\CodingBrainDesktop.
 
 [Run]
 #ifdef WithEngine
-; Ticking this box is the consent: the setup window then runs without further questions (Windows
-; still asks before administrator changes) and opens the desktop when it finishes.
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\engine\Setup-CodingBrain.ps1"" -Bundle ""{app}\engine"" -Desktop ""{app}\CodingBrainDesktop.exe"" -Yes"; Description: "Set up Coding Brain engine and tools (recommended)"; Flags: postinstall skipifsilent nowait
+; Ticking this box opens the setup window; Coding Brain's own installer then shows its plan and asks
+; before it changes anything (no -Yes: the box is not consent to an unseen plan). Windows still asks
+; before administrator changes, and the desktop opens when it finishes.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\engine\Setup-CodingBrain.ps1"" -Bundle ""{app}\engine"" -Desktop ""{app}\CodingBrainDesktop.exe"""; Description: "Set up Coding Brain engine and tools (recommended)"; Flags: postinstall skipifsilent nowait
 Filename: "{app}\CodingBrainDesktop.exe"; Description: "Launch Coding Brain Desktop now (without setup)"; Flags: nowait postinstall skipifsilent unchecked
 #else
 Filename: "{app}\CodingBrainDesktop.exe"; Description: "Launch Coding Brain Desktop"; Flags: nowait postinstall skipifsilent
