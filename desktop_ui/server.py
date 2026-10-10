@@ -1,0 +1,401 @@
+"""Loopback-only Coding Brain workspace UI.
+
+A deliberately small presentation bridge.  Coding Brain remains the sole coding
+executor; this module never loads its Brain service or modifies task state.
+"""
+from __future__ import annotations
+
+import argparse
+import collections
+import json
+import os
+import shutil
+from pathlib import Path
+import secrets
+import subprocess
+import sys
+import threading
+import time
+import uuid
+import webbrowser
+
+from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import BaseModel, Field
+
+ASSETS = Path(__file__).with_name("static")
+IGNORED = {".git", ".venv", "venv", "node_modules", "__pycache__", ".next", "dist", "build", ".idea", ".vscode"}
+SENSITIVE = {".env", ".env.local", ".env.production", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", "credentials.json", "secrets.json"}
+MAX_PREVIEW_BYTES = 128_000
+MAX_ENTRIES = 350
+
+
+class ProjectChoice(BaseModel):
+    path: str = Field(min_length=1, max_length=8192)
+
+
+class StartRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=16000)
+    mode: str = "chat"
+
+
+class Decision(BaseModel):
+    allow: bool
+
+
+class Job:
+    def __init__(self, kind: str, project: str | None, command: list[str]):
+        self.id = uuid.uuid4().hex
+        self.kind, self.project, self.command = kind, project, command
+        self.started = time.time()
+        self.status = "starting"
+        self.returncode: int | None = None
+        self.process: subprocess.Popen | None = None
+        self.events: collections.deque[dict] = collections.deque(maxlen=3000)
+        self.cursor = 0
+        self.lock = threading.Lock()
+        self.awaiting_approval = False
+        self.error: str | None = None
+
+    def emit(self, kind: str, message: str):
+        with self.lock:
+            self.cursor += 1
+            self.events.append({"seq": self.cursor, "kind": kind, "message": message, "at": time.time(), "job_id": self.id})
+
+    def dump(self, after: int = 0) -> list[dict]:
+        with self.lock:
+            return [e for e in self.events if e["seq"] > after]
+
+    def view(self) -> dict:
+        return {"id": self.id, "kind": self.kind, "project": self.project, "status": self.status,
+                "started": self.started, "returncode": self.returncode,
+                "awaiting_approval": self.awaiting_approval, "error": self.error}
+
+
+class Workspace:
+    def __init__(self, home: Path | None = None, executable: str | None = None):
+        self.home = (home or Path.home()).resolve()
+        self.executable = executable
+        self.secret = secrets.token_urlsafe(32)
+        self.project: Path | None = None
+        self.jobs: dict[str, Job] = {}
+        self.active: str | None = None
+        self.lock = threading.Lock()
+
+    def cli_command(self) -> list[str]:
+        """Run Python directly on Windows to avoid .cmd shell interpretation.
+
+        Windows automatically invokes .bat/.cmd via cmd.exe even when Popen is
+        given shell=False. User goals must not cross that quoting boundary.
+        """
+        if self.executable:
+            if os.name == "nt" and self.executable.lower().endswith((".cmd", ".bat")):
+                raise ValueError("Batch-based CLI launchers are not supported by the UI bridge")
+            return [self.executable]
+        if os.name == "nt":
+            local = Path(os.environ.get("LOCALAPPDATA", self.home / "AppData" / "Local")) / "CodingBrain"
+            current = local / "app" / "current.json"
+            try:
+                version = json.loads(current.read_text(encoding="utf-8"))["version"]
+                python = local / "app" / "versions" / version / "venv" / "Scripts" / "python.exe"
+                if python.is_file():
+                    return [str(python), "-m", "brain.local"]
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+            raise ValueError("Coding Brain Python environment not found; update or repair installation")
+        binary = shutil.which("codingbrain")
+        if not binary:
+            raise ValueError("Coding Brain executable not found on PATH")
+        return [binary]
+
+    def projects(self) -> list[dict]:
+        base = Path(os.getenv("CODINGBRAIN_HOME") or (Path(os.getenv("LOCALAPPDATA", str(self.home / ".local"))) / "CodingBrain"))
+        base = base / "data" / "projects"
+        results: dict[str, dict] = {}
+        if base.is_dir():
+            for entry in base.glob("*/project.json"):
+                try:
+                    data = json.loads(entry.read_text(encoding="utf-8"))
+                    p = Path(data["root"]).resolve(strict=True)
+                    if p.is_dir():
+                        results[str(p)] = {"name": p.name, "path": str(p)}
+                except (OSError, ValueError, KeyError):
+                    continue
+        if self.project:
+            results[str(self.project)] = {"name": self.project.name, "path": str(self.project)}
+        return sorted(results.values(), key=lambda x: x["name"].lower())
+
+    def choose(self, raw: str) -> dict:
+        path = Path(raw).expanduser().resolve(strict=True)
+        if not path.is_dir():
+            raise ValueError("Choose a directory")
+        self.project = path
+        return {"name": path.name, "path": str(path), "git": self.git_branch(path)}
+
+    @staticmethod
+    def git_branch(root: Path) -> str | None:
+        try:
+            p = subprocess.run(["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
+                               capture_output=True, text=True, timeout=3)
+            return p.stdout.strip() if p.returncode == 0 else None
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+
+    def resolve_read(self, relative: str) -> Path:
+        if not self.project:
+            raise ValueError("Select a project first")
+        rel = Path(relative)
+        if rel.is_absolute() or ".." in rel.parts or any(part in IGNORED or part.lower() in SENSITIVE for part in rel.parts):
+            raise ValueError("This path is not available for preview")
+        path = self.project / rel
+        # Never follow symlinks/junctions, including intermediate directories.
+        root = self.project
+        if root.is_symlink() or (hasattr(root, "is_junction") and root.is_junction()):
+            raise ValueError("Links and junctions are not available for preview")
+        current = root
+        for part in rel.parts:
+            current = current / part
+            if current.is_symlink() or (hasattr(current, "is_junction") and current.is_junction()):
+                raise ValueError("Links and junctions are not available for preview")
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(self.project):
+            raise ValueError("Path escapes the selected project")
+        return resolved
+
+    def tree(self, relative: str) -> list[dict]:
+        folder = self.resolve_read(relative) if relative else self.project
+        if folder is None or not folder.is_dir():
+            raise ValueError("Not a directory")
+        result = []
+        for item in folder.iterdir():
+            if item.name in IGNORED or item.name.lower() in SENSITIVE or item.is_symlink():
+                continue
+            try:
+                if not (item.is_file() or item.is_dir()):
+                    continue
+                result.append({"name": item.name, "path": item.relative_to(self.project).as_posix(),
+                               "dir": item.is_dir()})
+            except (OSError, ValueError):
+                continue
+            if len(result) >= MAX_ENTRIES:
+                break
+        return sorted(result, key=lambda x: (not x["dir"], x["name"].casefold()))
+
+    def preview(self, relative: str) -> dict:
+        path = self.resolve_read(relative)
+        if not path.is_file() or path.stat().st_size > MAX_PREVIEW_BYTES:
+            raise ValueError("Preview limited to text files smaller than 128 KB")
+        raw = path.read_bytes()
+        if b"\0" in raw:
+            raise ValueError("Binary files cannot be previewed")
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("Preview supports UTF-8 text only") from None
+        return {"path": relative, "content": content, "bytes": len(raw)}
+
+    def start(self, body: StartRequest) -> Job:
+        mode = body.mode
+        if mode not in {"chat", "run"}:
+            raise ValueError("Unknown mode")
+        if mode == "run" and (not self.project or not self.git_branch(self.project)):
+            raise ValueError("Select an existing Git repository to run a coding task")
+        # Never treat chat as a coding task. Newer CLIs provide chat; older ones
+        # return a clear unsupported-command error instead of running code.
+        command = [*self.cli_command(), "chat" if mode == "chat" else "run", body.message]
+        with self.lock:
+            if self.active and self.jobs[self.active].status in {"starting", "running", "approval_required"}:
+                raise ValueError("Another task is active; finish or stop it first")
+            job = Job(mode, str(self.project) if self.project else None, command)
+            self.jobs[job.id] = job
+            self.active = job.id
+        threading.Thread(target=self._execute, args=(job,), daemon=True).start()
+        return job
+
+    def _execute(self, job: Job):
+        job.status = "running"
+        job.emit("start", f"{job.kind.capitalize()} started")
+        try:
+            popen_opts = {"cwd": job.project or str(self.home), "stdin": subprocess.PIPE,
+                          "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+                          "text": True, "bufsize": 1, "errors": "replace",
+                          "env": {**os.environ, "PYTHONUNBUFFERED": "1"}}
+            process = subprocess.Popen(job.command, **popen_opts)
+            job.process = process
+            # Input prompts have no trailing newline. Detect them without pretending
+            # they are approvals until the actual CLI requests approval.
+            buffer = ""
+            prompt_tail = ("[y/N] ", "[Y/n] ")
+            while True:
+                char = process.stdout.read(1)
+                if not char:
+                    break
+                buffer += char
+                if char == "\n" or any(buffer.endswith(tail) for tail in prompt_tail):
+                    message = buffer.rstrip("\r\n")
+                    job.emit("output", message)
+                    if any(message.endswith(tail) for tail in prompt_tail):
+                        job.awaiting_approval = True
+                        job.status = "approval_required"
+                        job.emit("approval", message)
+                    buffer = ""
+            if buffer:
+                job.emit("output", buffer)
+            job.returncode = process.wait()
+            if job.status != "cancelled":
+                job.status = "completed" if job.returncode == 0 else "failed"
+                job.emit("finish", f"Process exited with code {job.returncode}")
+        except (OSError, subprocess.SubprocessError) as exc:
+            job.status = "failed"
+            job.error = str(exc)
+            job.emit("error", "Coding Brain executable unavailable or could not start")
+        finally:
+            job.awaiting_approval = False
+
+    def decide(self, job_id: str, allow: bool):
+        job = self.jobs[job_id]
+        if not job.awaiting_approval or not job.process or job.process.poll() is not None:
+            raise ValueError("No approval is pending")
+        job.process.stdin.write("y\n" if allow else "n\n")
+        job.process.stdin.flush()
+        job.awaiting_approval = False
+        job.status = "running"
+        job.emit("decision", "Approved" if allow else "Declined")
+
+    def stop(self, job_id: str):
+        job = self.jobs[job_id]
+        if not job.process or job.process.poll() is not None:
+            raise ValueError("Task is not running")
+        job.status = "cancelled"
+        job.process.terminate()
+        job.emit("finish", "Stop requested")
+
+
+def create_app(state: Workspace | None = None) -> FastAPI:
+    state = state or Workspace()
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, title="Coding Brain Desktop Bridge")
+    app.state.workspace = state
+
+    def auth(x_codingbrain_token: str | None = Header(default=None)):
+        if not x_codingbrain_token or not secrets.compare_digest(x_codingbrain_token, state.secret):
+            raise HTTPException(403, "Not authorized")
+
+    @app.get("/")
+    def index():
+        response = FileResponse(ASSETS / "index.html")
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        return response
+
+    @app.get("/app.css")
+    def css():
+        return FileResponse(ASSETS / "app.css", media_type="text/css")
+
+    @app.get("/app.js")
+    def js():
+        return FileResponse(ASSETS / "app.js", media_type="text/javascript")
+
+    @app.get("/api/state", dependencies=[Depends(auth)])
+    def initial():
+        active = state.jobs.get(state.active) if state.active else None
+        return {"project": {"name": state.project.name, "path": str(state.project),
+                            "git": state.git_branch(state.project)} if state.project else None,
+                "projects": state.projects(), "active": active.view() if active else None}
+
+    @app.post("/api/project", dependencies=[Depends(auth)])
+    def select(body: ProjectChoice):
+        try:
+            return state.choose(body.path)
+        except (ValueError, OSError) as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.post("/api/project/pick", dependencies=[Depends(auth)])
+    def pick():
+        try:
+            from tkinter import Tk, filedialog
+            root = Tk(); root.withdraw(); root.attributes("-topmost", True)
+            try:
+                choice = filedialog.askdirectory(title="Choose Coding Brain project")
+            finally:
+                root.destroy()
+            return state.choose(choice) if choice else {"cancelled": True}
+        except Exception as e:
+            raise HTTPException(503, "Native folder picker unavailable; enter a path instead") from e
+
+    @app.get("/api/tree", dependencies=[Depends(auth)])
+    def tree(path: str = ""):
+        try:
+            return {"entries": state.tree(path)}
+        except (ValueError, OSError) as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.get("/api/file", dependencies=[Depends(auth)])
+    def file(path: str):
+        try:
+            return state.preview(path)
+        except (ValueError, OSError) as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.post("/api/start", dependencies=[Depends(auth)])
+    def start(body: StartRequest):
+        try:
+            return state.start(body).view()
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+
+    @app.get("/api/jobs/{job_id}", dependencies=[Depends(auth)])
+    def job_status(job_id: str, after: int = 0):
+        if job_id not in state.jobs:
+            raise HTTPException(404, "Unknown task")
+        job = state.jobs[job_id]
+        return {"job": job.view(), "events": job.dump(after)}
+
+    @app.post("/api/jobs/{job_id}/decision", dependencies=[Depends(auth)])
+    def decision(job_id: str, body: Decision):
+        try:
+            state.decide(job_id, body.allow)
+            return {"ok": True}
+        except KeyError:
+            raise HTTPException(404, "Unknown task")
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+
+    @app.post("/api/jobs/{job_id}/stop", dependencies=[Depends(auth)])
+    def stop(job_id: str):
+        try:
+            state.stop(job_id)
+            return {"ok": True}
+        except KeyError:
+            raise HTTPException(404, "Unknown task")
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+
+    return app
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Local Coding Brain workspace UI")
+    parser.add_argument("--port", type=int, default=0, help="Loopback TCP port (0 = random)")
+    parser.add_argument("--no-open", action="store_true", help="Do not open browser")
+    options = parser.parse_args(argv)
+    import socket
+    import uvicorn
+    state = Workspace()
+    app = create_app(state)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", options.port)); sock.listen(128)
+    port = sock.getsockname()[1]
+    url = f"http://127.0.0.1:{port}/#token={state.secret}"
+    print("Coding Brain workspace UI - listening on 127.0.0.1 only", flush=True)
+    print("Open this URL in your own browser:", url, flush=True)
+    if not options.no_open:
+        webbrowser.open(url)
+    server = uvicorn.Server(uvicorn.Config(app, log_level="warning", access_log=False))
+    try:
+        server.run(sockets=[sock])
+    finally:
+        sock.close()
+
+
+if __name__ == "__main__":
+    main()

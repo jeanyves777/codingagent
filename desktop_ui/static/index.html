@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Coding Brain — Workspace</title>
+  <link rel="stylesheet" href="/app.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <nav class="rail" aria-label="Workspace navigation">
+      <div class="brand-icon" title="Coding Brain">◈</div>
+      <button class="rail-button selected" id="nav-chat" title="Conversation" aria-label="Conversation">▦</button>
+      <button class="rail-button" id="nav-projects" title="Projects" aria-label="Projects">▤</button>
+      <div class="rail-spacer"></div>
+      <span class="rail-footer" title="Local only">●</span>
+    </nav>
+    <section class="work-area">
+      <header class="topbar">
+        <div class="title-area">
+          <span class="eyebrow">CODING BRAIN</span>
+          <span class="title">Workspace</span>
+          <span class="top-divider"></span>
+          <span class="breadcrumb" id="project-breadcrumb">Global conversation</span>
+        </div>
+        <div class="header-actions">
+          <span class="connection-pill"><span class="dot green"></span> Local workspace</span>
+          <button class="icon-btn" id="refresh" title="Refresh" aria-label="Refresh">↻</button>
+        </div>
+      </header>
+      <div class="columns">
+        <main class="conversation" aria-label="Coding Brain conversation">
+          <div class="thread" id="thread" role="log" aria-live="polite" aria-relevant="additions text">
+            <section class="welcome" id="welcome">
+              <div class="brain-mark">◈</div>
+              <h1>What would you like to build?</h1>
+              <p>Your global coding workspace. Talk through an idea, open a project, or ask Coding Brain to work on something.</p>
+              <div class="starter-prompts">
+                <button class="starter" data-suggestion="Hello">Say hello <span>↗</span></button>
+                <button class="starter" data-suggestion="What projects am I working on?">Explore projects <span>↗</span></button>
+                <button class="starter" data-suggestion="Review the project architecture">Review architecture <span>↗</span></button>
+              </div>
+            </section>
+          </div>
+          <section class="composer-wrap" aria-label="Message input">
+            <div class="status-strip" id="run-status" hidden>
+              <span class="pulse"></span><span id="status-label">Working</span><span class="status-time" id="status-time"></span>
+              <button type="button" class="stop-btn" id="stop-task">Stop</button>
+            </div>
+            <div class="composer">
+              <label for="prompt" class="sr-only">Message to Coding Brain</label>
+              <textarea id="prompt" placeholder="Ask Coding Brain anything..." rows="2"></textarea>
+              <div class="composer-bottom">
+                <div class="composer-options">
+                  <button class="project-chip" id="project-picker"><span class="folder-glyph">▱</span><span id="project-label">Choose project</span><span class="chevron">⌄</span></button>
+                  <span class="model-chip" id="model-label" title="Uses Coding Brain's configured model routing">◈ &nbsp; Configured brain</span>
+                  <span class="mode-toggle" role="group" aria-label="Message mode">
+                    <button id="mode-chat" class="active" aria-pressed="true">Chat</button><button id="mode-run" aria-pressed="false">Run task</button>
+                  </span>
+                </div>
+                <button id="send" class="send" aria-label="Send message" title="Send message">↑</button>
+              </div>
+            </div>
+            <p class="hint">Enter to send · Shift+Enter for a new line · Approvals are never automatic</p>
+          </section>
+        </main>
+        <aside class="explorer" id="explorer" aria-label="Project explorer">
+          <div class="explorer-head"><h2>Project explorer</h2><button class="icon-btn" id="collapse-explorer" aria-label="Collapse explorer">⫷</button></div>
+          <div class="explorer-tabs" role="tablist" aria-label="Explorer tabs">
+            <button role="tab" class="active" id="tab-files" aria-selected="true">Files</button>
+            <button role="tab" id="tab-activity" aria-selected="false">Activity</button>
+          </div>
+          <div class="file-panel" id="file-panel">
+            <div class="file-toolbar"><span id="explorer-folder" class="folder-name">No project selected</span><button id="refresh-files" title="Refresh files" aria-label="Refresh files">↻</button></div>
+            <div id="file-tree" class="file-tree"><div class="empty-panel"><span>▱</span><p>Open a project to browse its files.</p><button id="browse-project">Browse folder</button></div></div>
+            <div class="preview" id="preview" hidden><div class="preview-bar"><span id="preview-name"></span><button id="preview-close" aria-label="Close preview">✕</button></div><pre id="preview-content"></pre></div>
+          </div>
+          <div class="activity-panel" id="activity-panel" hidden><div class="activity-title">Live activity</div><div id="activity-list" class="activity-list"><p class="muted">Activity appears here when Coding Brain starts working.</p></div></div>
+          <div class="explorer-footer"><span id="branch-name">◇ No repository</span><span id="file-count"></span></div>
+        </aside>
+      </div>
+      <footer class="bottombar"><span><span class="dot green"></span> Connected to local UI</span><span id="footer-status">Ready</span><span>Private · 127.0.0.1</span></footer>
+    </section>
+  </div>
+  <dialog id="project-dialog" class="project-dialog"><form method="dialog"><header><h2>Open a project</h2><button class="icon-btn" value="cancel" aria-label="Close">✕</button></header><p>Choose a folder on your computer or select a recent project.</p><div class="picker-row"><input id="path-input" type="text" placeholder="C:\Users\...\Projects\my-app" autocomplete="off"><button id="open-path" type="button" class="primary-button">Open</button></div><div class="picker-row"><button type="button" id="native-picker" class="secondary-button">Browse folders…</button></div><h3>Recent projects</h3><div id="recent-projects" class="recent-projects"></div><div class="picker-error" id="picker-error" role="alert"></div></form></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
