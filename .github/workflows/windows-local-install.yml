@@ -47,7 +47,13 @@ jobs:
       - name: Install Tesseract OCR (real OCR tests on Windows)
         shell: pwsh
         run: |
-          choco install tesseract --no-progress -y
+          # The Chocolatey community feed intermittently answers 504; retry with backoff.
+          foreach ($attempt in 1..4) {
+            choco install tesseract --no-progress -y
+            if (Test-Path 'C:\Program Files\Tesseract-OCR\tesseract.exe') { break }
+            if ($attempt -eq 4) { throw 'Tesseract could not be installed from Chocolatey after 4 attempts' }
+            Start-Sleep -Seconds ([math]::Pow(2, $attempt) * 5)
+          }
           & 'C:\Program Files\Tesseract-OCR\tesseract.exe' --version
       - name: Unit tests for the local installation and multimodal features
         shell: pwsh
