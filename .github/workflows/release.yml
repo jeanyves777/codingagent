@@ -102,6 +102,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Desktop build dependency installation failed' }
           python -m pytest -q -p no:cacheprovider tests/test_unified_windows_update.py tests/test_desktop_ui.py tests/test_desktop_native.py tests/test_desktop_management.py tests/test_desktop_engine_status.py
           if ($LASTEXITCODE -ne 0) { throw 'Desktop compatibility tests failed' }
+          # The binary carries the exact version of the engine release used to build it.
+          $env:CODINGBRAIN_DESKTOP_VERSION = $env:VERSION
+          python -c "import json,os,pathlib;pathlib.Path('desktop_ui/release-version.json').write_text(json.dumps({'version':os.environ['CODINGBRAIN_DESKTOP_VERSION']}),encoding='utf-8')"
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop version metadata was not generated' }
           python -m PyInstaller --noconfirm --clean --onedir --windowed --name CodingBrainDesktop --collect-all webview --add-data 'desktop_ui;desktop_ui' desktop_ui/launch_native.py
           if ($LASTEXITCODE -ne 0) { throw 'Native desktop packaging failed' }
           $app = (Resolve-Path 'dist/CodingBrainDesktop/CodingBrainDesktop.exe').Path
