@@ -128,7 +128,7 @@ def test_preview_success_belongs_to_current_branch_head(monkeypatch, tmp_path):
     def github(url):
         if "/git/ref/heads/preview" in url:
             return {"object": {"sha": head}}
-        if "/actions/runs?" in url:
+        if "/workflows/preview-build.yml/runs?" in url:
             return {"workflow_runs": [{
                 "name": updates.PREVIEW_WORKFLOW_NAME, "head_branch": "preview",
                 "head_sha": head, "status": "completed", "conclusion": "success",
@@ -155,7 +155,7 @@ def test_preview_denies_stale_failing_or_expired_ci(monkeypatch, problem):
     def github(url):
         if "/git/ref/heads/preview" in url:
             return {"object": {"sha": head}}
-        if "/actions/runs?" in url:
+        if "/workflows/preview-build.yml/runs?" in url:
             return {"workflow_runs": [{
                 "name": updates.PREVIEW_WORKFLOW_NAME, "head_branch": "preview",
                 "head_sha": "b"*40 if problem == "stale" else head,
