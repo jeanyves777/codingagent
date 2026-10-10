@@ -131,7 +131,14 @@
         const offline = new Error('Could not reach the Coding Brain UI bridge'); offline.offline = true; throw offline;
       }
       let result;
-      try { result = await response.json(); } catch { throw new Error('Could not reach the Coding Brain UI bridge'); }
+      try { result = await response.json(); }
+      catch {
+        // The bridge answered, but not with JSON (e.g. an internal error): say so instead of
+        // claiming it is unreachable, so the real failure can be diagnosed.
+        const failure = new Error(`The Coding Brain desktop service returned an error (HTTP ${response.status}) for ${path.split('?')[0]}. Retry; if it repeats, reopen Coding Brain.`);
+        failure.status = response.status;
+        throw failure;
+      }
       if (!response.ok) {
         const failure = new Error(typeof result.detail === 'string' ? result.detail : 'Request failed');
         failure.status = response.status;
