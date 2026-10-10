@@ -404,6 +404,19 @@ class Workspace:
             raise ValueError("Unknown mode")
         if mode == "run" and (not self.project or not self.git_branch(self.project)):
             raise ValueError("Select an existing Git repository to run a coding task")
+        if mode == "chat" and self.use_core:
+            # The desktop's own Python package may contain assistant.py even
+            # when the installed engine is older. Do not allocate a fake chat
+            # job or return a scripted greeting in place of a real model reply.
+            engine = self.engine_status()["engine"]
+            if not engine.get("conversation", False):
+                version = engine.get("version") or "unknown"
+                raise ValueError(
+                    f"Conversation is not available in installed Coding Brain v{version}. "
+                    "No chat session or coding task was started. "
+                    "Install a verified conversational release to use Chat. "
+                    "You can still open registered projects in Projects."
+                )
         if mode == "new":
             # Feature checks must refer to the INSTALLED engine, not an importable
             # copy of the UI's Python package. Never create a job on older engines.
