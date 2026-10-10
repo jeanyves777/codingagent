@@ -17,7 +17,15 @@ explain the same rules again.
 Only local files are read. Agents that keep their history somewhere Coding Brain can't read as
 files, such as Cursor chat history, are reported as not covered. Nothing is fetched from accounts,
 no access restriction is bypassed, and files that look like secrets (`.env*`, `*secret*`,
-`*credential*`, keys) are never opened.
+`*credential*`, keys) are never opened, including when a custom instructions glob (OpenCode)
+matches them: the name is checked before anything is read or hashed.
+
+Project-local sources are imported automatically only if they are regular files inside the
+project reached without a symbolic link or junction. A `CLAUDE.md`, rule file or docs folder that
+links outside the project is skipped, so text from elsewhere (including your private agent memory)
+never enters project memory without the authorization those sources require. The check runs at
+discovery and again just before each file is read, and the opened file must be the one that was
+checked.
 
 ## Three scopes
 

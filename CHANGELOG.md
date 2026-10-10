@@ -55,6 +55,11 @@ Images, screenshots and documents, plus a visual development loop (see docs/mult
 
 Durable cross-agent project memory (see docs/project-memory.md).
 
+- **Security (from review):** project-local memory sources are read only if they are regular files
+  inside the project reached without symbolic links or junctions, re-validated just before reading;
+  secret-looking names are refused before any file is opened, including names matched by an
+  OpenCode instructions glob.
+
 - **Discovery:** project instruction files from Claude Code, Codex, Cursor, Copilot, OpenCode and
   others; READMEs, architecture docs, ADRs, plans, changelogs, Git history and Coding Brain's own
   work.
