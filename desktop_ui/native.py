@@ -122,8 +122,11 @@ def main(argv=None) -> int:
         if args.self_test:
             # Portable Windows CI can verify packaging without a signed-in model or GUI session.
             import importlib.util
-            print(json.dumps({"native_assets": True, "root": str(root),
-                              "webview_available": importlib.util.find_spec("webview") is not None}))
+            result = json.dumps({"native_assets": True, "root": str(root),
+                                 "webview_available": importlib.util.find_spec("webview") is not None})
+            # A PyInstaller --windowed EXE has no stdout on Windows.
+            if sys.stdout is not None:
+                print(result)
             return 0
         import webview
         bridge = None
@@ -147,7 +150,15 @@ def main(argv=None) -> int:
                 bridge.stop()
     except (ImportError, RuntimeError, OSError) as exc:
         # GUI apps have no console. The Windows launcher/installer can surface this error.
-        sys.stderr.write("Coding Brain Desktop: " + str(exc) + "\n")
+        error = "Coding Brain Desktop: " + str(exc)
+        if sys.stderr is not None:
+            sys.stderr.write(error + "\n")
+        elif os.name == "nt":
+            try:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(None, error, "Coding Brain Desktop", 0x10)
+            except OSError:
+                pass
         return 1
 
 
