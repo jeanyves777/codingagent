@@ -14,6 +14,12 @@ on:
     branches: [main, preview]
   workflow_dispatch:
 
+concurrency:
+  # Only the newest candidate of a PR consumes runners; preserve all main/tag
+  # verification, which the protected release gate may require at an exact SHA.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
