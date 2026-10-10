@@ -19,6 +19,8 @@ def sandbox(tmp_path):
     (root / "tests").mkdir()
     (root / "tests" / "test_hello.py").write_text("def test_hello(): assert True\n")
     (root / ".env").write_text("SECRET_TOKEN=must-not-leak")
+    (root / ".env.development").write_text("ANOTHER_SECRET=hidden")
+    (root / "tls.key").write_text("SECRET_PRIVATE_KEY")
     (root / "big.txt").write_text("x" * 129000)
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "add", "hello.py"], check=True)
@@ -63,6 +65,8 @@ def test_select_and_browse_files(client, sandbox):
     hello = api.get("/api/file", headers=headers(w), params={"path":"hello.py"})
     assert "return 'hi'" in hello.json()["content"]
     assert api.get("/api/file", headers=headers(w), params={"path":".env"}).status_code == 400
+    assert api.get("/api/file", headers=headers(w), params={"path":".env.development"}).status_code == 400
+    assert api.get("/api/file", headers=headers(w), params={"path":"tls.key"}).status_code == 400
     assert api.get("/api/file", headers=headers(w), params={"path":"big.txt"}).status_code == 400
     assert api.get("/api/file", headers=headers(w), params={"path":"../hello.py"}).status_code == 400
     assert api.get("/api/file", headers=headers(w), params={"path":str(sandbox / "hello.py")}).status_code == 400
@@ -128,6 +132,7 @@ def test_static_contains_no_remote_urls():
 def test_run_uses_argument_array_not_shell(client, sandbox):
     api, w = client
     api.post("/api/project", headers=headers(w), json={"path":str(sandbox)})
+    w.use_core = False  # Deliberate legacy argument-array test; production requires typed service.
     prompt = "fix code && echo NEVER_EXECUTE"
     created = api.post("/api/start", headers=headers(w), json={"mode":"run","message":prompt})
     assert created.status_code == 200

@@ -1,0 +1,61 @@
+name: Coding Brain native desktop (Windows)
+
+on:
+  pull_request:
+    paths:
+      - 'desktop_ui/**'
+      - 'tests/test_desktop_ui.py'
+      - 'tests/test_desktop_native.py'
+      - 'Start-CodingBrainDesktop.ps1'
+      - 'installer/windows/Install-CodingBrainDesktop.ps1'
+      - '.github/workflows/desktop-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install 'pytest>=8,<10' 'pytest-asyncio>=0.24,<2' 'pywebview>=5,<7' 'pyinstaller>=6,<7'
+      - name: Native service, task approvals and browser API tests
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_desktop_ui.py tests/test_desktop_native.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build genuine Windows desktop executable
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name CodingBrainDesktop --collect-all webview --add-data 'desktop_ui;desktop_ui' desktop_ui/launch_native.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path dist/CodingBrainDesktop/CodingBrainDesktop.exe)) { throw 'Desktop EXE was not built' }
+      - name: Verify bundled native assets without GUI interaction
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath (Resolve-Path 'dist/CodingBrainDesktop/CodingBrainDesktop.exe').Path -ArgumentList '--self-test' -Wait -PassThru -WindowStyle Hidden
+          if ($p.ExitCode -ne 0) { throw "Native self-test returned $($p.ExitCode)" }
+      - name: Package portable Windows application and checksum
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'dist/CodingBrainDesktop' -DestinationPath 'dist/CodingBrainDesktop-Windows.zip'
+          $hash = (Get-FileHash -Algorithm SHA256 'dist/CodingBrainDesktop-Windows.zip').Hash.ToLowerInvariant()
+          "$hash  CodingBrainDesktop-Windows.zip" | Set-Content -Encoding ascii 'dist/CodingBrainDesktop-Windows.zip.sha256'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodingBrainDesktop-Windows
+          path: |
+            dist/CodingBrainDesktop-Windows.zip
+            dist/CodingBrainDesktop-Windows.zip.sha256
+          if-no-files-found: error
+          retention-days: 14

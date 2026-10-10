@@ -30,6 +30,12 @@ MAX_PREVIEW_BYTES = 128_000
 MAX_ENTRIES = 350
 
 
+def sensitive_name(name: str) -> bool:
+    lower = name.lower()
+    return (lower in SENSITIVE or lower.startswith('.env') or lower.endswith(('.pem', '.p12', '.pfx', '.key'))
+            or lower in {'known_hosts', 'authorized_keys', 'secret', 'secrets'})
+
+
 class ProjectChoice(BaseModel):
     path: str = Field(min_length=1, max_length=8192)
 
@@ -41,6 +47,7 @@ class StartRequest(BaseModel):
 
 class Decision(BaseModel):
     allow: bool
+    approval_id: str | None = None
 
 
 class Job:
@@ -56,6 +63,17 @@ class Job:
         self.lock = threading.Lock()
         self.awaiting_approval = False
         self.error: str | None = None
+        self.goal = command[-1] if command else ""
+        self.task_id: str | None = None
+        self.pending_id: str | None = None
+        self.pending_kind: str | None = None
+        self.pending_payload: dict | None = None
+        self.decision_event = threading.Event()
+        self.decision_allow: bool | None = None
+        self.stop_requested = threading.Event()
+        self.core = False
+        self.new_project = False
+        self.on_project_created = None
 
     def emit(self, kind: str, message: str):
         with self.lock:
@@ -69,7 +87,10 @@ class Job:
     def view(self) -> dict:
         return {"id": self.id, "kind": self.kind, "project": self.project, "status": self.status,
                 "started": self.started, "returncode": self.returncode,
-                "awaiting_approval": self.awaiting_approval, "error": self.error}
+                "awaiting_approval": self.awaiting_approval, "error": self.error,
+                "approval": {"id": self.pending_id, **self.pending_payload}
+                    if self.pending_id and self.pending_payload else None,
+                "task_id": self.task_id, "engine": "core" if self.core else "cli"}
 
 
 class Workspace:
@@ -81,6 +102,7 @@ class Workspace:
         self.jobs: dict[str, Job] = {}
         self.active: str | None = None
         self.lock = threading.Lock()
+        self.use_core = True
 
     def cli_command(self) -> list[str]:
         """Run Python directly on Windows to avoid .cmd shell interpretation.
@@ -145,7 +167,7 @@ class Workspace:
         if not self.project:
             raise ValueError("Select a project first")
         rel = Path(relative)
-        if rel.is_absolute() or ".." in rel.parts or any(part in IGNORED or part.lower() in SENSITIVE for part in rel.parts):
+        if rel.is_absolute() or ".." in rel.parts or any(part in IGNORED or sensitive_name(part) for part in rel.parts):
             raise ValueError("This path is not available for preview")
         path = self.project / rel
         # Never follow symlinks/junctions, including intermediate directories.
@@ -168,7 +190,8 @@ class Workspace:
             raise ValueError("Not a directory")
         result = []
         for item in folder.iterdir():
-            if item.name in IGNORED or item.name.lower() in SENSITIVE or item.is_symlink():
+            if (item.name in IGNORED or sensitive_name(item.name) or item.is_symlink()
+                    or (hasattr(item, "is_junction") and item.is_junction())):
                 continue
             try:
                 if not (item.is_file() or item.is_dir()):
@@ -196,19 +219,38 @@ class Workspace:
 
     def start(self, body: StartRequest) -> Job:
         mode = body.mode
-        if mode not in {"chat", "run"}:
+        if mode not in {"chat", "run", "new"}:
             raise ValueError("Unknown mode")
         if mode == "run" and (not self.project or not self.git_branch(self.project)):
             raise ValueError("Select an existing Git repository to run a coding task")
         # Never treat chat as a coding task. Newer CLIs provide chat; older ones
         # return a clear unsupported-command error instead of running code.
-        command = [*self.cli_command(), "chat" if mode == "chat" else "run", body.message]
+        command = [*self.cli_command(), "chat" if mode == "chat" else "new" if mode == "new" else "run", body.message]
         with self.lock:
             if self.active and self.jobs[self.active].status in {"starting", "running", "approval_required"}:
                 raise ValueError("Another task is active; finish or stop it first")
             job = Job(mode, str(self.project) if self.project else None, command)
             self.jobs[job.id] = job
             self.active = job.id
+        # Typed service calls preserve the existing engine's permission model.
+        # Fall back to the legacy CLI only on machines without an importable brain;
+        # it cannot approve protected actions non-interactively.
+        if self.use_core:
+            try:
+                from .core import supported, run as core_run, chat as core_chat, create_new
+                if supported():
+                    job.core = True
+                    job.on_project_created = lambda p: self.choose(p)
+                    target = core_run if mode == "run" else create_new if mode == "new" else core_chat
+                    threading.Thread(target=target, args=(job,), daemon=True).start()
+                    return job
+            except ImportError:
+                pass
+        if mode in {"new", "run"} and self.use_core:
+            del self.jobs[job.id]
+            if self.active == job.id:
+                self.active = None
+            raise ValueError("The installed Coding Brain engine is unavailable; protected execution did not start")
         threading.Thread(target=self._execute, args=(job,), daemon=True).start()
         return job
 
@@ -252,8 +294,16 @@ class Workspace:
         finally:
             job.awaiting_approval = False
 
-    def decide(self, job_id: str, allow: bool):
+    def decide(self, job_id: str, allow: bool, approval_id: str | None = None):
         job = self.jobs[job_id]
+        if job.core:
+            if not job.awaiting_approval or not job.pending_id or job.decision_event.is_set():
+                raise ValueError("No approval is pending")
+            if approval_id != job.pending_id:
+                raise ValueError("Approval is stale or does not match the current request")
+            job.decision_allow = allow
+            job.decision_event.set()
+            return
         if not job.awaiting_approval or not job.process or job.process.poll() is not None:
             raise ValueError("No approval is pending")
         job.process.stdin.write("y\n" if allow else "n\n")
@@ -264,6 +314,13 @@ class Workspace:
 
     def stop(self, job_id: str):
         job = self.jobs[job_id]
+        if job.core:
+            if job.status not in {"starting", "running", "approval_required"}:
+                raise ValueError("Task is not running")
+            job.stop_requested.set()
+            job.decision_event.set()
+            job.emit("stage", "Stop requested; waiting for the engine's safe cancellation boundary")
+            return
         if not job.process or job.process.poll() is not None:
             raise ValueError("Task is not running")
         job.status = "cancelled"
@@ -353,7 +410,7 @@ def create_app(state: Workspace | None = None) -> FastAPI:
     @app.post("/api/jobs/{job_id}/decision", dependencies=[Depends(auth)])
     def decision(job_id: str, body: Decision):
         try:
-            state.decide(job_id, body.allow)
+            state.decide(job_id, body.allow, body.approval_id)
             return {"ok": True}
         except KeyError:
             raise HTTPException(404, "Unknown task")
@@ -377,6 +434,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Local Coding Brain workspace UI")
     parser.add_argument("--port", type=int, default=0, help="Loopback TCP port (0 = random)")
     parser.add_argument("--no-open", action="store_true", help="Do not open browser")
+    parser.add_argument("--handshake-stdout", action="store_true", help="Emit machine-readable one-use desktop startup handshake")
     options = parser.parse_args(argv)
     import socket
     import uvicorn
@@ -386,8 +444,12 @@ def main(argv=None):
     sock.bind(("127.0.0.1", options.port)); sock.listen(128)
     port = sock.getsockname()[1]
     url = f"http://127.0.0.1:{port}/#token={state.secret}"
-    print("Coding Brain workspace UI - listening on 127.0.0.1 only", flush=True)
-    print("Open this URL in your own browser:", url, flush=True)
+    if options.handshake_stdout:
+        # Only the parent desktop process receives this pipe. Never log its token.
+        print("CBUI_READY " + json.dumps({"port": port, "token": state.secret, "pid": os.getpid()}), flush=True)
+    else:
+        print("Coding Brain workspace UI - listening on 127.0.0.1 only", flush=True)
+        print("Open this URL in your own browser:", url, flush=True)
     if not options.no_open:
         webbrowser.open(url)
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning", access_log=False))

@@ -47,12 +47,13 @@
 
   function setMode(value) {
     mode = value;
-    for (const kind of ['chat', 'run']) {
+    for (const kind of ['chat', 'run', 'new']) {
       const button = $('mode-' + kind);
       button.classList.toggle('active', kind === value);
       button.setAttribute('aria-pressed', String(kind === value));
     }
-    $('prompt').placeholder = value === 'chat' ? 'Ask Coding Brain anything...' : 'Describe a coding goal...';
+    $('prompt').placeholder = value === 'chat' ? 'Ask Coding Brain anything...' :
+      value === 'new' ? 'Describe the app you want Coding Brain to create...' : 'Describe a coding goal...';
   }
 
   function updateProject(project) {
@@ -176,8 +177,25 @@
     list.scrollTop = list.scrollHeight;
   }
 
-  function approval(jobId, prompt) {
+  function approval(jobId, details) {
+    const prompt = details?.summary || 'Review the proposal before approving.';
     const box = message('CODING BRAIN · APPROVAL REQUIRED', prompt, 'system');
+    if (details?.files?.length) {
+      const files = document.createElement('p');
+      files.className = 'muted';
+      files.textContent = 'Proposed files: ' + details.files.join(', ');
+      box.append(files);
+    }
+    if (details?.diff) {
+      const reveal = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = 'Review exact diff';
+      const diff = document.createElement('pre');
+      diff.className = 'proposal-diff';
+      diff.textContent = details.diff;
+      reveal.append(summary, diff);
+      box.append(reveal);
+    }
     const buttons = document.createElement('div');
     buttons.className = 'decision-buttons';
     for (const [name, allow] of [['Approve', true], ['Decline', false]]) {
@@ -186,7 +204,7 @@
       if (!allow) button.className = 'no';
       button.addEventListener('click', async () => {
         try {
-          await api(`/api/jobs/${jobId}/decision`, 'POST', {allow});
+          await api(`/api/jobs/${jobId}/decision`, 'POST', {allow, approval_id: details?.id || null});
           buttons.remove();
           message('YOU', allow ? 'Approved this step' : 'Declined this step', 'user');
         } catch (e) { toast(e.message); }
@@ -208,12 +226,16 @@
     try {
       const response = await api(`/api/jobs/${activeJob}?after=${cursor}`);
       const job = response.job;
+      if (job.project && (!currentProject || currentProject.path !== job.project) && mode === 'new') {
+        try { const project = await api('/api/project', 'POST', {path: job.project}); updateProject(project); }
+        catch (e) { toast('Project created; select its folder to view files.'); }
+      }
       for (const event of response.events) {
         cursor = Math.max(cursor, event.seq);
         if (displayedEvents.has(event.seq)) continue;
         displayedEvents.add(event.seq);
         activityEntry(event);
-        if (event.kind === 'approval') approval(job.id, event.message);
+        if (event.kind === 'approval') approval(job.id, job.approval || {summary: event.message});
         if (event.kind === 'output') message('CODING BRAIN · OUTPUT', event.message, 'assistant');
         if (event.kind === 'error') message('CODING BRAIN · ERROR', event.message, 'system');
       }
@@ -279,6 +301,7 @@
 
   $('mode-chat').addEventListener('click', () => setMode('chat'));
   $('mode-run').addEventListener('click', () => setMode('run'));
+  $('mode-new').addEventListener('click', () => setMode('new'));
   $('send').addEventListener('click', submit);
   $('prompt').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) {e.preventDefault();submit();} });
   $('project-picker').addEventListener('click', openDialog);
