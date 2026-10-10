@@ -165,6 +165,7 @@ Durable cross-agent project memory (see docs/project-memory.md).
 - **Commands:** `codingbrain memory scan|import|sync|status|show|conflicts|forget|approve|rule|contribute`.
 - **Engine:** project memory reaches the model as provenance-labelled reference data in the
   existing engineering packet.
+
 ## 0.9.1
 
 Fix: projects directly in the home folder (for example `C:\Users\me\my-app`) failed with
