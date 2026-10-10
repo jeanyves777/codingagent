@@ -64,7 +64,9 @@ jobs:
           python -m pip install --disable-pip-version-check -e ".[dev]"
           $env:CODINGBRAIN_TRANSCRIPTS = "$PWD\transcripts\${{ matrix.os }}-${{ matrix.python }}-${{ matrix.shell }}"
           python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_memory.py tests/test_multimodal.py tests/test_activity.py tests/test_installer.py tests/test_new.py tests/test_assistant.py tests/test_engine.py tests/test_cli_discovery.py
+          $tests = $LASTEXITCODE  # kept across the render below, which would otherwise decide the step
           Get-ChildItem transcripts -Recurse -Filter run-*.txt | ForEach-Object { python scripts/render_transcript.py $_.FullName ($_.FullName -replace '\.txt$', '.png') "Windows, Python ${{ matrix.python }}, ${{ matrix.shell }}" }
+          if ($tests -ne 0) { exit $tests }
       - name: Conversational assistant through a real Windows console pipe, from the home folder
         run: |
           # `codingbrain` started in C:\Users\<runner>, outside any repository, with no model on this
@@ -102,6 +104,7 @@ jobs:
           # Linux containers, so WSL/Docker readiness here shows the not-ready path, never a success.
           if (Get-Command winget -ErrorAction SilentlyContinue) { $env:CODINGBRAIN_TEST_WINGET = '1' } else { Write-Host 'winget is not on this runner image: the package-id check is skipped' }
           python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py -k real
+          if ($LASTEXITCODE -ne 0) { throw "real installer probes failed (pytest exited $LASTEXITCODE)" }
           $env:CODINGBRAIN_HOME = Join-Path $env:RUNNER_TEMP 'cb-plan'
           python -m brain.local install --plan --full --plain 2>&1 | Tee-Object -FilePath install-plan.txt
           if ($LASTEXITCODE -ne 0) { throw "install --plan exited $LASTEXITCODE" }
