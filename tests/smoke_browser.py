@@ -1,18 +1,23 @@
 """Headless Chromium integration exercise for the real UI with stubbed safe bridge replies."""
 from pathlib import Path
 import os
+import shutil
 from playwright.sync_api import sync_playwright
 
 root = Path(__file__).resolve().parents[1] / 'desktop_ui' / 'static'
 html = (root / 'index.html').read_text(encoding='utf-8').replace(
     '<link rel="stylesheet" href="/app.css">',
-    '<style>' + (root / 'app.css').read_text(encoding='utf-8') + '</style'
+    '<style>' + (root / 'app.css').read_text(encoding='utf-8') + '</style>'
 ).replace('<script defer src="/app.js"></script>', '')
 js = (root / 'app.js').read_text(encoding='utf-8')
 output = Path(os.environ.get('CB_DESKTOP_SCREENSHOT', '/mnt/data/CodingBrain-Desktop-Improved.png'))
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True, executable_path='/usr/bin/chromium', args=['--no-sandbox','--disable-dev-shm-usage'])
+    chromium = os.environ.get('CB_CHROMIUM_PATH') or shutil.which('chromium') or shutil.which('chromium-browser')
+    options = {'headless': True, 'args': ['--no-sandbox', '--disable-dev-shm-usage']}
+    if chromium:
+        options['executable_path'] = chromium
+    browser = p.chromium.launch(**options)
     page = browser.new_page(viewport={'width':1600,'height':970}, device_scale_factor=1)
     errors=[]
     page.on('pageerror', lambda error:errors.append(str(error)))
@@ -51,13 +56,65 @@ with sync_playwright() as p:
     page.locator('#thread .message.assistant').get_by_text('Hello! What would you like to build?',exact=True).wait_for(timeout=3000)
     # Completed chats shouldn't fill the transcript with fake task-finished bubbles.
     assert page.get_by_text('Session finished.').count()==0
+    # Real chat rows have visually separate, accessible avatars and aligned bubbles.
+    user = page.locator('#thread .message.user').first
+    assistant = page.locator('#thread .message.assistant').first
+    assert user.locator('.avatar-user svg').count() == 1
+    assert assistant.locator('.avatar-assistant').count() == 1
+    assert assistant.get_by_text('Coding Brain',exact=True).count() == 1
+    assert assistant.locator('.message-time[datetime]').count() == 1
+    user_pos = user.bounding_box()
+    assistant_pos = assistant.bounding_box()
+    composer_pos = page.locator('.composer').bounding_box()
+    bubble_pos = assistant.locator('.message-bubble').bounding_box()
+    assert abs(user_pos['x'] - assistant_pos['x']) < 2, (user_pos, assistant_pos)
+    assert abs(composer_pos['x'] - bubble_pos['x']) < 2, (composer_pos, bubble_pos)
+    assert bubble_pos['width'] > 400
+    # A second common Windows window size keeps both the thread and composer anchored.
+    page.set_viewport_size({'width':1366,'height':768})
+    panel = page.locator('#thread .message.assistant').first.locator('.message-bubble').bounding_box()
+    composer = page.locator('.composer').bounding_box()
+    assert abs(panel['x'] - composer['x']) < 2, (panel, composer)
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
+    page.set_viewport_size({'width':1600,'height':970})
+    # A real, keyboard-dismissable local profile menu (not a decorative avatar).
+    page.locator('#profile-trigger').click()
+    assert page.locator('#profile-trigger').get_attribute('aria-expanded') == 'true'
+    assert page.locator('#profile-popover').is_visible()
+    assert page.get_by_text('Private to this computer').count() == 1
+    page.keyboard.press('Escape')
+    assert not page.locator('#profile-popover').is_visible()
+    assert page.locator('#profile-trigger').get_attribute('aria-expanded') == 'false'
+    page.locator('#profile-trigger').click()
+    page.locator('#profile-providers').click()
+    assert page.locator('#control-dialog').is_visible()
+    assert page.locator('#control-providers').is_visible()
+    page.locator('#control-close').click()
+    # Explorer must collapse and reopen, instead of a dead icon.
+    page.locator('#collapse-explorer').click()
+    assert not page.locator('#explorer').is_visible()
+    assert page.locator('#open-explorer').is_visible()
+    page.locator('#open-explorer').click()
+    assert page.locator('#explorer').is_visible()
+    # Capture an empty project state as separate screenshot evidence.
+    page.screenshot(path=str(output.with_name('CodingBrain-Desktop-Empty-Explorer.png')))
     page.locator('#project-picker').click()
     page.get_by_text('sample-project',exact=True).last.click()
     page.get_by_text('backend',exact=True).wait_for(timeout=2000)
     page.get_by_text('main.py',exact=True).click()
     assert 'print("hello")' in page.locator('#preview-content').inner_text()
     page.locator('#preview-close').click()
+    assert page.locator('#profile-project').inner_text() == 'sample-project'
     assert not errors, errors
     page.screenshot(path=str(output))
+    # Narrow windows must not lose the explorer or trigger page-level horizontal overflow.
+    page.set_viewport_size({'width': 650, 'height': 850})
+    page.locator('#open-explorer').click()
+    assert page.locator('#explorer').is_visible()
+    page.locator('#collapse-explorer').click()
+    assert not page.locator('#explorer').is_visible()
+    dimensions = page.evaluate('''() => ({width:innerWidth,scrollWidth:document.documentElement.scrollWidth})''')
+    assert dimensions['scrollWidth'] <= dimensions['width'] + 1, dimensions
+    assert not errors, errors
     browser.close()
     print('Improved desktop browser smoke PASS: first-run, 7 providers, updates, chat, folder tree, preview, no JS errors')

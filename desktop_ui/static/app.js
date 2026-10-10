@@ -30,31 +30,73 @@
     toast.timer = setTimeout(() => $('toast').hidden = true, 4400);
   }
 
+  function avatarIcon(kind) {
+    const holder = document.createElement('span');
+    holder.className = 'avatar avatar-' + kind;
+    holder.setAttribute('aria-hidden', 'true');
+    if (kind === 'user') {
+      const ns = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(ns, 'svg');
+      for (const [key,value] of Object.entries({viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':'1.8','stroke-linecap':'round','stroke-linejoin':'round'})) svg.setAttribute(key,value);
+      const face = document.createElementNS(ns, 'circle');
+      for (const [key,value] of Object.entries({cx:'12',cy:'8',r:'3.6'})) face.setAttribute(key,value);
+      const shoulders = document.createElementNS(ns, 'path');
+      shoulders.setAttribute('d', 'M5.2 19.1a6.8 6.8 0 0 1 13.6 0');
+      svg.append(face, shoulders); holder.append(svg);
+    } else if (kind === 'system') {
+      holder.textContent = 'i';
+    } else {
+      holder.textContent = '◇';
+    }
+    return holder;
+  }
+
   function message(author, text, variant = 'assistant') {
     $('welcome').hidden = true;
-    const node = document.createElement('div');
-    node.className = 'message ' + variant;
-    const label = document.createElement('div');
-    label.className = 'message-head';
-    label.textContent = author;
-    const when = document.createElement('span');
+    const row = document.createElement('article');
+    row.className = 'message ' + variant;
+    row.setAttribute('aria-label', author + ' message');
+    const avatar = avatarIcon(variant);
+    const bubble = document.createElement('div');
+    bubble.className = 'message-bubble';
+    const head = document.createElement('div');
+    head.className = 'message-head';
+    const name = document.createElement('span');
+    name.className = 'message-name';
+    name.textContent = variant === 'user' ? 'You' : author.replace(/^CODING BRAIN\s*·\s*/, 'Coding Brain · ').replace(/^CODING BRAIN$/, 'Coding Brain');
+    const when = document.createElement('time');
     when.className = 'message-time';
-    when.textContent = new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
-    label.append(when);
+    const now = new Date();
+    when.dateTime = now.toISOString();
+    when.textContent = now.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
+    const metadata = document.createElement('span');
+    metadata.className = 'message-meta';
+    metadata.append(name, when);
+    head.append(metadata);
     if (variant !== 'user') {
+      const actions = document.createElement('span');
+      actions.className = 'message-actions';
       const copy = document.createElement('button');
+      copy.type = 'button';
       copy.className = 'message-copy';
       copy.textContent = '⧉';
+      copy.title = 'Copy message';
       copy.setAttribute('aria-label','Copy message');
-      copy.addEventListener('click', () => { navigator.clipboard?.writeText(text).catch(() => toast('Copy unavailable')); });
-      label.append(copy);
+      copy.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(text); copy.textContent = '✓'; }
+        catch { toast('Copy unavailable'); }
+      });
+      actions.append(copy);
+      head.append(actions);
     }
     const content = document.createElement('div');
+    content.className = 'message-content';
     content.textContent = text;
-    node.append(label, content);
-    $('thread').append(node);
+    bubble.append(head, content);
+    row.append(avatar, bubble);
+    $('thread').append(row);
     $('thread').scrollTop = $('thread').scrollHeight;
-    return node;
+    return bubble;
   }
 
   function setMode(value) {
@@ -75,10 +117,41 @@
     $('explorer-folder').textContent = project ? project.name : 'No project selected';
     $('branch-name').textContent = project && project.git ? '◇ ' + project.git : '◇ No repository';
     $('file-count').textContent = '';
+    $('profile-project').textContent = project ? project.name : 'No project selected';
     expanded.clear();
     $('preview').hidden = true;
     if (project) loadTree();
-    else $('file-tree').textContent = 'Select a project to browse its files.';
+    else renderEmptyExplorer();
+  }
+
+  function renderEmptyExplorer() {
+    const list = $('file-tree');
+    list.replaceChildren();
+    const panel = document.createElement('div');
+    panel.className = 'empty-panel';
+    const illustration = document.createElement('div');
+    illustration.className = 'empty-folder'; illustration.setAttribute('aria-hidden', 'true'); illustration.textContent = '▱';
+    const heading = document.createElement('h3'); heading.textContent = 'No project selected';
+    const description = document.createElement('p'); description.textContent = 'Open a project folder to browse its files and follow agent activity.';
+    panel.append(illustration, heading, description);
+    const browse = document.createElement('button');
+    browse.type = 'button'; browse.textContent = '▱  Browse folder';
+    browse.addEventListener('click', openDialog);
+    const create = document.createElement('button');
+    create.type = 'button'; create.className = 'empty-secondary'; create.textContent = '＋  New project';
+    create.addEventListener('click', () => {setMode('new'); $('prompt').focus();});
+    panel.append(browse, create);
+    list.append(panel);
+  }
+
+  function setExplorerVisibility(visible) {
+    const explorer = $('explorer');
+    explorer.classList.toggle('collapsed', !visible);
+    explorer.classList.toggle('show', visible);
+    $('open-explorer').classList.toggle('is-visible', !visible);
+    $('open-explorer').setAttribute('aria-expanded', String(visible));
+    $('collapse-explorer').setAttribute('aria-expanded', String(visible));
+    $('open-explorer').title = visible ? 'Project explorer is open' : 'Open project explorer';
   }
 
   function rowFor(entry, depth = 0) {
@@ -352,10 +425,28 @@
       $('tab-activity').setAttribute('aria-selected', String(!fileMode));
     });
   }
-  $('collapse-explorer').addEventListener('click', () => {
-    $('explorer').classList.toggle('show');
-    toast('File explorer can be reopened from the project selector.');
+  $('collapse-explorer').addEventListener('click', () => setExplorerVisibility(false));
+  $('open-explorer').addEventListener('click', () => setExplorerVisibility(true));
+  $('profile-trigger').addEventListener('click', () => {
+    const show = $('profile-popover').hidden;
+    $('profile-popover').hidden = !show;
+    $('profile-trigger').setAttribute('aria-expanded', String(show));
   });
+  document.addEventListener('pointerdown', event => {
+    if (!event.target.closest('.profile-anchor')) {
+      $('profile-popover').hidden = true;
+      $('profile-trigger').setAttribute('aria-expanded', 'false');
+    }
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !$('profile-popover').hidden) {
+      $('profile-popover').hidden = true;
+      $('profile-trigger').setAttribute('aria-expanded', 'false');
+      $('profile-trigger').focus();
+    }
+  });
+  $('profile-providers').addEventListener('click', () => { $('profile-popover').hidden = true; $('profile-trigger').setAttribute('aria-expanded','false'); openControl('providers'); });
+  $('profile-setup').addEventListener('click', () => { $('profile-popover').hidden = true; $('profile-trigger').setAttribute('aria-expanded','false'); openControl('setup'); });
   $('nav-chat').addEventListener('click', () => $('prompt').focus());
   $('nav-settings').addEventListener('click', () => openControl('setup'));
   $('nav-providers').addEventListener('click', () => openControl('providers'));
@@ -520,5 +611,5 @@
 
   setInterval(tickTime, 1000);
   if (!token) message('CODING BRAIN', 'Missing local session token. Launch this page using python -m desktop_ui.', 'system');
-  else { refresh(); firstRun(); }
+  else { renderEmptyExplorer(); refresh(); firstRun(); }
 })();

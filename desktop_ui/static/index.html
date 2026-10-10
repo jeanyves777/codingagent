@@ -29,7 +29,19 @@
         </div>
         <div class="header-actions">
           <button class="connection-pill" id="header-setup" title="Check Coding Brain installation"><span class="dot green"></span> Local workspace</button>
+          <button class="icon-btn explorer-reopen" id="open-explorer" title="Open project explorer" aria-label="Open project explorer" aria-controls="explorer" aria-expanded="true" type="button">▱</button>
           <button class="icon-btn" id="refresh" title="Refresh" aria-label="Refresh">↻</button>
+          <div class="profile-anchor">
+            <button class="profile-trigger" id="profile-trigger" type="button" aria-label="Local profile and account settings" aria-haspopup="dialog" aria-controls="profile-popover" aria-expanded="false" title="Your local profile">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3.6"/><path d="M5.3 19a6.7 6.7 0 0 1 13.4 0"/></svg>
+            </button>
+            <div class="profile-popover" id="profile-popover" role="dialog" aria-label="Local profile" hidden>
+              <div class="profile-identity"><span class="profile-large"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="8" r="3.6"/><path d="M5.3 19a6.7 6.7 0 0 1 13.4 0"/></svg></span><div><strong>Local workspace</strong><small>Private to this computer</small></div></div>
+              <div class="profile-current"><span>Selected project</span><strong id="profile-project">No project selected</strong></div>
+              <button type="button" id="profile-providers">Manage AI providers <span>↗</span></button>
+              <button type="button" id="profile-setup">Setup &amp; updates <span>↗</span></button>
+            </div>
+          </div>
         </div>
       </header>
       <div class="columns">
@@ -66,11 +78,11 @@
                 <button id="send" class="send" aria-label="Send message" title="Send message">➤</button>
               </div>
             </div>
-            <p class="hint">Enter to send · Shift+Enter for a new line · Every protected action requires approval</p>
+            <p class="hint">Enter to send · Shift+Enter for a new line <span class="hint-separator">·</span> Protected actions require your approval</p>
           </section>
         </main>
         <aside class="explorer" id="explorer" aria-label="Project explorer">
-          <div class="explorer-head"><h2><span class="explorer-head-icon">▱</span> Project explorer</h2><button class="icon-btn" id="collapse-explorer" aria-label="Collapse explorer">⋯</button></div>
+          <div class="explorer-head"><h2><span class="explorer-head-icon">▱</span> Project explorer</h2><button class="icon-btn" id="collapse-explorer" title="Collapse project explorer" aria-label="Collapse project explorer">⇥</button></div>
           <div class="explorer-tabs" role="tablist" aria-label="Explorer tabs">
             <button role="tab" class="active" id="tab-files" aria-selected="true">Files</button>
             <button role="tab" id="tab-activity" aria-selected="false">Activity</button>

@@ -7,6 +7,8 @@ on:
       - 'tests/test_desktop_ui.py'
       - 'tests/test_desktop_native.py'
       - 'tests/test_desktop_management.py'
+      - 'tests/smoke_browser.py'
+      - 'docs/backend-integration-handoff.md'
       - 'Start-CodingBrainDesktop.ps1'
       - 'installer/windows/CodingBrainDesktop.iss'
       - 'installer/windows/Install-CodingBrainDesktop.ps1'
@@ -103,5 +105,28 @@ jobs:
             dist/CodingBrainDesktop-Windows.zip.sha256
             dist/CodingBrain-Setup.exe
             dist/CodingBrain-Setup.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  browser-layout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Chromium and Playwright for real UI interaction
+        run: |
+          python -m pip install 'playwright>=1.45,<2'
+          python -m playwright install --with-deps chromium
+      - name: Test desktop layout and interactions in Chromium
+        env:
+          CB_DESKTOP_SCREENSHOT: ${{ runner.temp }}/CodingBrain-Desktop-Workspace.png
+        run: python tests/smoke_browser.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodingBrainDesktop-UI-Screenshots
+          path: ${{ runner.temp }}/CodingBrain-Desktop-*.png
           if-no-files-found: error
           retention-days: 14

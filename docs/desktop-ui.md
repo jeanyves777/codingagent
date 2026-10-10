@@ -113,3 +113,22 @@ Implement a capability-based `ProviderAdapter` extension in the global orchestra
 - The Chromium mock-bridge interaction smoke tests first-run panel, seven provider cards, update controls, chat, project selection, and file preview with no browser JavaScript errors. These are UI/browser tests, **not** proof that the user's real installed backend supports all features.
 - Existing published Coding Brain v0.9.0 does not have the full installer, goal-first creation or the conversational command, so those controls clearly report the installed-backend limitation until the respective release is published and installed. On older versions, `hello` remains a local lightweight greeting; complex conversational requests must wait for the conversational backend release.
 - Native full GUI interaction on a Windows PC, full first-install on a clean Windows machine without preinstalled Coding Brain, support for connected Gemini/Grok/Muse execution, and signed desktop self-updates remain **not yet demonstrated**. A desktop installer alone does not bootstrap the absent core interpreter today; a separately verified installer integration is needed for that clean-machine scenario.
+
+
+## Workspace layout and backend handoff (UI polish pass)
+
+The conversation now uses **left-anchored message rows**, distinct user/brain circular avatars,
+real per-message timestamps, sender identity, and a copy action. The composer uses the same
+left content grid as the message bubbles; it no longer floats independently in the center.
+The right-side explorer remains resizable by viewport and has functioning collapse/reopen
+controls. The top-right **local profile** button opens a keyboard-dismissable popover with
+project context and setup/provider entry points; it does not pretend to be a vendor login.
+
+The browser-layout CI job runs real Chromium interactions at full-screen, 1366px laptop,
+and narrow widths, checks alignment and page overflow, and uploads screenshots. That is
+**browser evidence, not a substitute for a manual real-WebView2 Windows GUI test**.
+
+For the core/backend agent, see **[`docs/backend-integration-handoff.md`](backend-integration-handoff.md)**.
+It defines the remaining clean-machine installation/bootstrap, stable updater, true global
+conversation, multi-provider backend adapters, typed activity and task lifecycle, and
+Windows end-to-end verification contracts. Those gaps are **not claimed implemented in the UI**.
