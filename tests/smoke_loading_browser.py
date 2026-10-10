@@ -33,7 +33,8 @@ with sync_playwright() as p:
       window.__demo = {
         setupPending: true, setupResponse: null, setupRelease: null,
         jobState: 'running', jobError: null, chatPending: false, chatRelease: null,
-        checks: 0, refreshes: 0, actions: 0, chatStarted: 0
+        checks: 0, refreshes: 0, actions: 0, chatStarted: 0,
+        updatePending: true, updateFail: false, updateRelease: null, updateChecks: 0
       };
       const data = window.__demo;
       const setup = {readiness:{onboarding_completed:true,engine_installed:true,full_installer_available:true,
@@ -56,7 +57,23 @@ with sync_playwright() as p:
           return reply(setup);
         }
         if (target === '/api/setup/completed') return reply({ok:true});
-        if (target.startsWith('/api/system/action')) { data.actions++;return reply({job:{id:'maintenance'}}); }
+        if (target.startsWith('/api/updates/status')) {
+           data.updateChecks++;
+           const selected = new URL(target, location.origin).searchParams.get('channel') || 'stable';
+           const result = selected === 'preview' ?
+             {tag:'UNRELEASED preview 0.13.0.dev9',latest:'0.13.0.dev9',unreleased:true,
+              engine:'0.11.0',desktop:'0.11.0',engine_update_available:true,desktop_update_available:true,
+              desktop_in_release:true,engine_only:false,any_update_available:true,
+              preview_source_commit:'a'.repeat(40),preview_run_id:123} :
+             {tag:'v0.11.0',latest:'0.11.0',unreleased:false,engine:'0.10.0',desktop:'unversioned/preview',
+              engine_update_available:true,desktop_update_available:false,
+              desktop_in_release:false,engine_only:true,any_update_available:true};
+           if (data.updatePending) return new Promise((resolve,reject) =>
+             data.updateRelease = () => data.updateFail ? reject(Error('GitHub update check unavailable')) : resolve(reply(result)));
+           if (data.updateFail) throw Error('GitHub update check unavailable');
+           return reply(result);
+         }
+         if (target.startsWith('/api/system/action')) { data.actions++;return reply({job:{id:'maintenance'}}); }
         if (target.startsWith('/api/jobs/maintenance')) return reply({
           job:{id:'maintenance',status:data.jobState,error:data.jobError},
           events: data.jobState==='running'? [{seq:1,kind:'output',message:'Running official deep checks…'}] :
@@ -89,30 +106,33 @@ with sync_playwright() as p:
     assert page.locator('#setup-check').is_enabled()
     assert page.evaluate('window.__demo.checks') == 1, 'duplicate first-run probes'
 
-    # A real backend job remains pending: control center shows an in-progress button/status.
+    # A pending read-only GitHub check shows busy feedback and never launches a mutating job.
     page.locator('#control-tab-updates').click()
     page.locator('#check-updates').click()
-    assert page.locator('#action-dialog').is_visible()
-    assert page.evaluate('window.__demo.actions') == 0, 'No action before explicit consent'
-    page.locator('#action-approve').click()
-    page.locator('#control-feedback-title').get_by_text('Update check running').wait_for()
+    assert not page.locator('#action-dialog').is_visible()
+    page.locator('#control-feedback-title').get_by_text('Update check starting').wait_for()
     assert page.locator('#check-updates.is-loading').is_disabled()
-    assert page.locator('#control-feedback-elapsed').is_visible()
-    assert page.locator('#maintenance-log').get_by_text('Running official deep checks…').count() == 1
-    # No duplicate launches while this operation is running.
+    assert page.evaluate('window.__demo.updateChecks') == 1
+    assert page.evaluate('window.__demo.actions') == 0
+    # Duplicate actions are blocked while the read-only request is pending.
     page.locator('#repair-install').click()
-    assert page.evaluate('window.__demo.actions') == 1
-    # Backend reports failure; spinner must clear and the user can retry.
-    page.evaluate('window.__demo.jobState="failed";window.__demo.jobError="Sandbox unavailable"')
+    assert page.evaluate('window.__demo.actions') == 0
+    # Failed GitHub lookup must clear the spinner and allow retry.
+    page.evaluate('window.__demo.updateFail=true;window.__demo.updateRelease()')
     page.locator('#control-feedback[data-state="error"]').wait_for(timeout=3500)
     assert page.locator('#check-updates').is_enabled()
-    assert 'Sandbox unavailable' in page.locator('#control-feedback-detail').inner_text()
-    # Retry succeeds based on actual backend status, no fake success on launch.
-    page.evaluate('window.__demo.jobState="completed"')
+    assert 'GitHub update check unavailable' in page.locator('#control-feedback-detail').inner_text()
+    page.evaluate('window.__demo.updatePending=false;window.__demo.updateFail=false')
     page.locator('#check-updates').click()
-    page.locator('#action-approve').click()
-    page.locator('#control-feedback[data-state="success"]').wait_for(timeout=3500)
+    page.locator('#control-feedback-title').get_by_text('Verified stable update available').wait_for(timeout=3500)
     assert page.locator('#check-updates').is_enabled()
+    assert 'no desktop installer' in page.locator('#maintenance-log').inner_text()
+    # Preview is opt-in and explicitly UNRELEASED.
+    page.locator('#update-channel').select_option('preview')
+    page.locator('#check-updates').click()
+    page.locator('#maintenance-log').get_by_text('UNRELEASED Windows preview', exact=False).wait_for(timeout=3500)
+    assert 'NOT a published GitHub release' in page.locator('#maintenance-log').inner_text()
+    assert page.evaluate('window.__demo.actions') == 0
     page.locator('#control-close').click()
 
     # While the chat reply is pending, show the loading send button and a typing row.
