@@ -126,7 +126,7 @@ def test_two_sessions_not_allowed_simultaneously(tmp_path):
 
 
 def test_static_contains_no_remote_urls():
-    html = (Path(__file__).parents[1] / "desktop_ui" / "static" / "index.html").read_text()
+    html = (Path(__file__).parents[1] / "desktop_ui" / "static" / "index.html").read_text(encoding="utf-8")
     assert "http://" not in html and "https://" not in html
     assert "app.js" in html
 
