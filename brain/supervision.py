@@ -98,6 +98,13 @@ class SupervisionPolicy:
             raise SupervisorBudgetExceeded("Daily supervisor limit reached")
         errors = []
         for supervisor in self.supervisors:
+            accounting.emit("supervisor_selected", phase="supervisor_selection", status="COMPLETED", agent="supervisor",
+                            provider=getattr(supervisor, "provider", None), model=getattr(supervisor, "model", None),
+                            summary=f"{supervisor.name} selected for {kind}: {self.remaining(task, kind)} of "
+                                    f"{self.allowance(task, kind)} {kind} consultation(s) left for this task, "
+                                    f"{self.settings['daily_limit'] - self.ledger.count(since=time.time() - 86400)} "
+                                    "left today",
+                            data={"supervisor": supervisor.name, "kind": kind, "billing": "subscription CLI"})
             started = time.time()
             try:
                 result = await supervisor.ask(kind, payload, workspace)

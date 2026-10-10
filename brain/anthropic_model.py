@@ -59,7 +59,8 @@ class AnthropicModel:
         if self.fallbacks:
             options["betas"] = [FALLBACK_BETA]
             options["fallbacks"] = "default"
-        response = await self.client.beta.messages.create(**options)
+        async with accounting.request(role, "anthropic", self.name):
+            response = await self.client.beta.messages.create(**options)
         self._record(response, role)
         if response.stop_reason == "refusal":
             details = getattr(response, "stop_details", None)

@@ -11,6 +11,7 @@ on:
       - "tests/test_memory.py"
       - "tests/test_multimodal.py"
       - "tests/multimodal_fixtures.py"
+      - "tests/test_activity.py"
       - ".github/workflows/windows-local-install.yml"
       - ".github/workflows/release.yml"
       - "scripts/release_gate.py"
@@ -52,8 +53,11 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check -e ".[dev]"
-          python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_memory.py tests/test_multimodal.py tests/test_release_gate.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:CODINGBRAIN_TRANSCRIPTS = "$PWD\transcripts\${{ matrix.os }}-${{ matrix.python }}-${{ matrix.shell }}"
+          python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_memory.py tests/test_multimodal.py tests/test_activity.py tests/test_release_gate.py
+          $tests = $LASTEXITCODE
+          Get-ChildItem transcripts -Recurse -Filter run-*.txt | ForEach-Object { python scripts/render_transcript.py $_.FullName ($_.FullName -replace '\.txt$', '.png') "Windows, Python ${{ matrix.python }}, ${{ matrix.shell }}" }
+          if ($tests -ne 0) { exit $tests }
           # The junction regression must run, not skip, on every Windows Python (3.11 has no Path.is_junction).
           $junction = python -m pytest -q -p no:cacheprovider -rs tests/test_memory.py -k windows_junction 2>&1 | Out-String
           Write-Host $junction
@@ -61,6 +65,9 @@ jobs:
           $attach = python -m pytest -q -p no:cacheprovider -rs tests/test_multimodal.py -k windows_junction_in_the_path 2>&1 | Out-String
           Write-Host $attach
           if ($LASTEXITCODE -ne 0 -or $attach -notmatch '2 passed' -or $attach -match 'skipped') { throw 'the Windows attachment junction regression did not run and pass' }
+          $snapshot = python -m pytest -q -p no:cacheprovider -rs tests/test_activity.py -k snapshot_windows_junction 2>&1 | Out-String
+          Write-Host $snapshot
+          if ($LASTEXITCODE -ne 0 -or $snapshot -notmatch '1 passed' -or $snapshot -match 'skipped') { throw 'the Windows snapshot junction regression did not run and pass' }
       - name: Build an older and a newer release
         shell: pwsh
         run: |
@@ -83,6 +90,7 @@ jobs:
           path: |
             verify-report.json
             upgrade-report.json
+            transcripts/
 
   engines:
     # Real engines, no mocks: the whole test suite (gauntlet included) with Tesseract OCR, a

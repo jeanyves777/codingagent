@@ -47,14 +47,31 @@ def version() -> str:
         return "unknown"
 
 
+LIVE = None  # the live activity view while a goal runs in this terminal
+
+
+def quiet_live():
+    """Stop live output while the terminal asks or prints a plan (resumed by resume_live)."""
+    if LIVE is not None:
+        LIVE.pause()
+
+
+def resume_live():
+    if LIVE is not None:
+        LIVE.resume()
+
+
 def ask(question: str, default: bool = False) -> bool:
     if not sys.stdin.isatty():
         return default
+    quiet_live()
     try:
         answer = input(f"{question} [{'Y/n' if default else 'y/N'}] ").strip().lower()
     except EOFError:  # Windows reports a NUL stdin as a terminal; end of input means the default
         print()
         return default
+    finally:
+        resume_live()
     return default if not answer else answer in {"y", "yes"}
 
 
@@ -202,9 +219,11 @@ async def handle(context: Context, task: dict, auto: bool) -> dict:
     """Carry a task forward, asking before each protected step."""
     brain = context.brain
     while True:
+        resume_live()  # live output runs while the task works; it pauses for prompts and summaries
         task = brain.store.get(task["id"])
         status = task["status"]
         if status == "proposed":
+            quiet_live()
             proposal = task["proposal"]
             print(f"\nPlan ({task.get('proposal_author', 'implementer')}): {proposal['plan'][:1500]}")
             print("Files: " + ", ".join(change["path"] for change in proposal["changes"]))
@@ -228,6 +247,7 @@ async def handle(context: Context, task: dict, auto: bool) -> dict:
         elif status == "queued" and task.get("pending_goal"):
             await brain.resume(task["id"])
         elif status == "passed":
+            quiet_live()
             evidence = task.get("test_evidence", {})
             completion = (task.get("completion") or {}).get("status", "unchecked")
             print(f"\nTests passed in the sandbox (exit {evidence.get('exit_code')}); "
@@ -241,11 +261,15 @@ async def handle(context: Context, task: dict, auto: bool) -> dict:
                 return task
             return await accept(context, task)
         elif status == "awaiting_implementer":
+            quiet_live()
             print("No free model is reachable. Start Ollama (or your model server), then `codingbrain resume`.")
             return task
         else:
+            quiet_live()  # print the outcome after every event that led to it
             if status in {"failed", "blocked", "integration_conflict"}:
-                last = (task.get("failure_log") or [{}])[-1]
+                evidence = task.get("test_evidence") or {}
+                last = (task.get("failure_log") or [{"category": "sandbox" if evidence.get("exit_code") in (None, 125, 126, 127)
+                                                     else "tests", "summary": (evidence.get("output") or "")[-300:]}])[-1]
                 context.memory.remember("repair", f"Attempt at '{task['goal'][:200]}' ended {status}: "
                                         f"{last.get('category', '')} {str(last.get('summary', ''))[:300]}",
                                         verified=False, ref=f"task:{task['id']}")
@@ -327,13 +351,18 @@ async def orchestrate(context: Context, goal: str, auto: bool, attachments=None)
 
 
 def run_goal(context: Context, goal: str, orchestrate_goal: bool = False, auto: bool | None = None,
-             attachments=None, visual=None, on_task=None):
+             attachments=None, visual=None, on_task=None, view: str | None = None):
     from .session import session
+    global LIVE
+    view = view or ("live" if sys.stdout.isatty() else "plain")
     auto = context.config["autonomy"]["execution"] == "auto" if auto is None else auto
     if context.project["tracked_changes"]:
         print("Note: Coding Brain starts from your last commit; uncommitted tracked changes are not included "
               "and must be committed or stashed first.")
-    with session(context.layout, context.project["id"], goal[:80]):
+    from .live import LiveView
+    with session(context.layout, context.project["id"], goal[:80]), \
+            LiveView(context.brain.telemetry, view) as live:
+        LIVE = live
         try:
             if orchestrate_goal:
                 return asyncio.run(orchestrate(context, goal, auto, attachments))
@@ -347,10 +376,209 @@ def run_goal(context: Context, goal: str, orchestrate_goal: bool = False, auto: 
                 return await handle(context, task, auto)
             return asyncio.run(single())
         except KeyboardInterrupt:
+            live.pause()
             print("\nPaused. Your work is saved; continue with `codingbrain resume`.")
+        finally:
+            LIVE = None
 
 
 # Commands -------------------------------------------------------------------------------------
+
+def view_mode(args) -> str | None:
+    for mode in ("json", "quiet", "verbose", "plain"):
+        if getattr(args, mode, False):
+            return mode
+    return None
+
+
+def telemetry_for(context):
+    """The project's journal, opened read-only in spirit: never starts the service."""
+    from ..telemetry import Telemetry
+    return context._brain.telemetry if context._brain is not None else Telemetry(context.data / "telemetry.sqlite3")
+
+
+def snapshots_for(context):
+    from ..snapshots import SnapshotStore
+    return context._brain.snapshots if context._brain is not None else SnapshotStore(context.data / "snapshots")
+
+
+def task_by_prefix(context, prefix: str | None, active_only=False) -> dict:
+    tasks = context.tasks()
+    if prefix:
+        found = [task for task in tasks if task["id"].startswith(prefix)]
+    else:
+        found = [task for task in tasks if not active_only or task["status"] in ACTIVE_STATES][:1]
+    if len(found) != 1:
+        raise SystemExit(f"No single task matches {prefix!r}" if prefix else "No matching task in this project.")
+    return found[0]
+
+
+ACTIVE_STATES = {"queued", "planning", "running", "testing", "cancellation_requested"}
+
+
+def cmd_activity(args, layout):
+    """What each agent is doing now in this project (read-only; safe while a task runs)."""
+    import time as clock_time
+    from .live import PHASES, clock, who
+    from .session import pid_alive
+    context = Context(layout, Path.cwd())
+    telemetry = telemetry_for(context)
+    tasks = context.tasks()
+    active = [task for task in tasks if task["status"] in ACTIVE_STATES | {"proposed", "passed", "awaiting_tool_approval"}]
+    report = []
+    for task in active[:10]:
+        events = telemetry.journal([task["id"]], limit=100000)
+        open_stage, request, beat = None, None, None
+        for event in events:
+            if event["event_type"] == "stage":
+                open_stage = event if event["status"] == "RUNNING" else (None if open_stage and event["phase"] == open_stage["phase"] else open_stage)
+            elif event["event_type"] == "model_request":
+                request, beat = event, event["at"]
+            elif event["event_type"] == "heartbeat" and request:
+                beat = event["at"]
+            elif event["event_type"] == "model_response":
+                request = None
+        owner = (task.get("owner") or {}).get("pid")
+        report.append({"task": task["id"], "goal": task.get("goal", "")[:120], "status": task["status"],
+                       "stage": open_stage and open_stage["phase"], "agent": open_stage and open_stage["agent"],
+                       "request": request and {"agent": request["agent"], "model": request["model"],
+                                               "elapsed": clock_time.time() - request["at"],
+                                               "heartbeat_age": clock_time.time() - beat},
+                       "process_alive": bool(owner and pid_alive(int(owner))),
+                       "latest": [{"at": event["at"], "type": event["event_type"], "status": event["status"],
+                                   "summary": event["summary"]} for event in events[-5:]]})
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+    if not report:
+        print("No active or pending tasks in this project.")
+        return 0
+    for item in report:
+        print(f"{item['task'][:8]}  {item['status']:<22} {item['goal']}")
+        if item["stage"]:
+            print(f"  now: {PHASES.get(item['stage'], item['stage'])} — {who({'agent': item['agent']})}")
+        if item["request"]:
+            request = item["request"]
+            stalled = request["heartbeat_age"] > 3 * accounting_heartbeat() + 5
+            print(f"  model request: {who(request)} for {clock(request['elapsed'])}, last heartbeat "
+                  f"{int(request['heartbeat_age'])} s ago" + (" — no heartbeat, may be stalled" if stalled else ""))
+        if item["status"] in ACTIVE_STATES and not item["process_alive"]:
+            print("  the process running this task has ended; `codingbrain resume` continues it")
+        for event in item["latest"]:
+            print(f"  {clock_time.strftime('%H:%M:%S', clock_time.localtime(event['at']))} {event['status'] or '':<16} "
+                  f"{' '.join(str(event['summary']).split())[:110]}")
+    return 0
+
+
+def accounting_heartbeat() -> float:
+    from .. import accounting
+    return accounting.HEARTBEAT_SECONDS
+
+
+def cmd_watch(args, layout):
+    """Follow a task's activity from any terminal until it finishes or needs you."""
+    import time as clock_time
+    from ..store import Store
+    from .live import LiveView
+    context = Context(layout, Path.cwd())
+    task = task_by_prefix(context, args.task, active_only=not args.task)
+    telemetry = telemetry_for(context)
+    store = Store(context.data / "brain.sqlite3")
+    ids = [task["id"], *[child["id"] for child in task.get("children", [])]]
+    with LiveView(telemetry, view_mode(args) or ("live" if sys.stdout.isatty() else "plain"), task_ids=ids,
+                  after=0 if args.history else None) as view:
+        view.started = (telemetry.journal(ids, limit=1) or [{"at": clock_time.time()}])[0]["at"]
+        try:
+            while store.get(task["id"])["status"] in ACTIVE_STATES:
+                clock_time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+    print(f"Task {task['id'][:8]} is {store.get(task['id'])['status']}.")
+    return 0
+
+
+def cmd_trace(args, layout):
+    from .live import render_trace, trace
+    context = Context(layout, Path.cwd())
+    task = task_by_prefix(context, args.task)
+    children = [child for child in context.tasks() if child.get("parent_id") == task["id"]]
+    report = trace(telemetry_for(context), task, children, snapshots_for(context).list(task["id"]))
+    print(json.dumps(report, indent=2, default=str) if args.json else render_trace(report))
+    return 0
+
+
+def cmd_snapshots(args, layout):
+    context = Context(layout, Path.cwd())
+    task = task_by_prefix(context, args.task)
+    items = snapshots_for(context).list(task["id"])
+    if args.json:
+        print(json.dumps(items, indent=2))
+    for item in [] if args.json else items:
+        print(f"{item['id']}  {time.strftime('%H:%M:%S', time.localtime(item['at']))}  {item['label']:<18} {item['status']}")
+    return 0
+
+
+def cmd_snapshot(args, layout):
+    context = Context(layout, Path.cwd())
+    store = snapshots_for(context)
+    try:
+        if args.action == "show":
+            snapshot = store.show(args.ids[0])
+            if args.json:
+                print(json.dumps(snapshot, indent=2, default=str))
+            else:
+                print(f"{snapshot['id']}  {snapshot['label']}  task {snapshot['task_id'][:8]}  {snapshot['status']}")
+                print(f"Goal: {snapshot['goal'][:200]}\nBaseline: {snapshot.get('base_commit')}")
+                print("Changed files: " + (", ".join(f"{item['path']} ({item['change']})" for item in snapshot["manifest"]) or "none"))
+                print(f"Tests: {snapshot['test_evidence']}  Visual: {snapshot['visual']}")
+                if snapshot["plan"]:
+                    print(f"Plan (model-provided): {' '.join(snapshot['plan'].split())[:600]}")
+                for artifact in snapshot["artifacts"]:
+                    print(f"Artifact: {artifact.get('kind')} {artifact.get('viewport', '')} {artifact['name']} {artifact['sha256'][:12]}")
+                print(f"Resume: {snapshot['resume']['command']}")
+                if args.diff and snapshot.get("diff"):
+                    print(store.get(snapshot["diff"]).decode("utf-8", errors="replace")[:40000])
+        elif args.action == "diff":
+            if len(args.ids) != 2:
+                raise SystemExit("codingbrain snapshot diff <A> <B>")
+            result = store.diff(*args.ids)
+            if args.json:
+                print(json.dumps(result, indent=2, default=str))
+            else:
+                print(f"{result['a']} -> {result['b']}")
+                for key, value in result["state"].items():
+                    print(f"  {key}: {str(value['a'])[:120]} -> {str(value['b'])[:120]}")
+                for item in result["files"]:
+                    print(f"  {item['path']}: {item['in_a']} -> {item['in_b']}")
+                    if item.get("diff"):
+                        print(item["diff"][:8000])
+        elif args.action == "restore":
+            snapshot = store.show(args.ids[0])
+            branch = args.branch or f"codingbrain/restore-{snapshot['id'][:9]}"
+            print(f"This creates branch {branch} with snapshot {snapshot['id']} ({snapshot['label']}) on top of "
+                  f"{(snapshot.get('base_commit') or '?')[:10]}. Your working files and current branch are not changed.")
+            if not (args.yes or ask("Create it?")):
+                print("Nothing restored.")
+                return 1
+            commit = store.restore(snapshot["id"], context.root, branch)
+            print(f"Restored on new branch {branch} at {commit[:10]}.")
+            skipped = [item for item in snapshot["manifest"] if item.get("excluded")]
+            if skipped:
+                print("Not stored in the snapshot, so left at their baseline version on that branch:")
+                for item in skipped:
+                    print(f"  {item['path']} ({item['excluded']})")
+        elif args.action == "purge":
+            if args.task:
+                removed = store.purge(task_id=args.task)
+            else:
+                removed = store.purge(older_than=time.time() - 86400 * args.older_than_days)
+            removed_events = telemetry_for(context).purge_journal(time.time() - 86400 * args.older_than_days) \
+                if not args.task else 0
+            print(f"Removed {removed} snapshot(s) and {removed_events} journal event(s); unreferenced files deleted.")
+    except (KeyError, ValueError) as error:
+        raise SystemExit(str(error))
+    return 0
+
 
 def cmd_init(args, layout):
     context = Context(layout, Path.cwd())
@@ -477,7 +705,8 @@ def cmd_run(args, layout):
                 task["attachments_sensitive"] = True
                 context.brain.store.save(task)
     try:
-        run_goal(context, goal, args.orchestrate, True if args.yes else None, packet, visual, on_task=link)
+        run_goal(context, goal, args.orchestrate, True if args.yes else None, packet, visual, on_task=link,
+                 view=view_mode(args))
     finally:
         if args.sensitive and attachments:
             from .evidence import discard_private_copies
@@ -1098,6 +1327,12 @@ def main(argv=None) -> int:
     run.add_argument("--visual-check", action="store_true", help="always verify the rendered result visually")
     run.add_argument("--no-visual-check", action="store_true", help="never verify the rendered result visually")
     run.add_argument("--viewport", action="append", choices=["desktop", "tablet", "mobile"])
+    for parser_ in (run,):
+        output = parser_.add_mutually_exclusive_group()
+        output.add_argument("--verbose", action="store_true", help="also show heartbeats, routes and snapshots")
+        output.add_argument("--quiet", action="store_true", help="only failures, approvals and outcomes")
+        output.add_argument("--plain", action="store_true", help="no in-place status line")
+        output.add_argument("--json", action="store_true", help="activity as JSON lines")
     doctor = commands.add_parser("doctor", help="check the installation, models and premium CLIs")
     doctor.add_argument("--offline", action="store_true", help="only local checks")
     doctor.add_argument("--json", action="store_true")
@@ -1156,6 +1391,29 @@ def main(argv=None) -> int:
     memory_parser.add_argument("--json", action="store_true")
     memory_parser.add_argument("--explain", action="store_true", help="print the authority hierarchy")
     commands.add_parser("version", help="print the version")
+    activity = commands.add_parser("activity", help="what each agent is doing now in this project")
+    activity.add_argument("--json", action="store_true")
+    watch = commands.add_parser("watch", help="follow a task's live activity from any terminal")
+    watch.add_argument("task", nargs="?")
+    watch.add_argument("--history", action="store_true", help="start from the task's first event")
+    watch_output = watch.add_mutually_exclusive_group()
+    for flag in ("--verbose", "--quiet", "--plain", "--json"):
+        watch_output.add_argument(flag, action="store_true")
+    trace_parser = commands.add_parser("trace", help="a task's full execution history")
+    trace_parser.add_argument("task", nargs="?")
+    trace_parser.add_argument("--json", action="store_true")
+    snapshots_parser = commands.add_parser("snapshots", help="a task's saved snapshots")
+    snapshots_parser.add_argument("task", nargs="?")
+    snapshots_parser.add_argument("--json", action="store_true")
+    snapshot_parser = commands.add_parser("snapshot", help="show, diff, restore (as a new branch) or purge snapshots")
+    snapshot_parser.add_argument("action", choices=["show", "diff", "restore", "purge"])
+    snapshot_parser.add_argument("ids", nargs="*")
+    snapshot_parser.add_argument("--json", action="store_true")
+    snapshot_parser.add_argument("--diff", action="store_true", help="show: include the full diff")
+    snapshot_parser.add_argument("--branch", help="restore: the new branch name")
+    snapshot_parser.add_argument("--yes", action="store_true", help="restore without asking")
+    snapshot_parser.add_argument("--task", help="purge: only this task's snapshots")
+    snapshot_parser.add_argument("--older-than-days", type=float, default=30)
     migrate_parser = commands.add_parser("migrate", help=argparse.SUPPRESS)
     migrate_parser.add_argument("--json", action="store_true")
     post = commands.add_parser("post-install", help=argparse.SUPPRESS)
@@ -1172,6 +1430,7 @@ def main(argv=None) -> int:
                 "accept": cmd_accept, "run": cmd_run, "doctor": cmd_doctor, "setup": cmd_setup,
                 "update": cmd_update, "rollback": cmd_rollback, "migrate": cmd_migrate,
                 "post-install": cmd_post_install, "memory": cmd_memory, None: cmd_shell,
-                "attachments": cmd_attachments, "inspect-ui": cmd_inspect_ui,
+                "attachments": cmd_attachments, "inspect-ui": cmd_inspect_ui, "activity": cmd_activity,
+                "watch": cmd_watch, "trace": cmd_trace, "snapshots": cmd_snapshots, "snapshot": cmd_snapshot,
                 "version": lambda args, layout: print(f"codingbrain {version()}")}
     return handlers[args.command](args, layout) or 0
