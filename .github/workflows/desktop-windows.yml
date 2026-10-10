@@ -1,0 +1,154 @@
+name: Coding Brain native desktop (Windows)
+
+on:
+  pull_request:
+    paths:
+      - 'desktop_ui/**'
+      - 'tests/test_desktop_ui.py'
+      - 'tests/test_desktop_native.py'
+      - 'tests/test_desktop_management.py'
+      - 'tests/test_desktop_engine_status.py'
+      - 'tests/smoke_engine_status_browser.py'
+      - 'tests/smoke_browser.py'
+      - 'tests/smoke_loading_browser.py'
+      - 'tests/smoke_chat_gate_browser.py'
+      - 'tests/smoke_confirm_browser.py'
+      - 'tests/smoke_provider_browser.py'
+      - 'docs/backend-integration-handoff.md'
+      - 'Start-CodingBrainDesktop.ps1'
+      - 'installer/windows/CodingBrainDesktop.iss'
+      - 'installer/windows/Install-CodingBrainDesktop.ps1'
+      - '.github/workflows/desktop-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install 'pytest>=8,<10' 'pytest-asyncio>=0.24,<2' 'pywebview>=5,<7' 'pyinstaller>=6,<7'
+      - name: Native service, task approvals and browser API tests
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_desktop_ui.py tests/test_desktop_native.py tests/test_desktop_management.py tests/test_desktop_engine_status.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check desktop_ui/static/app.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build genuine Windows desktop executable
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name CodingBrainDesktop --collect-all webview --add-data 'desktop_ui;desktop_ui' desktop_ui/launch_native.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path dist/CodingBrainDesktop/CodingBrainDesktop.exe)) { throw 'Desktop EXE was not built' }
+      - name: Verify bundled native assets without GUI interaction
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath (Resolve-Path 'dist/CodingBrainDesktop/CodingBrainDesktop.exe').Path -ArgumentList '--self-test' -Wait -PassThru -WindowStyle Hidden
+          if ($p.ExitCode -ne 0) { throw "Native self-test returned $($p.ExitCode)" }
+      - name: Build self-contained Windows installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = @(
+            'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+            'C:\Program Files\Inno Setup 6\ISCC.exe'
+          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y --limit-output
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to obtain the official Inno Setup compiler' }
+            $iscc = @(
+              'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+              'C:\Program Files\Inno Setup 6\ISCC.exe'
+            ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw 'Inno Setup compiler is missing' }
+          & $iscc 'installer/windows/CodingBrainDesktop.iss'
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path 'dist/CodingBrain-Setup.exe')) {
+            throw 'Windows installer build failed'
+          }
+      - name: Verify installer installs, runs native self-test and uninstalls
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'CodingBrainDesktopInstallerTest'
+          $exe = (Resolve-Path 'dist/CodingBrain-Setup.exe').Path
+          $install = Start-Process -FilePath $exe -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/DIR=' + $dir)) -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer failed with code $($install.ExitCode)" }
+          $app = Join-Path $dir 'CodingBrainDesktop.exe'
+          if (-not (Test-Path -LiteralPath $app)) { throw 'Installer did not install the desktop executable' }
+          $probe = Start-Process -FilePath $app -ArgumentList '--self-test' -Wait -PassThru -WindowStyle Hidden
+          if ($probe.ExitCode -ne 0) { throw "Installed desktop self-test failed with code $($probe.ExitCode)" }
+          $uninstall = Join-Path $dir 'unins000.exe'
+          if (-not (Test-Path -LiteralPath $uninstall)) { throw 'Installer did not create an uninstaller' }
+          $remove = Start-Process -FilePath $uninstall -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+          if ($remove.ExitCode -ne 0) { throw "Uninstaller failed with code $($remove.ExitCode)" }
+      - name: Checksum installer
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 'dist/CodingBrain-Setup.exe').Hash.ToLowerInvariant()
+          "$hash  CodingBrain-Setup.exe" | Set-Content -Encoding ascii 'dist/CodingBrain-Setup.exe.sha256'
+      - name: Package portable Windows application and checksum
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'dist/CodingBrainDesktop' -DestinationPath 'dist/CodingBrainDesktop-Windows.zip'
+          $hash = (Get-FileHash -Algorithm SHA256 'dist/CodingBrainDesktop-Windows.zip').Hash.ToLowerInvariant()
+          "$hash  CodingBrainDesktop-Windows.zip" | Set-Content -Encoding ascii 'dist/CodingBrainDesktop-Windows.zip.sha256'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodingBrainDesktop-Windows
+          path: |
+            dist/CodingBrainDesktop-Windows.zip
+            dist/CodingBrainDesktop-Windows.zip.sha256
+            dist/CodingBrain-Setup.exe
+            dist/CodingBrain-Setup.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  browser-layout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Chromium and Playwright for real UI interaction
+        run: |
+          python -m pip install 'playwright>=1.45,<2'
+          python -m playwright install --with-deps chromium
+      - name: Test desktop layout and interactions in Chromium
+        env:
+          CB_DESKTOP_SCREENSHOT: ${{ runner.temp }}/CodingBrain-Desktop-Workspace.png
+        run: python tests/smoke_browser.py
+      - name: Verify asynchronous loading feedback, retries and duplicate-action guards
+        env:
+          CB_DESKTOP_LOADING_SCREENSHOT: ${{ runner.temp }}/CodingBrain-Desktop-Loading.png
+        run: python tests/smoke_loading_browser.py
+      - name: Verify chat waits for installed engine and never fakes legacy replies
+        run: python tests/smoke_chat_gate_browser.py
+      - name: Verify app-native confirmations and v0.9.0 diagnostic fallback
+        run: python tests/smoke_confirm_browser.py
+      - name: Verify engine/version/model readiness indicators with real Chromium
+        env:
+          CB_DESKTOP_ENGINE_SCREENSHOT: ${{ runner.temp }}/CodingBrain-Desktop-Engine-Status.png
+        run: python tests/smoke_engine_status_browser.py
+      - name: Verify real provider connection indicators and refresh
+        env:
+          CB_DESKTOP_PROVIDER_SCREENSHOT: ${{ runner.temp }}/CodingBrain-Desktop-Providers-Connected.png
+        run: python tests/smoke_provider_browser.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CodingBrainDesktop-UI-Screenshots
+          path: ${{ runner.temp }}/CodingBrain-Desktop-*.png
+          if-no-files-found: error
+          retention-days: 14
