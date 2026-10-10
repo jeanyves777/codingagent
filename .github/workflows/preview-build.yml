@@ -11,7 +11,7 @@ name: Preview build (unreleased, Windows)
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, preview]
   workflow_dispatch:
 
 permissions:
@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   preview:
-    if: github.head_ref == 'preview' || github.ref == 'refs/heads/preview'
+    if: github.head_ref == 'preview' || github.ref == 'refs/heads/preview' || github.base_ref == 'preview'
     name: build and verify the preview on Windows
     runs-on: windows-2022
     timeout-minutes: 60
@@ -73,6 +73,56 @@ jobs:
           python -m pip install --disable-pip-version-check -e ".[dev]"
           if ($LASTEXITCODE -ne 0) { throw "pip exited $LASTEXITCODE" }
           ./installer/windows/verify-upgrade.ps1 -New dist/preview -PublishedDir dist/published-0.9.0
+      - name: Build and verify matching native desktop for this preview
+        shell: pwsh
+        run: |
+          # This is still an UNRELEASED CI artifact. No release tag or production environment.
+          python -m pip install --disable-pip-version-check 'pywebview>=5,<7' 'pyinstaller>=6,<7'
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop packaging dependencies failed' }
+          python -m pytest -q -p no:cacheprovider tests/test_unified_windows_update.py
+          if ($LASTEXITCODE -ne 0) { throw 'Unified updater tests failed' }
+          $env:CODINGBRAIN_DESKTOP_VERSION = $env:version
+          python -c "import json,os,pathlib;pathlib.Path('desktop_ui/release-version.json').write_text(json.dumps({'version':os.environ['CODINGBRAIN_DESKTOP_VERSION']}),encoding='utf-8')"
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop preview version metadata failed' }
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name CodingBrainDesktop --collect-all webview --add-data 'desktop_ui;desktop_ui' desktop_ui/launch_native.py
+          if ($LASTEXITCODE -ne 0) { throw 'Preview desktop binary failed to build' }
+          $exe = (Resolve-Path 'dist/CodingBrainDesktop/CodingBrainDesktop.exe').Path
+          $check = Start-Process -FilePath $exe -ArgumentList '--self-test' -PassThru -Wait -WindowStyle Hidden
+          if ($check.ExitCode -ne 0) { throw 'Preview desktop self-test failed' }
+          $iscc = @('C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+                    'C:\Program Files\Inno Setup 6\ISCC.exe') |
+                    Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y --limit-output
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' }
+            $iscc = @('C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+                      'C:\Program Files\Inno Setup 6\ISCC.exe') |
+                      Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw 'Inno Setup compiler unavailable' }
+          & $iscc "/DCodingBrainVersion=$env:version" 'installer/windows/CodingBrainDesktop.iss'
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path 'dist/CodingBrain-Setup.exe')) {
+            throw 'Preview native installer compilation failed'
+          }
+          $testDir = Join-Path $env:RUNNER_TEMP 'CodingBrain-PreviewNativeTest'
+          $native = (Resolve-Path 'dist/CodingBrain-Setup.exe').Path
+          $installed = Start-Process -FilePath $native -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/DIR=' + $testDir)) -Wait -PassThru
+          if ($installed.ExitCode -ne 0) { throw 'Preview desktop install failed' }
+          $probe = Start-Process -FilePath (Join-Path $testDir 'CodingBrainDesktop.exe') -ArgumentList '--self-test' -PassThru -Wait -WindowStyle Hidden
+          if ($probe.ExitCode -ne 0) { throw 'Installed preview desktop self-test failed' }
+          $removed = Start-Process -FilePath (Join-Path $testDir 'unins000.exe') -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+          if ($removed.ExitCode -ne 0) { throw 'Preview desktop uninstall test failed' }
+          Compress-Archive -Path 'dist/CodingBrainDesktop' -DestinationPath 'dist/CodingBrainDesktop-Windows.zip'
+          python scripts/finalize_desktop_release.py --out dist/preview --installer dist/CodingBrain-Setup.exe --portable dist/CodingBrainDesktop-Windows.zip
+          if ($LASTEXITCODE -ne 0) { throw 'Preview manifest/checksum finalization failed' }
+          $manifest = Get-Content -LiteralPath 'dist/preview/release.json' -Raw | ConvertFrom-Json
+          if ($manifest.version -cne $env:version -or $manifest.desktop.version -cne $env:version) {
+            throw 'Mismatched desktop/engine preview versions'
+          }
+          Get-Content dist/preview/SHA256SUMS | ForEach-Object {
+            $hash, $name = $_ -split '\s+', 2
+            if ((Get-FileHash -Algorithm SHA256 (Join-Path dist/preview $name)).Hash.ToLower() -ne $hash) { throw "preview checksum failed: $name" }
+          }
       - name: Instructions
         shell: pwsh
         run: |
@@ -90,6 +140,8 @@ jobs:
           Later, to the final release:               codingbrain update
           (a full release that contains this work is newer than every 0.13.0.devN preview)
 
+          The preview artifact also contains a version-matched CodingBrain-Setup.exe.
+          This is an UNRELEASED CI artifact. It is not an official production release.
           Files are checked against SHA256SUMS during the update.
           "@ | Out-File -Encoding utf8 dist/preview/PREVIEW-README.txt
       - uses: actions/upload-artifact@v4
