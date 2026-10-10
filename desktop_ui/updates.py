@@ -60,7 +60,7 @@ def _preview_candidate() -> dict:
     current_head = _json(API + "/git/ref/heads/preview")["object"]["sha"]
     if not re.fullmatch(r"[0-9a-f]{40}", str(current_head)):
         raise ValueError("GitHub preview branch ref is invalid")
-    payload = _json(API + "/actions/runs?per_page=75")
+    payload = _json(API + "/actions/workflows/preview-build.yml/runs?branch=preview&per_page=30")
     runs = [r for r in payload.get("workflow_runs", []) if
             r.get("name") == PREVIEW_WORKFLOW_NAME and r.get("head_branch") == "preview"
             and r.get("head_sha") == current_head and r.get("status") == "completed"
