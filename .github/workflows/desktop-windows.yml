@@ -11,6 +11,7 @@ on:
       - 'tests/smoke_engine_status_browser.py'
       - 'tests/smoke_browser.py'
       - 'tests/smoke_loading_browser.py'
+      - 'tests/smoke_chat_gate_browser.py'
       - 'tests/smoke_confirm_browser.py'
       - 'tests/smoke_provider_browser.py'
       - 'docs/backend-integration-handoff.md'
@@ -133,6 +134,8 @@ jobs:
         env:
           CB_DESKTOP_LOADING_SCREENSHOT: ${{ runner.temp }}/CodingBrain-Desktop-Loading.png
         run: python tests/smoke_loading_browser.py
+      - name: Verify chat waits for installed engine and never fakes legacy replies
+        run: python tests/smoke_chat_gate_browser.py
       - name: Verify app-native confirmations and v0.9.0 diagnostic fallback
         run: python tests/smoke_confirm_browser.py
       - name: Verify engine/version/model readiness indicators with real Chromium
