@@ -84,7 +84,8 @@ def text_of(bot):
 
 # Conversation is the default -------------------------------------------------------------------------
 
-@pytest.mark.parametrize("message", ["hello", "Hi!", "hey there", "Good morning", "bonjour", "hello coding brain"])
+@pytest.mark.parametrize("message", ["hello", "Hi!", "hey there", "Good morning", "bonjour", "hello coding brain",
+                                     "\ufeffhello", "ï»¿hello", "hel\u200blo"])  # piped by PowerShell 5.1, pasted
 def test_greetings_get_a_greeting_without_a_model_call_or_a_task(world, message):
     model = FakeModel()
     bot = assistant(world, model)

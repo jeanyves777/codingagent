@@ -78,6 +78,14 @@ class ModelUnavailable(Exception):
     pass
 
 
+def clean(message: str) -> str:
+    """The typed text without invisible marks. Windows PowerShell 5.1 starts piped input with a
+    byte-order mark, which a cp1252 console decodes as 'ï»¿'; zero-width characters can come from
+    pasted text. Neither should change what a message means."""
+    text = message.replace("\ufeff", "").replace("ï»¿", "")
+    return re.sub(r"[\u200b-\u200d\u2060]", "", text).strip()
+
+
 # Projects ---------------------------------------------------------------------------------------------
 
 def registry(layout: Layout) -> list[dict]:
@@ -288,7 +296,7 @@ class Assistant:
     # one message -------------------------------------------------------------------------------------
     def handle(self, message: str) -> str | None:
         """Answer one message; returns 'exit' when the user leaves."""
-        text = message.strip()
+        text = clean(message)
         if not text:
             return None
         if FAREWELL.match(text) or text in {"/exit", "/quit"}:
@@ -533,7 +541,7 @@ class Assistant:
 
     # the loop ----------------------------------------------------------------------------------------------
     def repl(self):
-        self.out(f"Coding Brain — {self.folder_description()}. Talk to me; /help for commands, /exit to leave.")
+        self.out(f"Coding Brain - {self.folder_description()}. Talk to me; /help for commands, /exit to leave.")
         while True:
             try:
                 message = self.read("\nyou> ")
