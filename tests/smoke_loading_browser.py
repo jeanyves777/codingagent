@@ -110,7 +110,7 @@ with sync_playwright() as p:
     page.locator('#control-tab-updates').click()
     page.locator('#check-updates').click()
     assert not page.locator('#action-dialog').is_visible()
-    page.locator('#control-feedback-title').get_by_text('Update check starting').wait_for()
+    page.wait_for_function("document.getElementById('control-feedback-title').textContent.includes('Update check starting')")
     assert page.locator('#check-updates.is-loading').is_disabled()
     assert page.evaluate('window.__demo.updateChecks') == 1
     assert page.evaluate('window.__demo.actions') == 0
@@ -124,13 +124,13 @@ with sync_playwright() as p:
     assert 'GitHub update check unavailable' in page.locator('#control-feedback-detail').inner_text()
     page.evaluate('window.__demo.updatePending=false;window.__demo.updateFail=false')
     page.locator('#check-updates').click()
-    page.locator('#control-feedback-title').get_by_text('Verified stable update available').wait_for(timeout=3500)
+    page.wait_for_function("document.getElementById('control-feedback-title').textContent.includes('Verified stable update available')", timeout=3500)
     assert page.locator('#check-updates').is_enabled()
     assert 'no desktop installer' in page.locator('#maintenance-log').inner_text()
     # Preview is opt-in and explicitly UNRELEASED.
     page.locator('#update-channel').select_option('preview')
     page.locator('#check-updates').click()
-    page.locator('#maintenance-log').get_by_text('UNRELEASED Windows preview', exact=False).wait_for(timeout=3500)
+    page.wait_for_function("document.getElementById('maintenance-log').textContent.includes('UNRELEASED Windows preview')", timeout=3500)
     assert 'NOT a published GitHub release' in page.locator('#maintenance-log').inner_text()
     assert page.evaluate('window.__demo.actions') == 0
     page.locator('#control-close').click()
