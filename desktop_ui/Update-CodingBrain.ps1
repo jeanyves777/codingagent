@@ -74,7 +74,7 @@ function Get-Verified-Preview([string]$folder) {
   Fail-If-LastExit 'Preview branch lookup'
   $head = [string]$ref.object.sha
   if ($head -cnotmatch '^[0-9a-f]{40}$') { throw 'Preview branch has no valid Git commit SHA.' }
-  $runs = & $gh api "repos/$repo/actions/runs?per_page=75" | ConvertFrom-Json
+  $runs = & $gh api "repos/$repo/actions/workflows/preview-build.yml/runs?branch=preview&per_page=30" | ConvertFrom-Json
   Fail-If-LastExit 'Preview workflow lookup'
   $run = @($runs.workflow_runs | Where-Object {
     $_.name -ceq 'Preview build (unreleased, Windows)' -and
