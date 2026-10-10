@@ -145,7 +145,8 @@ def engine_capabilities(cli_command: list[str] | None) -> dict:
     or a live Ollama model. Do not infer support merely from a version number.
     """
     result = {"available": False, "version": None, "conversation": False,
-              "typed_api": False, "task_command": False, "detail": "Coding Brain is not installed"}
+              "typed_api": False, "new_project": False, "task_command": False,
+              "detail": "Coding Brain is not installed"}
     if not cli_command:
         return result
     try:
@@ -162,7 +163,10 @@ def engine_capabilities(cli_command: list[str] | None) -> dict:
         result["available"] = True
         result["task_command"] = True  # availability of run command != sandbox/model readiness
         result["detail"] = "Engine responds to version probe; execution readiness is not yet verified"
-        for command, key in (("chat", "conversation"), ("api", "typed_api")):
+        # Check feature support against the actual installed engine, not the UI bundle.
+        # v0.9.0 has no 'new' command; a successful version probe is insufficient.
+        for command, key in (("chat", "conversation"), ("api", "typed_api"),
+                             ("new", "new_project")):
             try:
                 probe = subprocess.run([*cli_command, command, "--help"],
                                        stdin=subprocess.DEVNULL, capture_output=True,
