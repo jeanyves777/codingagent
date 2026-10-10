@@ -23,6 +23,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
+from . import management
+
 ASSETS = Path(__file__).with_name("static")
 IGNORED = {".git", ".venv", "venv", "node_modules", "__pycache__", ".next", "dist", "build", ".idea", ".vscode"}
 SENSITIVE = {".env", ".env.local", ".env.production", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", "credentials.json", "secrets.json"}
@@ -43,6 +45,18 @@ class ProjectChoice(BaseModel):
 class StartRequest(BaseModel):
     message: str = Field(min_length=1, max_length=16000)
     mode: str = "chat"
+
+
+class ConfirmAction(BaseModel):
+    confirmed: bool = False
+
+
+class Onboarding(BaseModel):
+    completed: bool
+
+
+class ProviderSetting(BaseModel):
+    enabled: bool
 
 
 class Decision(BaseModel):
@@ -71,6 +85,7 @@ class Job:
         self.decision_event = threading.Event()
         self.decision_allow: bool | None = None
         self.stop_requested = threading.Event()
+        self.cancel_core = None
         self.core = False
         self.new_project = False
         self.on_project_created = None
@@ -103,6 +118,76 @@ class Workspace:
         self.active: str | None = None
         self.lock = threading.Lock()
         self.use_core = True
+        self.state_path = self._desktop_state_path()
+
+    def _desktop_state_path(self) -> Path:
+        # Desktop preferences are separate from brain configuration and its updater.
+        if os.name == "nt":
+            base = Path(os.environ.get("LOCALAPPDATA", str(self.home / "AppData" / "Local")))
+        else:
+            base = Path(os.getenv("XDG_STATE_HOME") or (self.home / ".local" / "state"))
+        return base / "CodingBrain" / "desktop" / "preferences.json"
+
+    def first_run_completed(self) -> bool:
+        try:
+            return json.loads(self.state_path.read_text(encoding="utf-8")).get("completed") is True
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def save_first_run(self, complete: bool) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        staging = self.state_path.with_suffix(".tmp")
+        staging.write_text(json.dumps({"completed": bool(complete)}), encoding="utf-8")
+        os.replace(staging, self.state_path)
+
+    def installation_status(self) -> dict:
+        try:
+            cli = self.cli_command()
+        except ValueError:
+            cli = None
+        report = management.installation_probes(cli)
+        if cli:
+            # A side-effect-free feature check: old v0.9.0 has no install command.
+            found = management.safe_probe([*cli, "install", "--help"], timeout=6)
+            report["full_installer_available"] = found is True
+            report["full_installer_note"] = ("Install and repair through Coding Brain's own guided installer" if found is True
+                    else "First publish/update to a Coding Brain release containing the full installer")
+        report["onboarding_completed"] = self.first_run_completed()
+        return report
+
+    def sign_in(self, provider_id: str) -> None:
+        # Authentication is always handled by the vendor's own interactive CLI.
+        management.launch_interactive_windows(management.provider_auth_command(provider_id))
+
+    def configure_provider(self, provider_id: str, enabled: bool) -> None:
+        if provider_id not in {"claude", "codex"}:
+            raise ValueError("This provider is not yet supported by the core supervisor router")
+        cmd = [*self.cli_command(), "setup", "--non-interactive",
+               "--enable-" + provider_id if enabled else "--no-enable-" + provider_id]
+        # Never return stdout: the installer may print config paths/account hints.
+        try:
+            result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    stdin=subprocess.DEVNULL, timeout=45, check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ValueError("Coding Brain setup could not be completed") from error
+        if result.returncode:
+            raise ValueError("Coding Brain rejected this supervisor setting")
+
+    def maintenance(self, action: str) -> dict:
+        command = management.maintenance_args(action, self.cli_command())
+        if action in {"install_full", "update_engine", "repair"}:
+            # New console owns prompts, elevation and restarts. No silent consent.
+            management.launch_interactive_windows(command)
+            return {"opened_terminal":True,"message":"The official Coding Brain workflow opened in a terminal. Follow its prompts; refresh this screen afterward."}
+        with self.lock:
+            if self.active and self.jobs[self.active].status in {"starting", "running", "approval_required"}:
+                raise ValueError("Wait for the active operation to finish")
+            job = Job("maintenance", None, command)
+            self.jobs[job.id] = job
+            self.active = job.id
+        threading.Thread(target=self._execute, args=(job,), daemon=True).start()
+        return {"opened_terminal":False, "job":job.view()}
+
 
     def cli_command(self) -> list[str]:
         """Run Python directly on Windows to avoid .cmd shell interpretation.
@@ -319,7 +404,12 @@ class Workspace:
                 raise ValueError("Task is not running")
             job.stop_requested.set()
             job.decision_event.set()
-            job.emit("stage", "Stop requested; waiting for the engine's safe cancellation boundary")
+            if job.cancel_core is not None and not job.awaiting_approval:
+                try:
+                    job.cancel_core()  # The actual Brain.cancel stores an engine cancellation request.
+                except ValueError:
+                    pass
+            job.emit("stage", "Cancellation requested through Coding Brain; waiting for a safe boundary")
             return
         if not job.process or job.process.poll() is not None:
             raise ValueError("Task is not running")
@@ -358,6 +448,42 @@ def create_app(state: Workspace | None = None) -> FastAPI:
         return {"project": {"name": state.project.name, "path": str(state.project),
                             "git": state.git_branch(state.project)} if state.project else None,
                 "projects": state.projects(), "active": active.view() if active else None}
+
+    @app.get("/api/setup", dependencies=[Depends(auth)])
+    def setup_status():
+        return {"readiness":state.installation_status(), "providers":management.providers_snapshot()}
+
+    @app.post("/api/setup/completed", dependencies=[Depends(auth)])
+    def set_onboarding(body: Onboarding):
+        state.save_first_run(body.completed)
+        return {"ok":True,"onboarding_completed":state.first_run_completed()}
+
+    @app.post("/api/system/action", dependencies=[Depends(auth)])
+    def system_action(action: str, body: ConfirmAction):
+        if not body.confirmed:
+            raise HTTPException(409, "Confirm the operation before starting it")
+        try:
+            return state.maintenance(action)
+        except (ValueError, OSError) as error:
+            raise HTTPException(409, str(error)) from error
+
+    @app.post("/api/providers/{provider_id}/signin", dependencies=[Depends(auth)])
+    def provider_signin(provider_id: str, body: ConfirmAction):
+        if not body.confirmed:
+            raise HTTPException(409, "Sign-in requires explicit confirmation")
+        try:
+            state.sign_in(provider_id)
+            return {"opened_terminal":True,"message":"Complete sign-in in the official provider CLI and refresh provider status"}
+        except (ValueError, OSError) as error:
+            raise HTTPException(409, str(error)) from error
+
+    @app.post("/api/providers/{provider_id}/configure", dependencies=[Depends(auth)])
+    def provider_configure(provider_id: str, body: ProviderSetting):
+        try:
+            state.configure_provider(provider_id, body.enabled)
+            return {"ok":True,"message":"Supervisor routing setting saved by Coding Brain"}
+        except (ValueError, OSError) as error:
+            raise HTTPException(409, str(error)) from error
 
     @app.post("/api/project", dependencies=[Depends(auth)])
     def select(body: ProjectChoice):

@@ -56,8 +56,60 @@ Local (Linux development host): `python -m pytest -q tests/test_desktop_ui.py te
 
 **Still required before shipping as production-ready:** GitHub Actions must successfully build and self-test the Windows executable; manual Windows GUI smoke with actual WebView2 and a real installed `qwen2.5-coder:7b`; successful real-model task in Docker with typed approvals and branch acceptance; long-run recovery; latest installed conversational and goal-first releases; source review, threat model, and user approval. Windows GUI is not verifiable from Linux screenshots or Windows runner headless tests alone. No release merge/publication or changes to the frozen benchmark are part of this PR.
 
-## Windows one-click installer (unsigned preview)
+## One-click Windows installer (preview)
 
-The Windows desktop CI publishes both a portable application ZIP and CodingBrain-Setup.exe, a per-user Windows installer built with Inno Setup. The installer creates a Start Menu shortcut, optionally a desktop shortcut, and an uninstaller. It does not install or modify Coding Brain, its models, or its dependencies.
+The native Windows CI now packages two options in the same build artifact:
 
-For the installer, verify the SHA-256 from CodingBrain-Setup.exe.sha256 with PowerShell Get-FileHash before running the downloaded executable. This preview is not code-signed; SmartScreen may warn. Never ignore unverified security warnings. The Windows CI installs the package into a temporary user directory, launches its self-test, then uninstalls it. This headless test does not demonstrate real GUI operation on the user's machine; WebView2, model/sandbox integration, and end-to-end UI approvals still require Windows acceptance testing. The UI is not yet distributed through codingbrain update.
+- **`CodingBrain-Setup.exe`**: a per-user Inno Setup installer. It copies the native UI, creates a Start Menu shortcut, offers an optional desktop icon, and includes an uninstaller. It does **not** install or alter the Coding Brain engine or its dependencies.
+- **`CodingBrainDesktop-Windows.zip`**: the portable application folder. Extract the complete folder and launch `CodingBrainDesktop.exe`; do not copy only the EXE.
+
+Both packages have SHA-256 files alongside them. Verify the checksum before running them:
+
+```powershell
+$expected = ((Get-Content .\CodingBrain-Setup.exe.sha256) -split '\s+')[0]
+$actual = (Get-FileHash .\CodingBrain-Setup.exe -Algorithm SHA256).Hash
+if ($actual.ToLowerInvariant() -ne $expected.ToLowerInvariant()) { throw 'Checksum mismatch' }
+Start-Process .\CodingBrain-Setup.exe
+```
+
+This is currently an **unsigned preview**. Windows SmartScreen may prompt. Do not override security warnings unless you trust the exact verified GitHub Actions artifact and understand the risk. Code signing and final Windows GUI/manual acceptance still remain before production publication. The installer is not yet distributed by `codingbrain update`.
+
+The Windows CI validates the actual installer by installing it into a temporary per-user folder, running the installed native EXE self-test, then uninstalling it. This does not replace manual testing of the real graphical WebView2 window with the user's Ollama/Claude/Codex setup.
+
+
+## First-run setup and provider control center (next desktop build)
+
+The desktop first-run experience is now a guided **Control Center** with three tabs: **Setup**, **AI Providers**, and **Updates**. It does not assume that software found on PATH is proven operational. Basic preflight marks only detection; the **Deep system test** explicitly delegates real readiness checks to `codingbrain doctor --full`.
+
+The **Install & verify full system** button delegates to Coding Brain's official guided `codingbrain install --profile full`, including Docker, WSL, Ollama, its model, optional Claude/Codex CLIs, and other supported dependencies. It is only enabled if the installed backend exposes that command (introduced in the pending installer PR #8). Installation runs in a **visible Windows console**, with the backend installer retaining full vendor-license consent, elevation, restart/resume checks, and authentication interaction. There is **no silent `--yes`**, remote-script execution, or independent installation framework in the UI.
+
+The **Updates** tab can check for stable updates, open the verified `codingbrain update` workflow, or launch `codingbrain setup --repair`. It does not pretend draft GitHub PRs are installable; version changes should be followed by an app restart. The UI is a separate app and does **not yet update its own desktop binary** through the Coding Brain updater. Desktop self-update requires a signed release artifact manifest, verification and an atomic replace/rollback contract before production activation.
+
+**First-run state** is saved separately from Brain model/agent configuration under `.../CodingBrain/desktop/preferences.json`. Closing setup never makes OS changes. The next launch can still open Setup from the left rail or the top-right status indicator.
+
+### Provider capability registry
+
+The Control Center consumes backend provider metadata from `desktop_ui/management.py`. Provider status, sign-in, and real core integration are deliberately independent:
+
+| Provider | Available integration | Authentication path | Core role today |
+|---|---|---|---|
+| Ollama / Qwen | Local main implementer | No subscription | Local worker |
+| Anthropic Claude Code | Official CLI | Vendor's own interactive CLI sign-in | Budgeted supervisor (when enabled) |
+| OpenAI Codex | Official CLI | `codex login` / Sign in with ChatGPT | Budgeted supervisor (when enabled) |
+| Google Gemini | Official Gemini CLI detection | Vendor's own Google sign-in via CLI | Future governed adapter |
+| xAI Grok | API key presence detection only | `XAI_API_KEY` environment variable | Not routed: API billing and approval policy required |
+| Meta Llama | Local model option through Ollama | No general Meta subscription delegated through this UI | Future model/router selection |
+| Meta Muse / “Mouse” | Research/extension slot | Unverified: do not invent developer sign-in | Not routed |
+
+Every provider action is allowlisted; sign-in occurs in the official CLI (the desktop never sees passwords, API secrets, session cookies or tokens). Claude and Codex supervisor toggles call **existing `codingbrain setup --non-interactive`**; the React interface does not update any core provider config itself. The other providers are clearly identified as **integration pending** until a verified backend capability and permission/budget contract are implemented. Presence of an xAI key is never treated as sufficient authorization to send code to an API-billed service.
+
+### Provider backend integration contract to implement after core release
+
+Implement a capability-based `ProviderAdapter` extension in the global orchestrator, not the desktop. For each new adapter require `id`, `authentication_modes`, `capabilities` (chat/plan/review/code/vision), `cost_type` (local/subscription/API billed), `available`, `health`, `limits`, `run`, `cancel` and `audit` methods. Each invocation must be tied to task scope and explicit user-granted authority, model/provider budget, immutable routing evidence, secret-redacted logs, permission boundaries, and a fail-closed unavailable state. Use official supported remote/MCP/CLI integrations first; do not proxy subscription credentials into unofficial APIs. Do not replace the local builder by default. UI derives provider actions and status from real capabilities, not vendor names.
+
+### Verification evidence and current limits
+
+- 28 Python UI/management/native tests pass locally, including read-only project browsing, secure API authorization, approved maintenance commands, persistent first-run state, consent, vendor CLI handoffs, provider-status secrecy and core-task approvals.
+- The Chromium mock-bridge interaction smoke tests first-run panel, seven provider cards, update controls, chat, project selection, and file preview with no browser JavaScript errors. These are UI/browser tests, **not** proof that the user's real installed backend supports all features.
+- Existing published Coding Brain v0.9.0 does not have the full installer, goal-first creation or the conversational command, so those controls clearly report the installed-backend limitation until the respective release is published and installed. On older versions, `hello` remains a local lightweight greeting; complex conversational requests must wait for the conversational backend release.
+- Native full GUI interaction on a Windows PC, full first-install on a clean Windows machine without preinstalled Coding Brain, support for connected Gemini/Grok/Muse execution, and signed desktop self-updates remain **not yet demonstrated**. A desktop installer alone does not bootstrap the absent core interpreter today; a separately verified installer integration is needed for that clean-machine scenario.

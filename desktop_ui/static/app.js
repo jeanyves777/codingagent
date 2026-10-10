@@ -37,6 +37,18 @@
     const label = document.createElement('div');
     label.className = 'message-head';
     label.textContent = author;
+    const when = document.createElement('span');
+    when.className = 'message-time';
+    when.textContent = new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
+    label.append(when);
+    if (variant !== 'user') {
+      const copy = document.createElement('button');
+      copy.className = 'message-copy';
+      copy.textContent = '⧉';
+      copy.setAttribute('aria-label','Copy message');
+      copy.addEventListener('click', () => { navigator.clipboard?.writeText(text).catch(() => toast('Copy unavailable')); });
+      label.append(copy);
+    }
     const content = document.createElement('div');
     content.textContent = text;
     node.append(label, content);
@@ -236,7 +248,7 @@
         displayedEvents.add(event.seq);
         activityEntry(event);
         if (event.kind === 'approval') approval(job.id, job.approval || {summary: event.message});
-        if (event.kind === 'output') message('CODING BRAIN · OUTPUT', event.message, 'assistant');
+        if (event.kind === 'output') message(job.kind === 'chat' ? 'CODING BRAIN' : 'CODING BRAIN · ACTIVITY', event.message, 'assistant');
         if (event.kind === 'error') message('CODING BRAIN · ERROR', event.message, 'system');
       }
       const running = ['starting','running','approval_required'].includes(job.status);
@@ -250,8 +262,12 @@
         pollTimer = null;
         $('run-status').hidden = true;
         $('send').disabled = false;
-        const text = job.status === 'completed' ? 'Session finished.' : `Session ${job.status}.`;
-        message('CODING BRAIN', text + (job.error ? ` ${job.error}` : ''), 'system');
+        // A chat reply already appears as an output event; don't add a redundant
+        // 'Session finished' bubble after every conversational answer.
+        if (job.kind !== 'chat' || job.status !== 'completed') {
+          const text = job.status === 'completed' ? 'Coding task completed.' : `Session ${job.status}.`;
+          message('CODING BRAIN', text + (job.error ? ` ${job.error}` : ''), 'system');
+        }
         activeJob = null;
         return;
       }
@@ -341,7 +357,167 @@
     toast('File explorer can be reopened from the project selector.');
   });
   $('nav-chat').addEventListener('click', () => $('prompt').focus());
+  $('nav-settings').addEventListener('click', () => openControl('setup'));
+  $('nav-providers').addEventListener('click', () => openControl('providers'));
+  $('model-label').addEventListener('click', () => openControl('providers'));
+  $('header-setup').addEventListener('click', () => openControl('setup'));
+  $('control-close').addEventListener('click', () => $('control-dialog').close());
+  $('control-tab-setup').addEventListener('click', () => showControl('setup'));
+  $('control-tab-providers').addEventListener('click', () => showControl('providers'));
+  $('control-tab-updates').addEventListener('click', () => showControl('updates'));
+  $('setup-check').addEventListener('click', reloadControl);
+  $('deep-check').addEventListener('click', () => { showControl('updates'); systemAction('doctor'); });
+  $('setup-continue').addEventListener('click', async () => {
+    try { await api('/api/setup/completed', 'POST', {completed:true}); $('control-dialog').close(); }
+    catch(e) { toast(e.message); }
+  });
+  $('full-setup').addEventListener('click', () => systemAction('install_full'));
+  $('check-updates').addEventListener('click', () => systemAction('check_updates'));
+  $('apply-update').addEventListener('click', () => systemAction('update_engine'));
+  $('repair-install').addEventListener('click', () => systemAction('repair'));
+  $('new-project-empty').addEventListener('click', () => { setMode('new'); $('prompt').focus(); });
+  let setupCache = null;
+  let maintenancePoll = null;
+
+  function showControl(tab) {
+    const headings={setup:['Set up your coding workspace','Check your local engine, install requirements and connect optional providers.'],providers:['Manage your AI providers','Connect subscriptions, inspect provider support and choose authorized supervisors.'],updates:['Installation and updates','Check verified releases, diagnose readiness and repair the coding environment.']};
+    $('control-heading').textContent = headings[tab][0];
+    $('control-subtitle').textContent = headings[tab][1];
+    for (const part of ['setup','providers','updates']) {
+      const shown = tab === part;
+      $('control-' + part).hidden = !shown;
+      $('control-tab-' + part).classList.toggle('active', shown);
+    }
+  }
+
+  function openControl(tab='setup') {
+    showControl(tab);
+    if (!$('control-dialog').open) $('control-dialog').showModal();
+    reloadControl();
+  }
+
+  function renderSetup(readiness) {
+    const installed = readiness.components.filter(c => c.installed).length;
+    const all = readiness.components.length;
+    $('setup-message').textContent = `${installed} of ${all} key tools were detected. ` + readiness.full_installer_note;
+    $('full-setup').disabled = !readiness.full_installer_available;
+    $('full-setup').title = readiness.full_installer_available ? 'Run official guided full installation' : readiness.full_installer_note;
+    $('setup-components').replaceChildren();
+    for (const entry of readiness.components) {
+      const row = document.createElement('div');
+      row.className = 'component-card ' + (entry.installed ? '' : 'missing');
+      const icon = document.createElement('span');
+      icon.className = 'component-state';
+      icon.textContent = entry.installed ? '✓' : '!';
+      const content = document.createElement('div');
+      const title = document.createElement('strong');
+      title.textContent = entry.name;
+      const note = document.createElement('small');
+      note.textContent = entry.detail;
+      content.append(title,note);
+      row.append(icon,content);
+      $('setup-components').append(row);
+    }
+  }
+
+  function renderProviders(providers) {
+    const list = $('provider-list');
+    list.replaceChildren();
+    const logos = {ollama:'◈',claude:'C',codex:'O',gemini:'G',grok:'X',meta:'M',muse:'✧'};
+    for (const provider of providers) {
+      const row = document.createElement('article'); row.className = 'provider-row';
+      const left = document.createElement('div'); left.className = 'provider-identity';
+      const mark = document.createElement('div'); mark.className = 'provider-logo'; mark.textContent = logos[provider.id] || '•';
+      const inner = document.createElement('div');
+      const heading = document.createElement('div'); heading.className = 'provider-name'; heading.textContent = provider.name;
+      const desc = document.createElement('p'); desc.className = 'provider-description'; desc.textContent = provider.description;
+      const badges = document.createElement('div'); badges.className = 'provider-badges';
+      const badge = document.createElement('span'); badge.className = 'provider-badge'; badge.textContent = provider.status.replaceAll('-', ' ');
+      const extra = document.createElement('span'); extra.className = 'provider-badge subdued';
+      extra.textContent = provider.core_enabled ? 'Core integration' : 'Connector pending';
+      badges.append(badge,extra); inner.append(heading,desc,badges); left.append(mark,inner);
+      const actions = document.createElement('div'); actions.className = 'provider-actions';
+      if (provider.sign_in_available) {
+        const sign = document.createElement('button'); sign.textContent = 'Sign in / reconnect';
+        sign.addEventListener('click', async () => {
+          if (!confirm(`Open the official ${provider.name} CLI sign-in?`)) return;
+          try { const response = await api(`/api/providers/${provider.id}/signin`, 'POST', {confirmed:true}); toast(response.message); }
+          catch(e) { toast(e.message); }
+        }); actions.append(sign);
+      }
+      if (['claude','codex'].includes(provider.id)) {
+        const toggle = document.createElement('button'); toggle.textContent = 'Enable supervisor';
+        toggle.addEventListener('click', async () => {
+          if (!confirm(`Enable ${provider.name} as a governed Coding Brain supervisor? Existing budget limits remain in effect.`)) return;
+          try { const res=await api(`/api/providers/${provider.id}/configure`,'POST',{enabled:true}); toast(res.message); }
+          catch(e) { toast(e.message); }
+        }); actions.append(toggle);
+      }
+      if (provider.docs) {
+        const link=document.createElement('a'); link.href=provider.docs; link.target='_blank'; link.rel='noopener noreferrer'; link.textContent='Official docs ↗'; actions.append(link);
+      }
+      row.append(left,actions); list.append(row);
+    }
+  }
+
+  async function reloadControl() {
+    try {
+      setupCache = await api('/api/setup');
+      renderSetup(setupCache.readiness);
+      renderProviders(setupCache.providers);
+    } catch(e) { $('setup-message').textContent = 'Cannot check the local engine: ' + e.message; }
+  }
+
+  async function systemAction(action) {
+    const explanations = {
+      install_full:'Run the official full installer? It may download software, require administrator approval and ask for subscription sign-in.',
+      update_engine:'Update Coding Brain to the latest verified stable release? The desktop should be restarted afterward.',
+      repair:'Open the official installer to diagnose and repair your current setup?',
+      check_updates:'Check GitHub for a newer verified stable Coding Brain release?',
+      doctor:'Run deep checks of your local model, Docker sandbox and providers? This can take a minute.'
+    };
+    if (!confirm(explanations[action] || 'Continue?')) return;
+    try {
+      const data = await api(`/api/system/action?action=${encodeURIComponent(action)}`,'POST',{confirmed:true});
+      if (data.opened_terminal) {
+        $('maintenance-log').textContent = data.message;
+        toast('Official Coding Brain console opened');
+      } else if (data.job) {
+        $('maintenance-log').textContent = 'Checking…';
+        if (maintenancePoll) clearInterval(maintenancePoll);
+        let seen=0;
+        const fetchLog=async () => {
+          try {
+            const update=await api(`/api/jobs/${data.job.id}?after=${seen}`);
+            for (const event of update.events) {
+              seen=Math.max(seen,event.seq);
+              if (event.kind==='output' || event.kind==='error') $('maintenance-log').textContent += '\n' + event.message;
+            }
+            $('maintenance-log').scrollTop=$('maintenance-log').scrollHeight;
+            if (!['starting','running','approval_required'].includes(update.job.status)) {
+              clearInterval(maintenancePoll); maintenancePoll=null;
+            }
+          } catch(e) { clearInterval(maintenancePoll); maintenancePoll=null; toast(e.message); }
+        };
+        await fetchLog();
+        if (maintenancePoll === null && !['completed','failed','cancelled'].includes((await api(`/api/jobs/${data.job.id}?after=${seen}`)).job.status)) maintenancePoll = setInterval(fetchLog,650);
+      }
+    } catch(e) { toast(e.message); $('maintenance-log').textContent = e.message; }
+  }
+
+  async function firstRun() {
+    try {
+      const data=await api('/api/setup');
+      setupCache=data;
+      if (!data.readiness.onboarding_completed) {
+        // Never automatically install; only show the guided setup panel.
+        renderSetup(data.readiness); renderProviders(data.providers);
+        showControl('setup'); $('control-dialog').showModal();
+      }
+    } catch(e) { /* Main chat stays usable even if readiness probes fail. */ }
+  }
+
   setInterval(tickTime, 1000);
   if (!token) message('CODING BRAIN', 'Missing local session token. Launch this page using python -m desktop_ui.', 'system');
-  else refresh();
+  else { refresh(); firstRun(); }
 })();
