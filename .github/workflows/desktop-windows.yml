@@ -31,6 +31,8 @@ on:
       - 'docs/backend-integration-handoff.md'
       - 'Start-CodingBrainDesktop.ps1'
       - 'installer/windows/CodingBrainDesktop.iss'
+      - 'installer/windows/Setup-CodingBrain.ps1'
+      - 'scripts/build_release.py'
       - 'installer/windows/Install-CodingBrainDesktop.ps1'
       - '.github/workflows/desktop-windows.yml'
   workflow_dispatch:
@@ -94,6 +96,16 @@ jobs:
         run: |
           $p = Start-Process -FilePath (Resolve-Path 'dist/CodingBrainDesktop/CodingBrainDesktop.exe').Path -ArgumentList '--self-test' -Wait -PassThru -WindowStyle Hidden
           if ($p.ExitCode -ne 0) { throw "Native self-test returned $($p.ExitCode)" }
+      - name: Bundle the engine release files from this commit into the installer
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check packaging
+          python scripts/build_release.py --out dist/engine-bundle
+          if ($LASTEXITCODE -ne 0) { throw 'Engine bundle build failed' }
+          Get-Content dist/engine-bundle/SHA256SUMS | ForEach-Object {
+            $hash, $name = $_ -split '\s+', 2
+            if ((Get-FileHash -Algorithm SHA256 (Join-Path dist/engine-bundle $name)).Hash.ToLower() -ne $hash) { throw "bundle checksum: $name" }
+          }
       - name: Build self-contained Windows installer (Inno Setup)
         shell: pwsh
         run: |
@@ -123,6 +135,9 @@ jobs:
           if ($install.ExitCode -ne 0) { throw "Installer failed with code $($install.ExitCode)" }
           $app = Join-Path $dir 'CodingBrainDesktop.exe'
           if (-not (Test-Path -LiteralPath $app)) { throw 'Installer did not install the desktop executable' }
+          foreach ($name in @('release.json', 'SHA256SUMS', 'install.ps1', 'Setup-CodingBrain.ps1')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $dir "engine\$name"))) { throw "Installer did not deliver engine\$name" }
+          }
           $probe = Start-Process -FilePath $app -ArgumentList '--self-test' -Wait -PassThru -WindowStyle Hidden
           if ($probe.ExitCode -ne 0) { throw "Installed desktop self-test failed with code $($probe.ExitCode)" }
           $uninstall = Join-Path $dir 'unins000.exe'

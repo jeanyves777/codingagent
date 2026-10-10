@@ -127,7 +127,9 @@
       let response;
       try { response = await fetch(path, options); }
       catch (error) {
-        if (error?.name === 'AbortError') throw error;
+        // fetch rejects with a TypeError only when the bridge cannot be reached; keep any other
+        // error's own message.
+        if (!(error instanceof TypeError)) throw error;
         const offline = new Error('Could not reach the Coding Brain UI bridge'); offline.offline = true; throw offline;
       }
       let result;

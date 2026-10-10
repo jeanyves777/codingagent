@@ -106,6 +106,8 @@ jobs:
                       Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
           }
           if (-not $iscc) { throw 'Inno Setup compiler unavailable' }
+          New-Item -ItemType Directory -Force dist/engine-bundle | Out-Null
+          Copy-Item dist/preview/* dist/engine-bundle/ -Force
           & $iscc "/DCodingBrainVersion=$env:version" 'installer/windows/CodingBrainDesktop.iss'
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path 'dist/CodingBrain-Setup.exe')) {
             throw 'Preview native installer compilation failed'
