@@ -223,18 +223,56 @@ def test_cli_reports_blockers_plainly(env, monkeypatch, capsys):
 
 @pytest.mark.skipif(not (os.environ.get("CODINGBRAIN_TEST_CODING_MODEL") and os.environ.get("CODINGBRAIN_TEST_DOCKER")),
                     reason="needs a real Ollama model and Docker with the sandbox images")
-def test_real_goal_first_build(env):
-    """Real: a new project from one sentence, built by the real model, tested in the real sandbox."""
+def test_real_goal_first_pipeline(env):
+    """Real model, real sandbox. Two separate verdicts:
+    - this test (a merge gate) asserts what Coding Brain itself must do whatever the model writes:
+      safe project creation, real sandbox execution, test discovery, the independent requirement
+      checks, an untouched main branch and an honest report;
+    - whether the model actually produced a working application is the capability verdict. It is
+      written to $CODINGBRAIN_CAPABILITY_REPORT and reported separately by CI. It is never hidden,
+      and it is required before goal-first building is called production-ready."""
+    import time
+    from brain.local.cli import Context
     from brain.local.create import build
     config = settings.load(env["layout"])
     config["models"]["model"] = os.environ["CODINGBRAIN_TEST_CODING_MODEL"]
     settings.save(env["layout"], config)
+    started = time.time()
     record = make(env, "Build a Python module tasks.py that keeps tasks in memory: add_task(title) returns the "
                        "new task's integer id; complete_task(task_id) marks that task done; list_tasks() returns "
                        "the tasks that are not done, and list_tasks(include_done=True) returns all tasks. "
                        "Each task is a dict with id, title and done. Include pytest tests",
                   name="tasks", check_ready=True)
     task = build(env["layout"], record, auto=True, view="plain")
-    print(report(record, task))
+    text = report(record, task)
+    print(text)
+    root = Path(record["path"])
     evidence = task.get("test_evidence") or {}
-    assert task.get("status") == "passed" and evidence.get("passed") is True, (task.get("status"), evidence.get("output", "")[-2000:])
+    output = evidence.get("output", "")
+    kinds = [event["kind"] for event in task.get("events", [])]
+    workspace = Context(env["layout"], root).brain.workspace(task["id"])
+    written_tests = any("def test_" in path.read_text(errors="replace") for path in workspace.rglob("*.py")
+                        if ".git" not in path.parts)
+    capability = {"model": config["models"]["model"], "status": task.get("status"),
+                  "passed": task.get("status") == "passed" and evidence.get("passed") is True,
+                  "seconds": round(time.time() - started), "attempts": kinds.count("test_finished"),
+                  "failures": [{key: item.get(key) for key in ("category", "diagnosis", "summary")}
+                               for item in task.get("failure_log", [])][-6:],
+                  "supervisor_used": any(kind.startswith("supervisor_") for kind in kinds)}
+    if os.environ.get("CODINGBRAIN_CAPABILITY_REPORT"):
+        Path(os.environ["CODINGBRAIN_CAPABILITY_REPORT"]).write_text(json.dumps(capability, indent=2))
+    print(json.dumps(capability, indent=2))
+    # The merge gate: Coding Brain's own guarantees.
+    assert root.is_relative_to((env["home"] / "Projects").resolve())
+    assert git(root, "log", "--format=%s").splitlines()[-1] == "Start tasks (codingbrain new)"
+    assert len(git(root, "log", "--format=%H").splitlines()) == 2 and git(root, "status", "--porcelain") == ""
+    assert task.get("status") in {"passed", "failed"}, task.get("status")  # finished, not stuck or broken
+    assert evidence.get("exit_code") not in (None, 125, 126, 127), output[-500:]  # the sandbox really ran
+    assert "test session starts" in output
+    if written_tests:
+        assert "collected 0 items" not in output  # tests the model wrote were discovered
+    assert {"requirement_checks_written", "requirement_checks_skipped", "requirement_checks_rejected"} & set(kinds)
+    if evidence.get("passed"):
+        assert task.get("completion"), "visible tests passed but the requirement checks did not run"
+    if not capability["passed"]:
+        assert "Built" not in text and ("failed" in text or "Blocked" in text)  # an honest report

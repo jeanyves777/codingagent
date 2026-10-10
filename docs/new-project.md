@@ -96,3 +96,35 @@ from that cache offline, which keeps them reproducible. That command is not part
 | **Accepted** | `cd` into the project and `git switch <branch>`. |
 | **Passed, not yet accepted** | `codingbrain accept <task>`. |
 | **Blocked or failed** | The message says why. `codingbrain trace` shows the full history, and `codingbrain resume` continues. |
+
+## When the model gets stuck
+
+Coding Brain diagnoses failures before it asks for a repair.
+
+- **Shared test state.** When a few tests fail and others pass, each failing test is re-run on
+  its own in the sandbox. A test that passes alone but fails in the full run means the tests
+  share state: a module-level counter or list keeps its value from one test to the next. The
+  repair is told exactly that, so it fixes the isolation instead of the expected values.
+- **Escalation.** When bounded repairs by the local model fail, Coding Brain escalates to Claude
+  Code or Codex, if you have enabled one. That supervisor receives the failures and the
+  diagnosis, and either guides the next repair or takes over, within your budgets.
+
+## Verification status
+
+CI checks this feature in two separate ways:
+
+| Check | Real model? | Blocks merges? | What it shows |
+| --- | --- | --- | --- |
+| Pipeline (project creation, Git, path safety, sandboxing, approvals, test discovery, the independent requirement checks, an honest report) | Yes, and in unit tests | Yes | Coding Brain itself does the right thing |
+| Capability (did the model produce a working application?) | Yes: qwen2.5-coder:7b on CPU | No, but it is reported in every CI run | What the local model can actually do |
+
+Goal-first autonomous building is **not yet production-ready**: the real-model capability check
+has not yet succeeded. In four real runs, each failure exposed a real gap in Coding Brain, and
+each gap has been fixed:
+
+- truncated test diffs;
+- missing tests failing without repair;
+- tests written inside the module not being collected;
+- the test-isolation diagnosis above.
+
+The feature will be called production-ready only after the capability check succeeds reliably.
