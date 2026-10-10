@@ -538,14 +538,19 @@ class Premium(Component):
     def check(self, env, deep=False):
         system = env.system
         enabled = env.config["supervisors"].get(self.id, {}).get("enabled")
-        if not system.which(self.command):
-            return Status("missing", f"{self.command} CLI not installed", action="install",
-                          data={"auth": "not_installed", "enabled": enabled})
-        version = version_line(env, [self.command, "--version"])
+        locate = getattr(system, "locate", None)
+        path, checked = locate(self.command) if locate else (system.which(self.command), [])
+        if not path:
+            where = f"; looked in {len(checked)} places: " + ", ".join(checked[:8]) if checked else ""
+            return Status("missing", f"{self.command} CLI not found{where}", action="install",
+                          data={"auth": "not_installed", "enabled": enabled, "checked": checked})
+        # Run the launcher that was found: it may be outside this process's PATH.
+        command = path if locate else self.command
+        version = version_line(env, [command, "--version"])
         environment = {key: value for key, value in system.environ().items() if key not in self.key_variables}
-        code, output = system.run([self.command, *self.status_arguments], timeout=60, env=environment)
+        code, output = system.run([command, *self.status_arguments], timeout=60, env=environment)
         auth, detail = classify_auth(self.id, code, output)
-        data = {"auth": auth, "enabled": enabled}
+        data = {"auth": auth, "enabled": enabled, "path": path}
         if auth == "authenticated":
             if not enabled:
                 data["auth"] = "disabled"
