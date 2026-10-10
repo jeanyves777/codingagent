@@ -195,3 +195,44 @@ def test_current_doctor_uses_deep_when_supported(tmp_path, monkeypatch):
     assert r.status_code == 200
     assert r.json()['diagnostic_level'] == 'deep'
     assert w.jobs[r.json()['job']['id']].command == ['codingbrain', 'doctor', '--full']
+
+
+def test_authentication_and_supervisor_routing_are_separate(tmp_path, monkeypatch):
+    """A user is connected only if official CLI auth succeeded AND routing is enabled."""
+    w = Workspace(home=tmp_path, executable='codingbrain')
+    cfg = tmp_path / '.local' / 'CodingBrain' / 'config'
+    cfg.mkdir(parents=True)
+    (cfg / 'config.json').write_text(json.dumps({
+        'supervisors': {'claude': {'enabled': True}, 'codex': {'enabled': False}}
+    }), encoding='utf-8')
+    fake = [
+        {'id':'claude', 'name':'Claude Code','status':'authenticated', 'authenticated':True},
+        {'id':'codex','name':'OpenAI Codex','status':'authenticated', 'authenticated':True},
+    ]
+    monkeypatch.setattr(management,'providers_snapshot',lambda: [p.copy() for p in fake])
+    states={p['id']:p for p in w.configured_providers()}
+    assert states['claude']['connection_state']=='connected'
+    assert states['codex']['connection_state']=='signed-in'
+    fake[0].update(status='auth-unverified',authenticated=False)
+    assert w.configured_providers()[0]['connection_state']=='unverified'
+    fake[0].update(status='not-installed')
+    assert w.configured_providers()[0]['connection_state']=='not-installed'
+
+
+def test_windows_user_cli_shims_can_be_detected_after_stale_path(tmp_path, monkeypatch):
+    """A packaged desktop often lacks npm's late-added PATH; only safe fixed paths are checked."""
+    monkeypatch.setattr(management, 'IS_WINDOWS', True)
+    monkeypatch.setattr(management.shutil, 'which', lambda name: None)
+    monkeypatch.setenv('APPDATA', str(tmp_path / 'Roaming'))
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path / 'Local'))
+    shim = tmp_path / 'Roaming' / 'npm' / 'codex.cmd'
+    shim.parent.mkdir(parents=True)
+    shim.write_text('@echo off\n')
+    assert management.installed_cli('codex') == str(shim)
+    assert management.installed_cli('claude') is None
+    assert management.installed_cli('node') is None
+    shim.unlink()
+    winget = tmp_path / 'Local' / 'Microsoft' / 'WinGet' / 'Links' / 'codex.exe'
+    winget.parent.mkdir(parents=True)
+    winget.touch()
+    assert management.installed_cli('codex') == str(winget)

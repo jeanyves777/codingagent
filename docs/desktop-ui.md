@@ -152,3 +152,26 @@ The Control Center and task stop/AI-provider controls never use browser-origin `
 Older Coding Brain installations lack `doctor --full`; desktop probes `codingbrain doctor --help` without running a real test to detect whether the option is supported. On older versions, the UI labels the command **Basic system check** and submits only `codingbrain doctor`, reporting it as a basic check even if it passes. Full model and sandbox readiness remain unverified pending a backend upgrade. On newer installations the deep command is used. The backend itself performs the option check, so calling the local UI API directly cannot force an unsupported `--full` flag.
 
 Regression evidence: `python tests/smoke_confirm_browser.py` rejects all native browser dialogs and exercises explicit confirmation, Escape/Cancel refusal, provider sign-in, and legacy doctor labeling. `tests/test_desktop_management.py` tests both capability branches, option probing through `--help`, and allowlisted maintenance commands.
+
+
+## Subscription provider connection and rechecks
+
+The provider screen distinguishes **CLI installation**, **vendor authentication**, and
+**Coding Brain supervisor routing**. Claude or Codex is labeled `Connected` only when
+its *official CLI status check succeeds* and the supervisor is enabled in the
+Coding Brain configuration. A CLI that is signed in but disabled is labeled
+`Authenticated — supervisor disabled`; installed without verified CLI auth is
+never claimed connected. The screen provides **Recheck connections** and a
+specific **Recheck connection** action for authenticated providers rather than
+asking users to sign in again. After an explicit launch of an official CLI
+sign-in, read-only status checks repeat for up to two minutes while the panel
+is open; launching a terminal is never treated as successful authentication.
+
+Windows packaged applications sometimes inherit PATH from before npm/winget
+added CLI shims. Provider discovery first uses PATH and then checks fixed
+per-user npm shims and WinGet links; this does not run external executables to
+find them and does not read or store account tokens. If a CLI cannot be found,
+restart the desktop after installing it, then select **Recheck connections**.
+
+Test: `python tests/smoke_provider_browser.py` and
+`python -m pytest -q tests/test_desktop_management.py`.

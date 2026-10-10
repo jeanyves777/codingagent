@@ -58,8 +58,29 @@ def safe_probe(command: list[str], *, timeout: float = 7) -> bool | None:
         return None
 
 
+IS_WINDOWS = os.name == "nt"
+
+
 def installed_cli(name: str) -> str | None:
-    return shutil.which(name)
+    """Find official CLI launchers even when Windows Desktop inherited a stale PATH.
+
+    npm installs Codex / Claude shims in the user's roaming npm directory; the
+    process may have been started before npm added that folder to PATH. Only
+    inspect fixed per-user launcher locations. Never run a provider to discover it.
+    """
+    found = shutil.which(name)
+    if found:
+        return found
+    if not IS_WINDOWS or name not in {"claude", "codex", "gemini"}:
+        return None
+    roaming = os.environ.get("APPDATA")
+    local = os.environ.get("LOCALAPPDATA")
+    candidates = []
+    if roaming:
+        candidates.extend((Path(roaming) / "npm" / (name + suffix) for suffix in (".cmd", ".exe")))
+    if local:
+        candidates.append(Path(local) / "Microsoft" / "WinGet" / "Links" / (name + ".exe"))
+    return next((str(candidate) for candidate in candidates if candidate.is_file()), None)
 
 
 def is_key_set(name: str) -> bool:
@@ -86,11 +107,11 @@ def providers_snapshot(probe: Callable[[list[str]], bool | None] = safe_probe) -
         elif provider.id == "claude":
             result = auth.get("claude")
             status = "authenticated" if result is True else "sign-in-needed" if result is False else "auth-unverified" if binary else "not-installed"
-            detail = "CLI authenticated" if result is True else "Use official Claude CLI to sign in" if binary else "Install from full setup"
+            detail = "Official Claude CLI confirmed sign-in" if result is True else "Sign in with the official Claude CLI" if result is False else "Auth check did not complete" if binary else "CLI not found. If Claude works in PowerShell, restart this desktop or refresh your PATH."
         elif provider.id == "codex":
             result = auth.get("codex")
             status = "authenticated" if result is True else "sign-in-needed" if result is False else "auth-unverified" if binary else "not-installed"
-            detail = "CLI authenticated" if result is True else "Sign in with ChatGPT" if binary else "Install from full setup"
+            detail = "Official Codex CLI confirmed ChatGPT sign-in" if result is True else "Sign in with ChatGPT through Codex" if result is False else "Auth check did not complete" if binary else "Codex CLI not found in desktop PATH or user launcher folders. Restart this desktop after installing it."
         elif provider.id == "gemini":
             status = "installed" if binary else "not-installed"
             detail = "Sign in within Gemini CLI; autonomous core routing not implemented" if binary else "Gemini CLI not installed"
@@ -106,6 +127,7 @@ def providers_snapshot(probe: Callable[[list[str]], bool | None] = safe_probe) -
         entries.append({"id":provider.id,"name":provider.label,"group":provider.group,"description":provider.description,
                         "status":status,"detail":detail,"adapter":provider.adapter,"docs":provider.docs,
                         "sign_in_available":bool(provider.login and binary),
+                        "authenticated":bool(status == "authenticated"),
                         "core_enabled": provider.adapter in {"local", "supervisor"}})
     return entries
 

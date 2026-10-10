@@ -574,11 +574,16 @@
   $('nav-providers').addEventListener('click', () => openControl('providers'));
   $('model-label').addEventListener('click', () => openControl('providers'));
   $('header-setup').addEventListener('click', () => openControl('setup'));
-  $('control-close').addEventListener('click', () => $('control-dialog').close());
+  $('control-close').addEventListener('click', () => { stopProviderWatch(); $('control-dialog').close(); });
   $('control-tab-setup').addEventListener('click', () => showControl('setup'));
   $('control-tab-providers').addEventListener('click', () => showControl('providers'));
   $('control-tab-updates').addEventListener('click', () => showControl('updates'));
   $('setup-check').addEventListener('click', reloadControl);
+  $('refresh-providers').addEventListener('click', async () => {
+    const button = $('refresh-providers');
+    busyButton(button,true);
+    try { await reloadControl(); } finally {busyButton(button,false);}
+  });
   $('deep-check').addEventListener('click', () => { showControl('updates'); systemAction('doctor'); });
   $('setup-continue').addEventListener('click', async () => {
     try { await api('/api/setup/completed', 'POST', {completed:true}); $('control-dialog').close(); }
@@ -590,8 +595,49 @@
   $('repair-install').addEventListener('click', () => systemAction('repair'));
   $('new-project-empty').addEventListener('click', () => { setMode('new'); $('prompt').focus(); });
   let setupCache = null;
+  let activeControlTab = 'setup';
+  let providerWatchTimer = null;
+  let providerWatchActive = false;
+
+  function stopProviderWatch() {
+    if (providerWatchTimer !== null) clearInterval(providerWatchTimer);
+    providerWatchTimer = null;
+  }
+
+  function watchProviderSignIn(providerId, name) {
+    stopProviderWatch();
+    const started = Date.now();
+    // Official vendor CLI owns credentials. Poll read-only status, never a sign-in
+    // URL or session token. Only verified CLI authentication becomes connected.
+    providerWatchTimer = setInterval(async () => {
+      if (!$('control-dialog').open || activeControlTab !== 'providers') {
+        stopProviderWatch();
+        return;
+      }
+      if (providerWatchActive) return;
+      providerWatchActive = true;
+      try {
+        const data = await reloadControl({quiet:true});
+        const provider = data?.providers?.find(p => p.id === providerId);
+        if (provider?.authenticated) {
+          stopProviderWatch();
+          feedback('success', `${name} sign-in verified`, provider.supervisor_enabled ?
+            'Connected and enabled as a governed supervisor.' :
+            'Signed in successfully. Enable the supervisor separately if you want it used for coding tasks.');
+        } else if (Date.now() - started >= 120000) {
+          stopProviderWatch();
+          feedback('info', `${name} connection not yet verified`,
+            'The sign-in terminal was opened, but the desktop cannot confirm authentication yet. Finish in the official CLI, then click Recheck connections.');
+        }
+      } catch {
+        // A transient probe error is not a failed sign-in; a manual recheck remains available.
+      } finally { providerWatchActive = false; }
+    }, 8000);
+  }
 
   function showControl(tab) {
+    activeControlTab = tab;
+    if (tab !== 'providers') stopProviderWatch();
     const headings={setup:['Set up your coding workspace','Check your local engine, install requirements and connect optional providers.'],providers:['Manage your AI providers','Connect subscriptions, inspect provider support and choose authorized supervisors.'],updates:['Installation and updates','Check verified releases, diagnose readiness and repair the coding environment.']};
     $('control-heading').textContent = headings[tab][0];
     $('control-subtitle').textContent = headings[tab][1];
@@ -642,72 +688,134 @@
     const logos = {ollama:'◈',claude:'C',codex:'O',gemini:'G',grok:'X',meta:'M',muse:'✧'};
     for (const provider of providers) {
       const row = document.createElement('article'); row.className = 'provider-row';
+      row.dataset.provider = provider.id;
       const left = document.createElement('div'); left.className = 'provider-identity';
       const mark = document.createElement('div'); mark.className = 'provider-logo'; mark.textContent = logos[provider.id] || '•';
       const inner = document.createElement('div');
       const heading = document.createElement('div'); heading.className = 'provider-name'; heading.textContent = provider.name;
       const desc = document.createElement('p'); desc.className = 'provider-description'; desc.textContent = provider.description;
+      const isSubscription = ['claude','codex'].includes(provider.id);
+      const authenticated = isSubscription && provider.authenticated === true;
+      // Preserve compatibility with an older /api/setup response, without treating
+      // an installed executable or a settings toggle as authenticated.
+      const verified = authenticated || (isSubscription && provider.status === 'authenticated');
+      const connected = verified && provider.supervisor_enabled === true;
+      const state = isSubscription ?
+        connected ? 'connected' : verified ? 'signed-in' :
+        provider.status === 'not-installed' ? 'not-installed' : 'unverified' : provider.status;
       const badges = document.createElement('div'); badges.className = 'provider-badges';
-      const badge = document.createElement('span'); badge.className = 'provider-badge'; badge.textContent = provider.status.replaceAll('-', ' ');
+      const badge = document.createElement('span'); badge.className = 'provider-badge ' + state;
+      badge.textContent = isSubscription ?
+        connected ? '✓ Connected' : verified ? '✓ Authenticated' :
+        provider.status === 'not-installed' ? 'CLI not found' :
+        provider.status === 'sign-in-needed' ? 'Sign-in needed' : 'Not verified' :
+        provider.status.replaceAll('-', ' ');
       const extra = document.createElement('span'); extra.className = 'provider-badge subdued';
-      extra.textContent = provider.core_enabled ? 'Core integration' : 'Connector pending';
-      badges.append(badge,extra); inner.append(heading,desc,badges); left.append(mark,inner);
-      const actions = document.createElement('div'); actions.className = 'provider-actions';
-      if (provider.sign_in_available) {
-        const sign = document.createElement('button'); sign.textContent = 'Sign in / reconnect';
-        sign.addEventListener('click', async () => {
-          if (!await confirmAction(`Connect ${provider.name}`, 'Launch the official provider sign-in flow in a separate console. Coding Brain does not collect your password or session credentials.', 'Open sign-in')) return;
-          busyButton(sign, true);
-          feedback('busy', `Opening ${provider.name} sign-in`, 'Launching the official provider CLI. Account sign-in takes place outside Coding Brain.');
-          try {
-            const response = await api(`/api/providers/${provider.id}/signin`, 'POST', {confirmed:true});
-            feedback('info', `${provider.name} sign-in launched`, 'Complete sign-in in the official terminal and refresh provider status afterward.');
-            toast(response.message);
-          } catch(e) { feedback('error', 'Could not start sign-in', e.message); toast(e.message); }
-          finally { busyButton(sign, false); }
-        }); actions.append(sign);
+      extra.textContent = isSubscription ?
+        provider.supervisor_enabled ? 'Supervisor enabled' : 'Supervisor disabled' :
+        provider.core_enabled ? 'Core integration' : 'Connector pending';
+      badges.append(badge,extra);
+      inner.append(heading,desc,badges);
+      if (isSubscription) {
+        const stateText = document.createElement('div');
+        stateText.className = 'provider-connection ' + state;
+        stateText.textContent = connected ?
+          'Official CLI sign-in verified. Coding Brain may use this supervisor within your budgets.' :
+          verified ? 'Official CLI sign-in verified. Enable supervisor to use it for coding tasks.' :
+          provider.detail || (provider.status === 'not-installed' ? 'CLI not found on this desktop.' : 'Sign-in has not been verified.');
+        inner.append(stateText);
       }
-      if (['claude','codex'].includes(provider.id)) {
-        const toggle = document.createElement('button'); toggle.textContent = provider.supervisor_enabled ? 'Disable supervisor' : 'Enable supervisor';
-        toggle.addEventListener('click', async () => {
-          const enabling = !provider.supervisor_enabled;
-          if (!await confirmAction(`${enabling ? 'Enable' : 'Disable'} ${provider.name}`, `Change ${provider.name} supervisor routing? Existing budget limits and approvals remain in effect.`, enabling ? 'Enable supervisor' : 'Disable supervisor', !enabling)) return;
-          busyButton(toggle, true);
-          feedback('busy', `Saving ${provider.name} routing`, 'Applying the supervisor setting through the existing Coding Brain backend.');
+      left.append(mark,inner);
+      const actions = document.createElement('div'); actions.className = 'provider-actions';
+      if (provider.sign_in_available && !verified) {
+        const sign = document.createElement('button'); sign.textContent = 'Sign in with ' + provider.name;
+        sign.addEventListener('click', async () => {
+          if (!await confirmAction(`Connect ${provider.name}`,
+            'Open the official provider sign-in in a separate console. Only a successful CLI auth check will mark the account connected.',
+            'Open sign-in')) return;
+          busyButton(sign,true);
+          feedback('busy',`Opening ${provider.name} sign-in`, 'Launch is not proof of authentication. Coding Brain will recheck the provider while this panel is open.');
           try {
-            const res=await api(`/api/providers/${provider.id}/configure`,'POST',{enabled:enabling});
+            const response = await api(`/api/providers/${provider.id}/signin`,'POST',{confirmed:true});
+            feedback('info',`${provider.name} sign-in opened`,
+              'Finish sign-in in the official terminal. Checking the CLI for verified sign-in; you can also select Recheck connections.');
+            toast(response.message);
+            // CLI-based subscription sign-ins support a side-effect-free status check.
+            if (isSubscription) watchProviderSignIn(provider.id,provider.name);
+          } catch(e) { feedback('error','Could not start sign-in',e.message); toast(e.message); }
+          finally { busyButton(sign,false); }
+        });
+        actions.append(sign);
+      }
+      if (isSubscription) {
+        if (verified) {
+          const recheck = document.createElement('button'); recheck.textContent = 'Recheck connection';
+          recheck.addEventListener('click',async () => {
+            busyButton(recheck,true);
+            try {await reloadControl();}
+            finally {busyButton(recheck,false);}
+          });
+          actions.append(recheck);
+        }
+        const toggle = document.createElement('button');
+        toggle.textContent = provider.supervisor_enabled ? 'Disable supervisor' : 'Enable supervisor';
+        // Installation, authentication and configuration are distinct. Never let an
+        // unverified account silently become an enabled subscription supervisor.
+        if (!verified && !provider.supervisor_enabled) {
+          toggle.disabled = true;
+          toggle.title = 'Sign in and verify the official CLI before enabling this supervisor';
+        }
+        toggle.addEventListener('click',async () => {
+          const enabling = !provider.supervisor_enabled;
+          if (enabling && !verified) {toast('Verify your sign-in before enabling this supervisor.');return;}
+          if (!await confirmAction(`${enabling ? 'Enable' : 'Disable'} ${provider.name}`,
+            `Change ${provider.name} supervisor routing? Existing budgets and approvals remain in effect.`,
+            enabling ? 'Enable supervisor' : 'Disable supervisor', !enabling)) return;
+          busyButton(toggle,true);
+          feedback('busy',`Saving ${provider.name} routing`, 'Applying the setting through your installed Coding Brain engine.');
+          try {
+            const res = await api(`/api/providers/${provider.id}/configure`,'POST',{enabled:enabling});
             await reloadControl();
-            feedback('success', `${provider.name} supervisor setting saved`, 'The configured usage and approval limits remain in effect.');
+            feedback('success',`${provider.name} supervisor setting saved`,
+              enabling ? 'Enabled in Coding Brain configuration. CLI authentication is verified separately.' : 'Supervisor disabled. Sign-in remains managed by the official provider CLI.');
             toast(res.message);
-          } catch(e) { feedback('error', 'Provider setting failed', e.message); toast(e.message); }
-          finally { busyButton(toggle, false); }
-        }); actions.append(toggle);
+          } catch(e) {feedback('error','Provider setting failed',e.message);toast(e.message);}
+          finally {busyButton(toggle,false);}
+        });
+        actions.append(toggle);
       }
       if (provider.docs) {
-        const link=document.createElement('a'); link.href=provider.docs; link.target='_blank'; link.rel='noopener noreferrer'; link.textContent='Official docs ↗'; actions.append(link);
+        const link=document.createElement('a');link.href=provider.docs;link.target='_blank';link.rel='noopener noreferrer';link.textContent='Official docs ↗';actions.append(link);
       }
-      row.append(left,actions); list.append(row);
+      row.append(left,actions);list.append(row);
     }
   }
 
-  async function reloadControl() {
+  async function reloadControl(options = {}) {
+    const quiet = options.quiet === true;
     // Share a pending request: opening Setup and the first-run check must not race.
     if (controlLoad) return controlLoad;
     if (!setupCache) loadingComponents();
-    if (!activeMaintenance) feedback('busy', 'Checking your environment', 'Detecting installed tools and provider readiness. No changes are being made.');
+    if (!quiet && !activeMaintenance) feedback('busy', 'Checking your environment', 'Detecting installed tools and provider readiness. No changes are being made.');
     busyButton($('setup-check'), true);
     controlLoad = (async () => {
       try {
         setupCache = await api('/api/setup');
         renderSetup(setupCache.readiness);
         renderProviders(setupCache.providers);
-        if (!activeMaintenance) feedback('success', 'Environment check finished', 'These are detected tools, not a guarantee that every model or sandbox is ready. Use Deep system test for verification.');
+        if (!quiet && !activeMaintenance) {
+          const connected = setupCache.providers.filter(p => ['claude','codex'].includes(p.id) && p.authenticated && p.supervisor_enabled);
+          if (activeControlTab === 'providers') feedback('success', 'Provider connections refreshed',
+            connected.length ? `Verified active supervisors: ${connected.map(p => p.name).join(', ')}.` :
+            'No authenticated and enabled subscription supervisors were detected. The cards show sign-in and routing separately.');
+          else feedback('success','Environment check finished','These are detected tools, not a guarantee that every model or sandbox is ready. Use Deep system test for verification.');
+        }
         return setupCache;
       } catch(e) {
         $('setup-components').setAttribute('aria-busy', 'false');
         if (!setupCache) $('setup-components').replaceChildren();
         $('setup-message').textContent = 'Could not check the local engine: ' + e.message;
-        if (!activeMaintenance) feedback('error', 'Environment check failed', e.message + '. Use Refresh checks to retry.');
+        if (!quiet && !activeMaintenance) feedback('error', 'Environment check failed', e.message + '. Use Refresh checks to retry.');
         return null;
       } finally {
         controlLoad = null;

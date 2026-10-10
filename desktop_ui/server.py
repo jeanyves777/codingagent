@@ -179,7 +179,17 @@ class Workspace:
             supervisors = {}
         for provider in providers:
             if provider["id"] in {"claude", "codex"}:
-                provider["supervisor_enabled"] = bool(supervisors.get(provider["id"], {}).get("enabled"))
+                enabled = bool(supervisors.get(provider["id"], {}).get("enabled"))
+                provider["supervisor_enabled"] = enabled
+                # Signing in and actually being enabled are independent facts.
+                # Never tell the UI it is connected merely because a CLI exists.
+                provider["connection_state"] = (
+                    "connected" if provider["authenticated"] and enabled else
+                    "signed-in" if provider["authenticated"] else
+                    "needs-sign-in" if provider["status"] == "sign-in-needed" else
+                    "not-installed" if provider["status"] == "not-installed" else
+                    "unverified"
+                )
         return providers
 
     def sign_in(self, provider_id: str) -> None:

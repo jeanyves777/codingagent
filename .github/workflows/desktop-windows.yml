@@ -10,6 +10,7 @@ on:
       - 'tests/smoke_browser.py'
       - 'tests/smoke_loading_browser.py'
       - 'tests/smoke_confirm_browser.py'
+      - 'tests/smoke_provider_browser.py'
       - 'docs/backend-integration-handoff.md'
       - 'Start-CodingBrainDesktop.ps1'
       - 'installer/windows/CodingBrainDesktop.iss'
@@ -132,6 +133,10 @@ jobs:
         run: python tests/smoke_loading_browser.py
       - name: Verify app-native confirmations and v0.9.0 diagnostic fallback
         run: python tests/smoke_confirm_browser.py
+      - name: Verify real provider connection indicators and refresh
+        env:
+          CB_DESKTOP_PROVIDER_SCREENSHOT: ${{ runner.temp }}/CodingBrain-Desktop-Providers-Connected.png
+        run: python tests/smoke_provider_browser.py
       - uses: actions/upload-artifact@v4
         with:
           name: CodingBrainDesktop-UI-Screenshots

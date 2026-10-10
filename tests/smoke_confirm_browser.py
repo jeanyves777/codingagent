@@ -36,7 +36,7 @@ with sync_playwright() as p:
           full_installer_note:'Update backend for full installer',components:[
             {id:'python',name:'Python',installed:true,detail:'Found'},
             {id:'git',name:'Git',installed:true,detail:'Found'}
-          ]},providers:[{id:'claude',name:'Claude Code',description:'Official CLI',status:'authenticated',
+          ]},providers:[{id:'claude',name:'Claude Code',description:'Official CLI',status:'sign-in-needed',
             core_enabled:true,docs:'',sign_in_available:true,supervisor_enabled:false}]};
         const reply = obj => ({ok:true,json:async()=>obj});
         window.fetch = async (url, request={}) => {
@@ -91,11 +91,11 @@ with sync_playwright() as p:
 
     # Provider sign-in follows the same contract: no action on Escape.
     page.locator('#control-tab-providers').click()
-    page.locator('#provider-list button').get_by_text('Sign in / reconnect').click()
+    page.locator('#provider-list button').get_by_text('Sign in with Claude Code').click()
     page.locator('#action-dialog').wait_for(state='visible')
     page.keyboard.press('Escape')
     assert page.evaluate('window.testApp.signins.length') == 0
-    page.locator('#provider-list button').get_by_text('Sign in / reconnect').click()
+    page.locator('#provider-list button').get_by_text('Sign in with Claude Code').click()
     page.locator('#action-approve').click()
     page.wait_for_function('window.testApp.signins.length === 1')
 

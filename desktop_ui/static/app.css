@@ -172,3 +172,17 @@ button.is-loading::before { content:'';display:inline-block;width:12px;height:12
 .action-controls .destructive {background:#65372f;border-color:#a36557;color:#ffddd3;}
 .action-controls button:focus-visible {outline:2px solid #a0f7d9;outline-offset:3px;}
 @media(max-width:520px){.action-card{padding:22px}.action-controls{display:grid;grid-template-columns:1fr 1fr}}
+
+/* Subscription authentication is explicit: signed in != enabled for supervised work. */
+.provider-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.provider-heading>div{min-width:220px;flex:1}
+.provider-heading button{flex:none;font-size:11px;padding:9px 12px}
+.provider-connection{font-size:11px;line-height:1.55;margin-top:5px;color:#bbd2c9}
+.provider-connection.connected{color:#89efc4}
+.provider-connection.signed-in{color:#9ce3dc}
+.provider-connection.not-installed,.provider-connection.unverified{color:#efc096}
+.provider-badge.connected{background:#154438;border-color:#397c62;color:#9cf8cf}
+.provider-badge.signed-in{background:#193c40;border-color:#427c80;color:#9ce3dc}
+.provider-badge.not-installed,.provider-badge.unverified{background:#372f27;border-color:#675443;color:#efc096}
+.provider-actions button:disabled{opacity:.6;cursor:wait}
+@media(max-width:720px){.provider-heading button{width:100%}}
