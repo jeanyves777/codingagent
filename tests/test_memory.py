@@ -415,3 +415,33 @@ def test_private_memory_linked_into_the_project_still_needs_consent(world):
     assert totals["awaiting_authorization"] >= 1
     memory.import_sources(authorize=[item["id"] for item in private])
     assert any("PRIVATE-NOTE" in text for text in texts(memory))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are a Windows feature")
+def test_windows_junction_inside_the_project_is_never_read(world, monkeypatch):
+    """A directory junction (no Developer Mode needed) from an allowed path to a secret-named folder
+    inside the same project must not alias it past NEVER_READ: nothing behind it is opened,
+    hashed or imported. Runs on every Windows Python, including 3.11 (no Path.is_junction)."""
+    root = world["project"]
+    hidden = root / "internal-secrets"
+    hidden.mkdir()
+    (hidden / "team.md").write_text("# Team\n\n- JUNCTION-ONLY marker rule.\n")
+    junction = root / "docs" / "decisions"
+    junction.parent.mkdir(parents=True, exist_ok=True)
+    made = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(hidden)], capture_output=True, text=True)
+    assert made.returncode == 0, made.stdout + made.stderr
+    try:
+        assert os.lstat(junction).st_file_attributes & 0x400  # it really is a reparse point
+        opened = []
+        real_open, real_read_bytes = os.open, Path.read_bytes
+        monkeypatch.setattr(os, "open", lambda path, *a, **k: opened.append(str(path)) or real_open(path, *a, **k))
+        monkeypatch.setattr(Path, "read_bytes", lambda self: opened.append(str(self)) or real_read_bytes(self))
+        refs = [item["ref"] for item in discover(root)]
+        assert not any("team.md" in ref for ref in refs)
+        memory = memory_for(world, root)
+        memory.import_sources()
+        assert not any("team.md" in path for path in opened)
+        assert not any("JUNCTION-ONLY" in text for text in texts(memory))
+    finally:
+        os.rmdir(junction)  # removes the junction itself, never the folder it points to
+    assert (hidden / "team.md").exists()

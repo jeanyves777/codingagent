@@ -113,10 +113,18 @@ def _glob(root: Path, pattern: str) -> list[Path]:
     return sorted(path for path in root.glob(pattern) if project_file(root, path))
 
 
+REPARSE_POINT = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
 def _is_link(path: Path) -> bool:
-    if path.is_symlink():
+    """A symbolic link, or on Windows any reparse point (junctions included). The attribute check
+    does not depend on Path.is_junction(), which Python 3.11 lacks."""
+    info = os.lstat(path)
+    if stat_module.S_ISLNK(info.st_mode):
         return True
-    junction = getattr(path, "is_junction", None)  # Windows junctions and other reparse points
+    if getattr(info, "st_file_attributes", 0) & REPARSE_POINT:
+        return True
+    junction = getattr(path, "is_junction", None)
     return bool(junction and junction())
 
 
