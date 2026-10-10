@@ -63,7 +63,7 @@ with sync_playwright() as p:
     page.add_script_tag(content=js)
     page.locator("#branch-name").click()
     page.locator("#git-panel").wait_for(state="visible")
-    page.locator("#git-current-branch").get_by_text("main").wait_for()
+    page.wait_for_function("document.getElementById('git-current-branch').textContent === 'main'", timeout=9000)
     assert page.locator("#git-commits .git-commit-row").count() == 1
     assert "Initial repository" in page.locator("#git-commits").inner_text()
     assert page.locator("#git-changes").get_by_text("Working tree clean").count() == 1
