@@ -688,6 +688,14 @@
     catch(e) { toast(e.message); }
   });
   $('full-setup').addEventListener('click', () => systemAction('install_full'));
+  $('update-channel').addEventListener('change', () => {
+    const preview = $('update-channel').value === 'preview';
+    $('update-channel-description').textContent = preview ?
+      'Preview: UNRELEASED Windows CI artifacts from the current preview branch, only after successful checks. Requires GitHub CLI sign-in.' :
+      'Stable: owner-approved, tagged GitHub releases only. Draft PRs are never installed.';
+    $('maintenance-log').textContent = 'Channel changed. Check for updates to verify the selected source.';
+    $('apply-update').disabled = true;
+  });
   $('check-updates').addEventListener('click', () => systemAction('check_updates'));
   $('apply-update').addEventListener('click', () => systemAction('update_engine'));
   $('repair-install').addEventListener('click', () => systemAction('repair'));
@@ -954,19 +962,22 @@
   };
 
   async function systemAction(action) {
+    const updateChannel = $('update-channel').value === 'preview' ? 'preview' : 'stable';
     const explanations = {
       install_full:'Run the official full installer? It may download software, require administrator approval and ask for subscription sign-in.',
-      update_engine:'Update both the installed Coding Brain engine and native desktop from the same published stable version? The official updater opens a PowerShell window; close the desktop and follow its instructions. Older engine-only releases cannot update the desktop EXE.',
+      update_engine: updateChannel === 'preview' ?
+        'Install an UNRELEASED CI preview (not an official GitHub Release) from the current preview branch, only after successful Windows checks? GitHub CLI authentication is needed. You must close the desktop before installation.' :
+        'Update both the installed Coding Brain engine and native desktop from the same owner-approved stable release? Close the desktop and follow the installer instructions. Older engine-only releases cannot update the desktop EXE.',
       repair:'Open the official installer to diagnose and repair your current setup?',
       check_updates:'Check GitHub for a newer verified stable Coding Brain release?',
       doctor:'Run deep checks of your local model, Docker sandbox and providers? This can take a minute.'
     };
     if (activeMaintenance) { toast('A setup or update operation is already running.'); return; }
     const legacyDoctor = action === 'doctor' && setupCache?.readiness?.deep_doctor_available === false;
-    if (!await confirmAction(
-      legacyDoctor ? 'Run basic health check?' : (maintenanceNames[action] || 'System operation') + '?',
+    if (action !== 'check_updates' && !await confirmAction(
+      legacyDoctor ? 'Run basic health check?' : (updateChannel === 'preview' && action === 'update_engine' ? 'Install UNRELEASED preview?' : (maintenanceNames[action] || 'System operation') + '?'),
       legacyDoctor ? 'Your installed Coding Brain does not support doctor --full. A basic health check will run instead; upgrade the backend for deep model and sandbox tests.' : (explanations[action] || 'Continue?'),
-      action === 'check_updates' ? 'Check updates' : action === 'doctor' ? 'Run check' : 'Continue',
+      action === 'doctor' ? 'Run check' : 'Continue',
       false)) return;
     activeMaintenance = action;
     let name = legacyDoctor ? 'Basic system check' : (maintenanceNames[action] || 'System operation');
@@ -977,22 +988,24 @@
     if (action === 'doctor' || action === 'check_updates') $('maintenance-log').textContent = 'Connecting to Coding Brain…';
     try {
       if (action === 'check_updates') {
-        const info = await api('/api/updates/status');
+        const info = await api('/api/updates/status?channel=' + encodeURIComponent(updateChannel));
         const lines = [
           `Latest published stable: ${info.tag}`,
           `Installed engine: ${info.engine}  (${info.engine_update_available ? 'update available' : 'current'})`,
           `Installed desktop: ${info.desktop}  (${info.desktop_update_available ? 'update available' : info.desktop_in_release ? 'current' : 'no desktop installer in this release'})`
         ];
+        if (info.unreleased) lines.push('UNRELEASED Windows preview, NOT a published GitHub release. Source: ' + info.preview_source_commit + '; CI run: ' + info.preview_run_id);
         if (info.engine_only) lines.push('This release updates the engine only. A packaged desktop update is NOT available.');
         $('maintenance-log').textContent = lines.join('\n');
         $('apply-update').disabled = !info.any_update_available;
         feedback(info.any_update_available ? 'info' : 'success',
           info.any_update_available ? 'Verified stable update available' : 'No newer supported release',
+          info.unreleased ? 'Opt-in, successful Windows preview workflow artifact. It is not an official published release.' :
           info.engine_only ? 'GitHub has no matching desktop installer in this release; the update can only change the backend.' :
-            'Both components are checked independently against the latest published GitHub release.');
+            'Both components are checked independently against the latest published stable release.');
         return;
       }
-      const data = await api(`/api/system/action?action=${encodeURIComponent(action)}`,'POST',{confirmed:true});
+      const data = await api(`/api/system/action?action=${encodeURIComponent(action)}&channel=${encodeURIComponent(action === 'update_engine' ? updateChannel : 'stable')}`,'POST',{confirmed:true});
       // The backend decides the actual supported diagnostic level, not an optimistic UI assumption.
       if (action === 'doctor' && data.diagnostic_level === 'basic') {
         name = 'Basic system check';
