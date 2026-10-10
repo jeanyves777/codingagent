@@ -228,9 +228,36 @@ jobs:
           assert report["components"]["model"]["verified"], report["components"]["model"]
           assert report["components"]["sandbox"]["verified"], report["components"]["sandbox"]
           PY
-      - name: Real model and end-to-end tests (installer self-test and goal-first build)
+      - name: Real model and end-to-end tests (merge gate - Coding Brain's own guarantees)
         shell: bash
+        env:
+          CODINGBRAIN_CAPABILITY_REPORT: ${{ github.workspace }}/goal-first-capability.json
         run: python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py tests/test_new.py -k real 2>&1 | tee installer-real.log
+      - name: Real-model goal-first capability (reported, not a merge gate; required before production-ready)
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          path = "goal-first-capability.json"
+          if not os.path.exists(path):
+              print("::warning::No capability report: the real goal-first build did not run to completion")
+              sys.exit(1)
+          report = json.load(open(path))
+          verdict = "SUCCEEDED" if report["passed"] else "FAILED"
+          lines = [f"### Real-model goal-first build: {verdict}", "",
+                   f"Model `{report['model']}`, status `{report['status']}`, {report['attempts']} test run(s), "
+                   f"{report['seconds']} s, supervisor used: {report['supervisor_used']}.", "",
+                   "Not a merge gate. Goal-first building is not production-ready until this succeeds reliably.", ""]
+          lines += [f"- {item['category']}" + (f" (diagnosis: {item['diagnosis']})" if item.get("diagnosis") else "")
+                    + f": {str(item.get('summary') or '')[:160]}" for item in report["failures"]]
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a").write("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          if not report["passed"]:
+              print(f"::warning::Real-model goal-first build {verdict.lower()} ({report['status']}); see the job summary")
+              sys.exit(1)
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -240,6 +267,7 @@ jobs:
             install-sandbox.txt
             doctor-full.json
             installer-real.log
+            goal-first-capability.json
             ollama.log
 
   release:

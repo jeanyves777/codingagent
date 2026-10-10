@@ -960,6 +960,7 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                     if disputed:
                         feedback += "\nReviewer feedback (untrusted): " + review["reason"]
                     feedback += await self._upstream_feedback(task, workspace, failure)
+                    feedback += await self._isolation_diagnosis(task, workspace, evidence)
             else:
                 task.setdefault("failure_log", []).append({"attempt": attempt, "category": "review",
                                                            "summary": review["reason"][:1000]})
@@ -974,6 +975,35 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                 return
             failures, limit = outcome
             task["status"] = "running"
+
+    async def _isolation_diagnosis(self, task, workspace, evidence) -> str:
+        """When a few pytest tests fail while others pass, re-run each failing test alone. A test that
+        passes alone but fails in the full run shows the tests share state; saying so precisely lets
+        the repair fix the isolation instead of the expected values."""
+        output = evidence.get("output", "")
+        if evidence.get("profile") != "python":
+            return ""
+        failed = list(dict.fromkeys(re.findall(r"(?m)^FAILED (\S+\.py::[^\s]+)", output)))
+        passed = re.search(r"(\d+) passed", output)
+        if not failed or len(failed) > 3 or not passed:
+            return ""
+        alone = []
+        with self.stage(task, "repair", agent="sandbox", summary="Re-running each failing test alone (diagnosis)"):
+            for node in failed:
+                result = await asyncio.to_thread(run_tests, workspace, self.image, only=[node])
+                if result.get("passed"):
+                    alone.append(node)
+        if not alone:
+            return ""
+        self.decision(task, "repair", "coding_brain", f"Diagnosis: {', '.join(alone)} pass(es) alone but fail(s) in "
+                      "the full run, so the tests share state", "observed", tests=alone)
+        if task.get("failure_log"):
+            task["failure_log"][-1].update({"diagnosis": "test_isolation", "isolated_passes": alone})
+        return ("\nDiagnosis (observed by re-running each failing test alone): " + ", ".join(alone) +
+                " pass(es) alone but fail(s) when run with the other tests. The tests share state: module-level "
+                "variables (counters, lists, dicts) keep their values from one test to the next. Fix the isolation, "
+                "for example with an autouse pytest fixture or a reset function that re-initialises that state before "
+                "each test. Do not change the expected values to match the leaked state.")
 
     async def _verify_visual(self, task, workspace) -> str | None:
         """After tests pass: render the result and check it against the visual requirements.
