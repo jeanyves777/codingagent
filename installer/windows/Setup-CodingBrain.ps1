@@ -46,8 +46,12 @@ function Test-Conversation([string]$PythonExe, [string]$Version) {
     Write-Host 'Installer is missing its read-only conversational API verifier.' -ForegroundColor Yellow
     return $false
   }
-  & $PythonExe -I $probe --python $PythonExe --expected-version $Version --timeout 55
-  return ($LASTEXITCODE -eq 0)
+  # Do not let stdout from the Python checker escape into this function's PowerShell
+  # return stream: an array of output lines plus $false would coerce to true in an if-test.
+  $resultLines = & $PythonExe -I $probe --python $PythonExe --expected-version $Version --timeout 55 2>&1
+  $passed = ($LASTEXITCODE -eq 0)
+  foreach ($line in $resultLines) { Write-Host $line }
+  return $passed
 }
 
 Write-Host 'CODING BRAIN SETUP' -ForegroundColor Cyan
