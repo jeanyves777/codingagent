@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Coding Brain — Workspace</title>
+  <link rel="stylesheet" href="/app.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <nav class="rail" aria-label="Workspace navigation">
+      <div class="brand-icon" title="Coding Brain">◇</div>
+      <button class="rail-button selected" id="nav-chat" title="Conversation" aria-label="Conversation"><span>▤</span><small>Chat</small></button>
+      <button class="rail-button" id="nav-projects" title="Projects" aria-label="Projects"><span>▦</span><small>Projects</small></button>
+      <button class="rail-button" id="nav-providers" title="AI providers" aria-label="AI providers"><span>◈</span><small>Models</small></button>
+      <div class="rail-spacer"></div>
+      <button class="rail-button" id="nav-settings" title="Setup and updates" aria-label="Setup and updates"><span>⚙</span><small>Setup</small></button>
+      <span class="rail-footer" title="Private local application">●</span>
+    </nav>
+    <section class="work-area">
+      <header class="topbar">
+        <div class="title-area">
+          <span class="eyebrow">CODING BRAIN</span>
+          <button class="top-tab active" id="workspace-tab" type="button">Workspace</button>
+          <span class="top-divider"></span>
+          <span class="breadcrumb" id="project-breadcrumb">Global conversation</span>
+        </div>
+        <div class="header-actions">
+          <button class="connection-pill" id="header-setup" title="View installed engine readiness"><span class="dot" id="engine-dot"></span><span id="engine-label">Checking engine…</span></button>
+          <button class="icon-btn explorer-reopen" id="open-explorer" title="Open project explorer" aria-label="Open project explorer" aria-controls="explorer" aria-expanded="true" type="button">▱</button>
+          <button class="icon-btn" id="refresh" title="Refresh" aria-label="Refresh">↻</button>
+          <div class="profile-anchor">
+            <button class="profile-trigger" id="profile-trigger" type="button" aria-label="Local profile and account settings" aria-haspopup="dialog" aria-controls="profile-popover" aria-expanded="false" title="Your local profile">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3.6"/><path d="M5.3 19a6.7 6.7 0 0 1 13.4 0"/></svg>
+            </button>
+            <div class="profile-popover" id="profile-popover" role="dialog" aria-label="Local profile" hidden>
+              <div class="profile-identity"><span class="profile-large"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="8" r="3.6"/><path d="M5.3 19a6.7 6.7 0 0 1 13.4 0"/></svg></span><div><strong>Local workspace</strong><small>Private to this computer</small></div></div>
+              <div class="profile-current"><span>Selected project</span><strong id="profile-project">No project selected</strong></div>
+              <button type="button" id="profile-providers">Manage AI providers <span>↗</span></button>
+              <button type="button" id="profile-setup">Setup &amp; updates <span>↗</span></button>
+            </div>
+          </div>
+        </div>
+      </header>
+      <div class="engine-banner" id="engine-banner" role="status" aria-live="polite" hidden>
+        <span class="engine-banner-mark" id="engine-banner-mark" aria-hidden="true">!</span>
+        <div class="engine-banner-copy"><strong id="engine-banner-title">Checking local brain…</strong><span id="engine-banner-detail"></span></div>
+        <button type="button" id="engine-banner-action" class="engine-banner-action">Open setup</button>
+        <button type="button" id="engine-banner-close" aria-label="Hide readiness notice" title="Dismiss notice">×</button>
+      </div>
+      <div class="columns">
+        <main class="conversation" aria-label="Coding Brain conversation">
+          <div class="thread" id="thread" role="log" aria-live="polite" aria-relevant="additions text">
+            <section class="welcome" id="welcome">
+              <div class="brain-mark">◇</div>
+              <span class="welcome-kicker">YOUR AUTONOMOUS CODING WORKSPACE</span>
+              <h1>What are we building today?</h1>
+              <p>Think, plan and build with your local coding brain. Projects, tools and supervisors stay connected in one place.</p>
+              <div class="starter-prompts">
+                <button class="starter" data-suggestion="Hello">Start a conversation <span>↗</span></button>
+                <button class="starter" data-suggestion="Create a task management application">Build a new app <span>↗</span></button>
+                <button class="starter" data-suggestion="What projects am I working on?">Explore projects <span>↗</span></button>
+              </div>
+            </section>
+          </div>
+          <section class="composer-wrap" aria-label="Message input">
+            <div class="status-strip" id="run-status" hidden>
+              <span class="pulse"></span><span id="status-label">Working</span><span class="status-time" id="status-time"></span>
+              <button type="button" class="stop-btn" id="stop-task">Stop</button>
+            </div>
+            <div class="composer">
+              <label for="prompt" class="sr-only">Message to Coding Brain</label>
+              <textarea id="prompt" placeholder="Ask Coding Brain anything..." rows="2"></textarea>
+              <div class="composer-bottom">
+                <div class="composer-options">
+                  <button class="project-chip" id="project-picker"><span class="folder-glyph">▱</span><span id="project-label">Choose project</span><span class="chevron">⌄</span></button>
+                  <button class="model-chip" id="model-label" title="Inspect the installed local model and supervisors" aria-label="Inspect configured models">◈ &nbsp; Checking models… <span class="chevron">⌄</span></button>
+                  <span class="mode-toggle" role="group" aria-label="Message mode">
+                    <button id="mode-chat" class="active" aria-pressed="true">Chat</button><button id="mode-run" aria-pressed="false">Run task</button><button id="mode-new" aria-pressed="false">New project</button>
+                  </span>
+                </div>
+                <button id="send" class="send" aria-label="Send message" title="Send message">➤</button>
+              </div>
+            </div>
+            <p class="hint">Enter to send · Shift+Enter for a new line <span class="hint-separator">·</span> Protected actions require your approval</p>
+            <div class="readiness-chips" id="readiness-chips" role="status" aria-label="Installed model and supervisor readiness">
+              <span id="readiness-local">◈ Local model: checking…</span>
+              <span id="readiness-claude">Claude: checking…</span>
+              <span id="readiness-codex">Codex: checking…</span>
+            </div>
+          </section>
+        </main>
+        <aside class="explorer" id="explorer" aria-label="Project explorer">
+          <div class="explorer-head"><h2><span class="explorer-head-icon">▱</span> Project explorer</h2><button class="icon-btn" id="collapse-explorer" title="Collapse project explorer" aria-label="Collapse project explorer">⇥</button></div>
+          <div class="explorer-tabs" role="tablist" aria-label="Explorer tabs">
+            <button role="tab" class="active" id="tab-files" aria-selected="true">Files</button>
+            <button role="tab" id="tab-activity" aria-selected="false">Activity</button>
+          </div>
+          <div class="file-panel" id="file-panel">
+            <div class="file-toolbar"><span id="explorer-folder" class="folder-name">No project selected</span><button id="refresh-files" title="Refresh files" aria-label="Refresh files">↻</button></div>
+            <div id="file-tree" class="file-tree"><div class="empty-panel"><div class="empty-folder">▱</div><h3>No project selected</h3><p>Open a project folder to explore your files and follow what the coding agents are changing.</p><button id="browse-project">▱ &nbsp; Browse folder</button><button id="new-project-empty" class="empty-secondary">＋ &nbsp; New project</button></div></div>
+            <div class="preview" id="preview" hidden><div class="preview-bar"><span id="preview-name"></span><button id="preview-close" aria-label="Close preview">✕</button></div><pre id="preview-content"></pre></div>
+          </div>
+          <div class="activity-panel" id="activity-panel" hidden><div class="activity-title">Live activity</div><div id="activity-list" class="activity-list"><p class="muted">Activity appears here when Coding Brain starts working.</p></div></div>
+          <div class="explorer-footer"><span id="branch-name">◇ No repository</span><span id="file-count"></span></div>
+        </aside>
+      </div>
+      <footer class="bottombar"><span><span class="dot green"></span> Desktop connected</span><span id="footer-status">Ready</span><span id="footer-private">Private · 127.0.0.1</span></footer>
+    </section>
+  </div>
+  <dialog id="project-dialog" class="project-dialog"><form method="dialog"><header><h2>Open a project</h2><button class="icon-btn" value="cancel" aria-label="Close">✕</button></header><p>Choose a folder on your computer or select a recent project.</p><div class="picker-row"><input id="path-input" type="text" placeholder="C:\Users\...\Projects\my-app" autocomplete="off"><button id="open-path" type="button" class="primary-button">Open</button></div><div class="picker-row"><button type="button" id="native-picker" class="secondary-button">Browse folders…</button></div><h3>Recent projects</h3><div id="recent-projects" class="recent-projects"></div><div class="picker-error" id="picker-error" role="alert"></div></form></dialog>
+  <dialog id="control-dialog" class="control-dialog" aria-labelledby="control-heading">
+    <div class="control-shell">
+      <div class="control-head"><div><span class="eyebrow">CODING BRAIN · CONTROL CENTER</span><h2 id="control-heading">Set up your coding workspace</h2><p id="control-subtitle">Check your local engine, install requirements and connect optional providers.</p></div><button class="icon-btn" id="control-close" aria-label="Close control center">✕</button></div>
+      <nav class="control-tabs" aria-label="Control center views"><button id="control-tab-setup" class="active" type="button">Setup</button><button id="control-tab-providers" type="button">AI Providers</button><button id="control-tab-updates" type="button">Updates</button></nav>
+      <div id="control-feedback" class="control-feedback" role="status" aria-live="polite" aria-atomic="true" hidden>
+        <span id="control-feedback-icon" class="control-feedback-icon" aria-hidden="true"></span>
+        <div class="control-feedback-copy"><strong id="control-feedback-title">Checking system requirements</strong><p id="control-feedback-detail">Reading the installed Coding Brain environment…</p></div>
+        <span id="control-feedback-elapsed" class="control-feedback-elapsed" hidden></span>
+      </div>
+      <section id="control-setup" class="control-page"><div class="setup-hero"><div class="setup-emblem">◇</div><div><h3>Your Coding Brain environment</h3><p id="setup-message">Checking the installed environment…</p></div></div><div id="setup-components" class="component-grid"></div><div class="control-actions"><button class="primary-button" id="full-setup" type="button">Install & verify full system</button><button class="secondary-button" id="setup-check" type="button">Refresh checks</button><button class="secondary-button" id="deep-check" type="button">Deep system test</button><button class="secondary-button" id="setup-continue" type="button">Continue to workspace</button></div><p class="control-note">System changes run through the official Coding Brain installer after your approval. Restart/elevation and account sign-in may require your interaction.</p></section>
+      <section id="control-providers" class="control-page" hidden><div class="panel-heading provider-heading"><div><h3>Models and connected agents</h3><p>Sign-in and supervisor activation are verified separately. Local Qwen remains the default worker.</p></div><button type="button" class="secondary-button" id="refresh-providers" aria-label="Recheck provider connections">↻ &nbsp; Recheck connections</button></div><div id="provider-list" class="provider-list" aria-live="polite"></div><p class="control-note">Signing in is handled by each provider's official CLI. This app never asks for, saves, or displays account passwords, session cookies, or API keys.</p></section>
+      <section id="control-updates" class="control-page" hidden><div class="setup-hero"><div class="setup-emblem">↻</div><div><h3>Stay up to date</h3><p>Updates are pulled from Coding Brain's verified stable release channel. Draft PRs are not installed.</p></div></div><div class="control-actions"><button class="primary-button" id="check-updates" type="button">Check for updates</button><button class="secondary-button" id="apply-update" type="button">Install latest stable</button><button class="secondary-button" id="repair-install" type="button">Repair installation</button></div><div id="maintenance-log" class="maintenance-log" role="log" aria-live="polite">No update check has run yet.</div></section>
+    </div>
+  </dialog>
+  <!-- A native HTML dialog styled as part of Coding Brain; not a window.alert/confirm.
+       A click on Continue is the *only* affirmative result. Cancel and Escape refuse. -->
+  <dialog id="action-dialog" class="action-dialog" aria-labelledby="action-heading" aria-describedby="action-description">
+    <form method="dialog" class="action-card">
+      <div class="action-symbol" aria-hidden="true">◇</div>
+      <span class="eyebrow">CODING BRAIN · CONFIRM ACTION</span>
+      <h2 id="action-heading">Confirm action</h2>
+      <p id="action-description">Confirm what Coding Brain should do.</p>
+      <div class="action-controls">
+        <button id="action-cancel" class="secondary-button" type="submit" value="cancel">Cancel</button>
+        <button id="action-approve" class="primary-button" type="submit" value="proceed">Continue</button>
+      </div>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
