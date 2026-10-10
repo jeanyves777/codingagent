@@ -34,6 +34,14 @@ class InProcess:
 
 
 @pytest.fixture
+def tmp_path(tmp_path):
+    """As in production, every path in its long form: Windows runners give tmp_path with 8.3
+    short names (RUNNER~1) while the desktop resolves the chosen folder (runneradmin); on a real
+    PC both the data folder (LOCALAPPDATA) and a picked project folder are long paths."""
+    return tmp_path.resolve()
+
+
+@pytest.fixture
 def desktop(world, monkeypatch):
     monkeypatch.setattr(core, "shared", lambda: InProcess(world["engine"]))
     workspace = Workspace(home=world["home"], executable="unused")
