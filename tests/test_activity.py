@@ -565,7 +565,8 @@ def test_snapshot_never_reads_a_link_to_a_file_or_folder_outside(tmp_path, monke
     assert not any(path.startswith(os.path.realpath(outside)) for path in opened)  # never opened, not just not kept
     assert b"OUTSIDE-SENTINEL" not in persisted(tmp_path / "store")
     # Refusing the read changed nothing in the user's workspace.
-    assert os.readlink(workspace / "link.txt") == str(outside / "secret.txt")
+    # (os.readlink returns a \\?\-prefixed target on Windows, so compare the files, not the strings.)
+    assert (workspace / "link.txt").is_symlink() and os.path.samefile(workspace / "link.txt", outside / "secret.txt")
     assert (outside / "secret.txt").read_text() == "OUTSIDE-SENTINEL-7731"
     if git:
         assert git_status(workspace) == status
