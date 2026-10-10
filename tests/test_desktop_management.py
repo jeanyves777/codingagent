@@ -127,11 +127,22 @@ def test_readiness_detects_installer_support_without_mutating_engine(tmp_path,mo
 
 def test_backend_ui_has_wizard_and_provider_management():
     root=Path(__file__).resolve().parents[1]/'desktop_ui'/'static'
-    html=(root/'index.html').read_text()
-    js=(root/'app.js').read_text()
+    html=(root/'index.html').read_text(encoding='utf-8')
+    js=(root/'app.js').read_text(encoding='utf-8')
     assert 'id="control-dialog"' in html
     assert 'id="control-providers"' in html
     assert 'id="control-updates"' in html
     assert "firstRun();" in js
     assert 'install_full' in js and '/api/setup' in js
     assert not ('eval(' in js or 'innerHTML =' in js)
+
+
+def test_provider_cards_reflect_actual_core_enabled_state(tmp_path, monkeypatch):
+    w=Workspace(home=tmp_path,executable='codingbrain')
+    cfg=tmp_path/'.local'/'CodingBrain'/'config'
+    cfg.mkdir(parents=True)
+    (cfg/'config.json').write_text(json.dumps({'supervisors':{'claude':{'enabled':True},'codex':{'enabled':False}}}))
+    flags={p['id']:p.get('supervisor_enabled') for p in w.configured_providers()}
+    assert flags['claude'] is True
+    assert flags['codex'] is False
+    assert flags['grok'] is None

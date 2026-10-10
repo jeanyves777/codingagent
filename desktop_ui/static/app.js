@@ -446,10 +446,11 @@
         }); actions.append(sign);
       }
       if (['claude','codex'].includes(provider.id)) {
-        const toggle = document.createElement('button'); toggle.textContent = 'Enable supervisor';
+        const toggle = document.createElement('button'); toggle.textContent = provider.supervisor_enabled ? 'Disable supervisor' : 'Enable supervisor';
         toggle.addEventListener('click', async () => {
-          if (!confirm(`Enable ${provider.name} as a governed Coding Brain supervisor? Existing budget limits remain in effect.`)) return;
-          try { const res=await api(`/api/providers/${provider.id}/configure`,'POST',{enabled:true}); toast(res.message); }
+          const enabling = !provider.supervisor_enabled;
+          if (!confirm(`${enabling ? 'Enable' : 'Disable'} ${provider.name} as a governed Coding Brain supervisor? Existing budget limits remain in effect.`)) return;
+          try { const res=await api(`/api/providers/${provider.id}/configure`,'POST',{enabled:enabling}); toast(res.message); await reloadControl(); }
           catch(e) { toast(e.message); }
         }); actions.append(toggle);
       }

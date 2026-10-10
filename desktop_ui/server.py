@@ -110,6 +110,7 @@ class Job:
 
 class Workspace:
     def __init__(self, home: Path | None = None, executable: str | None = None):
+        self._home_override = home is not None
         self.home = (home or Path.home()).resolve()
         self.executable = executable
         self.secret = secrets.token_urlsafe(32)
@@ -122,6 +123,9 @@ class Workspace:
 
     def _desktop_state_path(self) -> Path:
         # Desktop preferences are separate from brain configuration and its updater.
+        # Tests passing an explicit home must never write into the runner's real APPDATA.
+        if self._home_override:
+            return self.home / ".codingbrain-desktop" / "preferences.json"
         if os.name == "nt":
             base = Path(os.environ.get("LOCALAPPDATA", str(self.home / "AppData" / "Local")))
         else:
@@ -154,6 +158,25 @@ class Workspace:
                     else "First publish/update to a Coding Brain release containing the full installer")
         report["onboarding_completed"] = self.first_run_completed()
         return report
+
+    def configured_providers(self) -> list[dict]:
+        providers = management.providers_snapshot()
+        if self._home_override:
+            base = self.home / ".local" / "CodingBrain"
+        elif os.name == "nt":
+            base = Path(os.environ.get("CODINGBRAIN_HOME") or
+                        (Path(os.environ.get("LOCALAPPDATA", str(self.home / "AppData" / "Local"))) / "CodingBrain"))
+        else:
+            base = Path(os.getenv("CODINGBRAIN_HOME") or (self.home / ".local" / "CodingBrain"))
+        try:
+            conf = json.loads((base / "config" / "config.json").read_text(encoding="utf-8"))
+            supervisors = conf.get("supervisors", {})
+        except (OSError, ValueError, TypeError):
+            supervisors = {}
+        for provider in providers:
+            if provider["id"] in {"claude", "codex"}:
+                provider["supervisor_enabled"] = bool(supervisors.get(provider["id"], {}).get("enabled"))
+        return providers
 
     def sign_in(self, provider_id: str) -> None:
         # Authentication is always handled by the vendor's own interactive CLI.
@@ -451,7 +474,7 @@ def create_app(state: Workspace | None = None) -> FastAPI:
 
     @app.get("/api/setup", dependencies=[Depends(auth)])
     def setup_status():
-        return {"readiness":state.installation_status(), "providers":management.providers_snapshot()}
+        return {"readiness":state.installation_status(), "providers":state.configured_providers()}
 
     @app.post("/api/setup/completed", dependencies=[Depends(auth)])
     def set_onboarding(body: Onboarding):
