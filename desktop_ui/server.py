@@ -123,6 +123,9 @@ class Workspace:
         self.home = (home or Path.home()).resolve()
         self.executable = executable
         self.secret = secrets.token_urlsafe(32)
+        # Identifies this bridge process: a changed boot id tells the window the bridge restarted
+        # and every in-memory job it was following is gone.
+        self.boot = uuid.uuid4().hex
         self.project: Path | None = None
         self.jobs: dict[str, Job] = {}
         self.active: str | None = None
@@ -199,14 +202,30 @@ class Workspace:
                     detail=f"Typed engine API {info.get('api_version')} (engine {info.get('engine_version')})")
         return {"providers": providers}
 
+    def installed_version(self) -> str | None:
+        """The active engine version from app/current.json: one small file read, no process."""
+        try:
+            version = json.loads((self._brain_home() / "app" / "current.json").read_text(encoding="utf-8"))["version"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return version if isinstance(version, str) else None
+
+    def health(self) -> dict:
+        """Cheap liveness for the window's heartbeat: never starts the engine or a probe."""
+        active = self.jobs.get(self.active) if self.active else None
+        return {"ok": True, "boot": self.boot, "installed_version": self.installed_version(),
+                "active": {"id": active.id, "status": active.status} if active else None}
+
     def engine_status(self, refresh: bool = False) -> dict:
         """Truthful installed-engine/model readiness; the local UI is a separate process.
 
-        Cache cheap probes briefly so a slow provider CLI doesn't freeze chat or activity.
+        Cache cheap probes briefly so a slow provider CLI doesn't freeze chat or activity. A
+        switched installed version (an update or rollback) always invalidates the cache.
         """
         now = time.monotonic()
+        installed = self.installed_version()
         cached = getattr(self, "_engine_status_cache", None)
-        if not refresh and cached and now - cached[0] < 20:
+        if not refresh and cached and now - cached[0] < 20 and cached[2] == installed:
             return cached[1]
         try:
             command = self.cli_command()
@@ -246,7 +265,7 @@ class Workspace:
             "chat_available": chat, "title": title, "detail": detail, "next_action": next_action}
         if typed:
             report["providers"] = typed["providers"]
-        self._engine_status_cache = (now, report)
+        self._engine_status_cache = (now, report, installed)
         return report
 
     def update_status(self, channel: str = "stable") -> dict:
@@ -677,6 +696,10 @@ def create_app(state: Workspace | None = None) -> FastAPI:
         return {"project": {"name": state.project.name, "path": str(state.project),
                             "git": state.git_branch(state.project)} if state.project else None,
                 "projects": state.projects(), "active": active.view() if active else None}
+
+    @app.get("/api/health", dependencies=[Depends(auth)])
+    def health():
+        return state.health()
 
     @app.get("/api/engine/status", dependencies=[Depends(auth)])
     def engine_status(refresh: bool = False):

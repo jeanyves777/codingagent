@@ -26,6 +26,11 @@
   let gitLatest = null;
   let maintenancePoll = null;
   let feedbackTimer = null;
+  let bridgeBoot = null;
+  let installedVersion;
+  let connectionLost = false;
+  let heartbeatFailures = 0;
+  let heartbeatTimer = null;
   const busyButtons = new WeakMap();
 
   function busyButton(button, working) {
@@ -108,20 +113,35 @@
   async function api(path, method = 'GET', body) {
     const options = {method, headers: {'X-CodingBrain-Token': token || ''}};
     if (body !== undefined) { options.headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(body); }
-    // Status checks are read-only, so a timeout cannot accidentally duplicate a task.
-    // Never automatically timeout or retry mutating requests: they may have taken effect.
-    const readOnlyStatus = method === 'GET' && path.startsWith('/api/engine/status');
-    const controller = readOnlyStatus ? new AbortController() : null;
+    // GETs are read-only, so a timeout cannot accidentally duplicate a task, and a hung read can
+    // never wedge a poll loop. Never automatically timeout or retry mutating requests: they may
+    // have taken effect.
+    const engineStatus = method === 'GET' && path.startsWith('/api/engine/status');
+    const controller = method === 'GET' ? new AbortController() : null;
     if (controller) options.signal = controller.signal;
-    const deadline = controller ? setTimeout(() => controller.abort(), 35000) : null;
+    const deadline = controller ? setTimeout(() => controller.abort(), engineStatus ? 35000 : 15000) : null;
     try {
-      const response = await fetch(path, options);
+      let response;
+      try { response = await fetch(path, options); }
+      catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        const offline = new Error('Could not reach the Coding Brain UI bridge'); offline.offline = true; throw offline;
+      }
       let result;
       try { result = await response.json(); } catch { throw new Error('Could not reach the Coding Brain UI bridge'); }
-      if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'Request failed');
+      if (!response.ok) {
+        const failure = new Error(typeof result.detail === 'string' ? result.detail : 'Request failed');
+        failure.status = response.status;
+        throw failure;
+      }
       return result;
     } catch (error) {
-      if (error?.name === 'AbortError') throw new Error('Engine readiness check timed out. Open Setup to diagnose the installed engine, then retry.');
+      if (error?.name === 'AbortError') {
+        const timedOut = new Error(engineStatus ? 'Engine readiness check timed out. Open Setup to diagnose the installed engine, then retry.'
+          : 'The Coding Brain UI bridge did not answer in time');
+        timedOut.offline = !engineStatus;
+        throw timedOut;
+      }
       throw error;
     } finally {
       if (deadline !== null) clearTimeout(deadline);
@@ -331,6 +351,8 @@
       new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit'});
     $('branch-name').textContent = '◇ ' + (snapshot.branch || 'Detached HEAD');
     if (signature === gitLastSignature) return;
+    // Files changed on disk (by a task, an editor or a checkout): refresh the open file tree too.
+    if (gitLastSignature && !$('file-panel').hidden) loadTree();
     gitLastSignature = signature;
     $('git-current-branch').textContent = snapshot.branch || 'Unknown branch';
     $('git-current-head').textContent = snapshot.head ?
@@ -504,18 +526,28 @@
   async function loadFolder(folder = '', parent = $('file-tree'), depth = 0) {
     try {
       const response = await api('/api/tree?path=' + encodeURIComponent(folder));
-      parent.replaceChildren();
+      // Build off-screen, including folders the user has open, then swap in one step: a live
+      // refresh never collapses the tree, flickers or jumps the scroll position.
+      const rows = [];
+      const nested = [];
       for (const entry of response.entries) {
-        parent.append(rowFor(entry, depth));
+        const row = rowFor(entry, depth);
+        rows.push(row);
+        if (entry.dir && expanded.has(entry.path)) {
+          nested.push(loadFolder(entry.path, row.querySelector(':scope > .tree-children'), depth + 1));
+        }
       }
-      if (!folder) $('file-count').textContent = `${response.entries.length} items`;
+      await Promise.all(nested);
       if (response.entries.length === 0) {
         const empty = document.createElement('p');
         empty.className = 'muted';
         empty.textContent = 'Folder is empty.';
-        parent.append(empty);
+        rows.push(empty);
       }
+      parent.replaceChildren(...rows);
+      if (!folder) $('file-count').textContent = `${response.entries.length} items`;
     } catch (e) {
+      if (folder && e.status === 400) expanded.delete(folder);  // the folder was deleted or renamed
       parent.textContent = e.message;
     }
   }
@@ -657,8 +689,75 @@
         }
         return;
       }
-    } catch(e) { $('footer-status').textContent = 'Connection lost'; toast(e.message); }
+    } catch(e) {
+      if (e.status === 404) {
+        // The bridge restarted and no longer knows this job; stop following it instead of
+        // polling a missing task forever.
+        endLostJob('This session is no longer tracked by the desktop service (it restarted). Check Activity or the task list before retrying.');
+      } else {
+        // The heartbeat owns reconnecting and its single notice; don't toast every 750 ms.
+        $('footer-status').textContent = e.offline ? 'Connection lost — retrying' : 'Task status unavailable — retrying';
+        if (!e.offline) toast(e.message);
+      }
+    }
     finally { polling = false; }
+  }
+
+  function endLostJob(text) {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+    activeJob = null;
+    $('run-status').hidden = true;
+    busySend(false);
+    hideTyping();
+    message('CODING BRAIN', text, 'system');
+  }
+
+  function setConnection(online, label) {
+    $('connection-dot').classList.toggle('green', online);
+    $('connection-dot').classList.toggle('red', !online);
+    $('connection-label').textContent = label;
+  }
+
+  function scheduleHeartbeat() {
+    clearTimeout(heartbeatTimer);
+    // Back off while disconnected (1 s, 2 s, 4 s … 30 s); idle slowly while the window is hidden.
+    const delay = connectionLost ? Math.min(30000, 1000 * 2 ** Math.max(0, heartbeatFailures - 1))
+      : document.hidden ? 30000 : 5000;
+    heartbeatTimer = setTimeout(heartbeat, delay);
+  }
+
+  async function heartbeat() {
+    try {
+      const health = await api('/api/health');
+      const restarted = bridgeBoot !== null && health.boot !== bridgeBoot;
+      const recovered = connectionLost;
+      bridgeBoot = health.boot;
+      heartbeatFailures = 0;
+      connectionLost = false;
+      setConnection(true, 'Desktop connected');
+      if (restarted && activeJob) endLostJob('The desktop service restarted; this session is no longer tracked. Check Activity before retrying.');
+      if (installedVersion !== undefined && health.installed_version !== installedVersion) {
+        // An update or rollback switched the engine underneath us: re-read readiness now
+        // instead of showing the old version's banner until someone clicks Refresh.
+        toast(`Coding Brain engine is now v${health.installed_version || '?'}`);
+        engineNoticeDismissed = false;
+        refreshEngine({force: true});
+      }
+      installedVersion = health.installed_version;
+      if (recovered || restarted) { toast('Reconnected to Coding Brain'); refresh(); }
+    } catch (error) {
+      if (error.status === 403) {
+        setConnection(false, 'Session expired — reopen Coding Brain');
+        return;  // a new bridge has a new token; retrying with the old one cannot succeed
+      }
+      heartbeatFailures++;
+      if (!connectionLost) toast('Lost connection to the Coding Brain desktop service. Reconnecting…');
+      connectionLost = true;
+      setConnection(false, `Reconnecting… (attempt ${heartbeatFailures})`);
+      if (!activeJob) $('footer-status').textContent = 'Desktop service unreachable';
+    }
+    scheduleHeartbeat();
   }
 
   async function submit() {
@@ -776,8 +875,11 @@
   $('git-refresh').addEventListener('click', () => refreshGit(true));
   $('branch-name').addEventListener('click', () => $('tab-git').click());
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && currentProject) refreshGit(true);
+    if (document.hidden) return;
+    if (currentProject) refreshGit(true);
+    heartbeat();  // check right away on return instead of waiting out the hidden-window interval
   });
+  window.addEventListener('online', () => heartbeat());
   $('collapse-explorer').addEventListener('click', () => setExplorerVisibility(false));
   $('open-explorer').addEventListener('click', () => setExplorerVisibility(true));
   $('profile-trigger').addEventListener('click', () => {
@@ -1232,6 +1334,12 @@
   // Poll only while this desktop is visible. This is near-live local state,
   // not a remote GitHub watcher or a mutating Git operation.
   setInterval(() => { if (currentProject && !document.hidden) refreshGit(); }, 3000);
+  // Projects without Git get no change signal from the Git snapshot; re-read their open tree.
+  setInterval(() => {
+    if (currentProject && !currentProject.git && !document.hidden && !$('file-panel').hidden) loadTree();
+  }, 8000);
+  // Readiness changes on its own (Ollama stopped, a supervisor signed out): re-check quietly.
+  setInterval(() => { if (!document.hidden && !connectionLost && !activeJob) refreshEngine({quiet: true}); }, 60000);
   if (!token) message('CODING BRAIN', 'Missing local session token. Launch this page using python -m desktop_ui.', 'system');
-  else { renderEmptyExplorer(); refresh(); firstRun(); }
+  else { renderEmptyExplorer(); refresh(); firstRun(); heartbeat(); }
 })();

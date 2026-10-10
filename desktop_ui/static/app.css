@@ -200,6 +200,7 @@ button.is-loading::before { content:'';display:inline-block;width:12px;height:12
 #engine-banner-close{border:0;background:transparent;color:#ccbda9;font-size:24px;line-height:1;padding:3px 7px;}
 .connection-pill{white-space:nowrap;max-width:310px;overflow:hidden;text-overflow:ellipsis;}
 .dot.amber{background:#e9b879;box-shadow:0 0 9px #e9b87955;}
+.dot.red{background:#e57f72;box-shadow:0 0 9px #e57f7255;}
 .provider-badge.model-not-ready{background:#3f3029;color:#efc596;border-color:#896850;}
 .provider-badge.model-detected{background:#193d36;color:#9decd0;border-color:#467667;}
 @media(max-width:940px){.engine-banner-copy span{font-size:10px}.engine-banner{padding:10px 14px}.engine-banner-action{padding:7px 9px}}

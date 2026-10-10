@@ -134,7 +134,7 @@
            <div class="explorer-footer"><button type="button" id="branch-name" class="git-footer-branch" title="Open Git history and branches">◇ No repository</button><span id="file-count"></span></div>
         </aside>
       </div>
-      <footer class="bottombar"><span><span class="dot green"></span> Desktop connected</span><span id="footer-status">Ready</span><span id="footer-private">Private · 127.0.0.1</span></footer>
+      <footer class="bottombar"><span role="status" aria-live="polite"><span class="dot green" id="connection-dot"></span> <span id="connection-label">Desktop connected</span></span><span id="footer-status">Ready</span><span id="footer-private">Private · 127.0.0.1</span></footer>
     </section>
   </div>
   <dialog id="project-dialog" class="project-dialog"><form method="dialog"><header><h2>Open a project</h2><button class="icon-btn" value="cancel" aria-label="Close">✕</button></header><p>Choose a folder on your computer or select a recent project.</p><div class="picker-row"><input id="path-input" type="text" placeholder="C:\Users\...\Projects\my-app" autocomplete="off"><button id="open-path" type="button" class="primary-button">Open</button></div><div class="picker-row"><button type="button" id="native-picker" class="secondary-button">Browse folders…</button></div><h3>Recent projects</h3><div id="recent-projects" class="recent-projects"></div><div class="picker-error" id="picker-error" role="alert"></div></form></dialog>
