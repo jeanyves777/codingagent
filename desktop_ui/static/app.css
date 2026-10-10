@@ -250,3 +250,6 @@ button.is-loading::before { content:'';display:inline-block;width:12px;height:12
 .git-author{max-width:125px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .git-footnote{margin:16px 0 0;line-height:1.55;border-top:1px solid #30433e;padding-top:10px}
 @media(max-width:900px){.git-panel{padding:12px 9px}.git-summary{gap:3px}}
+
+.git-footer-branch{border:0;background:transparent;color:#9cdec9;font:600 11px Inter,"Segoe UI",sans-serif;max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;padding:3px 5px;border-radius:6px}
+.git-footer-branch:hover,.git-footer-branch:focus-visible{background:#27483d;color:#eafff5}
