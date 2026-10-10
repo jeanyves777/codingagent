@@ -210,6 +210,10 @@ def test_end_of_input_or_empty_piped_answer_is_never_consent(world, monkeypatch)
     ("how do I write a unit test?", "question"),
     ("I had a long day", "chat"),
     ("the build is weird", "chat"),
+    ("CHECK IS ANY PROJECT EXIST", "projects"),  # the owner's real message, typed in New project mode
+    ("do I have any projects?", "projects"),
+    ("how many projects are there", "projects"),
+    ("Fix the bug in the calculator project", "implement"),  # a change, not a listing
 ])
 def test_fallback_routing_without_a_model(world, message, intent):
     bot = assistant(world, FakeModel(unavailable=True))
