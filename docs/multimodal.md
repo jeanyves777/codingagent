@@ -74,9 +74,11 @@ codingbrain inspect-ui http://localhost:3000 --compare C:\Designs\dashboard.png
 
 ## What happens with an attachment
 
-1. **Permission.** Only files you name are read. Every file is refused if it is a link or
-   junction, a secret (`.env`, keys, credential files), Coding Brain's own data, or outside
-   `attachments.allowed_roots` when you set it.
+1. **Permission.** Only files you name are read. Every file is refused if it, or any folder in
+   its path, is a symbolic link or a Windows junction (any reparse point, checked on every path
+   component before anything is read, also on Python 3.11); if it is a secret (`.env`, keys,
+   credential files) or Coding Brain's own data; or if it is outside `attachments.allowed_roots`
+   when you set it.
 2. **Format.** The format is identified from the content, not the extension. Programs, archives,
    legacy `.doc`/`.xls`, password-protected and corrupted files are refused with a reason.
 3. **Isolation.** The file is copied to a private folder and parsed in a separate isolated Python

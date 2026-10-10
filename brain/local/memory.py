@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sqlite3
+import stat as stat_module
 import subprocess
 import time
 from contextlib import contextmanager
@@ -111,14 +112,87 @@ def claude_project_dir(root: Path) -> Path:
 
 
 def _glob(root: Path, pattern: str) -> list[Path]:
+    """Candidate files for a project-local pattern. Listing only: nothing is opened here, and every
+    candidate still has to pass project_file() before it is read."""
     if "**" in pattern:
         base, _, rest = pattern.partition("**/")
         folder = root / base
-        return sorted(path for path in folder.rglob(rest or "*") if path.is_file()) if folder.is_dir() else []
-    return sorted(path for path in root.glob(pattern) if path.is_file())
+        return sorted(path for path in folder.rglob(rest or "*") if project_file(root, path)) if folder.is_dir() else []
+    return sorted(path for path in root.glob(pattern) if project_file(root, path))
 
 
-def _source(adapter, agent, kind, path: Path | None, scope, ref=None, data: bytes | None = None) -> dict:
+REPARSE_POINT = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def _is_link(path: Path) -> bool:
+    """A symbolic link, or on Windows any reparse point (junctions included). The attribute check
+    does not depend on Path.is_junction(), which Python 3.11 lacks."""
+    info = os.lstat(path)
+    if stat_module.S_ISLNK(info.st_mode):
+        return True
+    if getattr(info, "st_file_attributes", 0) & REPARSE_POINT:
+        return True
+    junction = getattr(path, "is_junction", None)
+    return bool(junction and junction())
+
+
+def project_file(root: Path, path: Path) -> bool:
+    """A project-local source may be read only if it is a regular file inside the project, reached
+    without following any symbolic link or junction (an in-project CLAUDE.md that links to a file
+    elsewhere would otherwise import outside text automatically), and its path does not look like a
+    secret. Checked before anything is opened or hashed, and again just before reading."""
+    root = root.resolve()
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    if not relative.parts or ".." in relative.parts or NEVER_READ.search(relative.as_posix()):
+        return False
+    current = root
+    for part in relative.parts:
+        current = current / part
+        try:
+            if _is_link(current):
+                return False
+        except OSError:
+            return False
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat_module.S_ISREG(info.st_mode) and path.resolve().is_relative_to(root)
+
+
+def read_project_file(root: Path, path: Path, limit: int = MAX_FILE) -> bytes | None:
+    """Read a project-local source after re-validating it (time of check close to time of use): the
+    final component is opened without following links where the platform allows, and the opened file
+    must be the same regular file that was checked."""
+    if not project_file(root, path):
+        return None
+    checked = os.lstat(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    with os.fdopen(descriptor, "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if not stat_module.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino):
+            return None
+        if opened.st_size > limit:
+            return b""
+        return handle.read(limit + 1)[:limit]
+
+
+def _source(adapter, agent, kind, path: Path | None, scope, ref=None, data: bytes | None = None,
+            root: Path | None = None) -> dict | None:
+    if data is None and path is not None:
+        if scope == "project_local":
+            data = read_project_file(root, path) if root is not None else None
+            if data is None:
+                return None
+        elif NEVER_READ.search(path.name):
+            return None
     stat = path.stat() if path and path.exists() else None
     if data is None and path is not None:
         data = path.read_bytes() if stat and stat.st_size <= MAX_FILE else b""
@@ -134,8 +208,11 @@ def discover(root: Path, brain_store: Path | None = None) -> list[dict]:
     found, seen = [], set()
 
     def add(source):
-        # Secret-looking files are never read. Judge the path inside the project (or the file name
-        # for agent memory elsewhere), not folders above it whose names the user chose.
+        # Secret-looking and out-of-project files were refused before reading (project_file and
+        # _source); this second check judges the path inside the project (or the file name for agent
+        # memory elsewhere), not folders above it whose names the user chose.
+        if source is None:
+            return
         path = Path(source["path"]) if source.get("path") else None
         relative = path.relative_to(root).as_posix() if path and path.is_relative_to(root) else (path.name if path else "")
         if source["ref"] not in seen and not (relative and NEVER_READ.search(relative)):
@@ -144,27 +221,27 @@ def discover(root: Path, brain_store: Path | None = None) -> list[dict]:
     for agent, patterns in INSTRUCTION_FILES.items():
         for pattern in patterns:
             for path in _glob(root, pattern):
-                add(_source("instructions", agent, "instructions", path, "project_local"))
-    opencode = next((root / name for name in ("opencode.json", "opencode.jsonc") if (root / name).exists()), None)
+                add(_source("instructions", agent, "instructions", path, "project_local", root=root))
+    opencode = next((root / name for name in ("opencode.json", "opencode.jsonc") if project_file(root, root / name)), None)
     if opencode:
         try:
-            config = json.loads(re.sub(r"//[^\n]*", "", opencode.read_text(encoding="utf-8")))
+            config = json.loads(re.sub(r"//[^\n]*", "", (read_project_file(root, opencode) or b"{}").decode("utf-8")))
         except (ValueError, OSError):
             config = {}
         for pattern in config.get("instructions") or []:
             if isinstance(pattern, str) and not pattern.startswith(("http://", "https://", "/", "~")) and ".." not in pattern:
                 for path in _glob(root, pattern):
-                    add(_source("instructions", "opencode", "instructions", path, "project_local"))
+                    add(_source("instructions", "opencode", "instructions", path, "project_local", root=root))
     documents = 0
     for kind, patterns in DOCUMENTS.items():
         for pattern in patterns:
             for path in _glob(root, pattern):
                 if documents < MAX_DOCS:
                     documents += 1
-                    add(_source("documents", "project", kind, path, "project_local"))
+                    add(_source("documents", "project", kind, path, "project_local", root=root))
     for pattern in DESIGN_SYSTEM:  # the design system: tokens, theme and global styles
         for path in _glob(root, pattern)[:3]:
-            add(_source("design_system", "project", "design_system", path, "project_local"))
+            add(_source("design_system", "project", "design_system", path, "project_local", root=root))
     head = _git(root, "rev-parse", "HEAD")
     if head:
         add(_source("git", "git", "history", None, "project_local", ref=f"git:{root}",
@@ -336,7 +413,15 @@ def parse_source(source: dict, root: Path) -> list[dict]:
         return _coding_brain_records(path)
     if path is None or source["size"] > MAX_FILE:
         return []
-    text = path.read_text(encoding="utf-8", errors="replace")
+    if source.get("scope") == "project_local":
+        data = read_project_file(root.resolve(), path)  # re-validated at import, not only at discovery
+        if data is None:
+            return []
+        text = data.decode("utf-8", errors="replace")
+    elif NEVER_READ.search(path.name):
+        return []
+    else:
+        text = path.read_text(encoding="utf-8", errors="replace")
     if adapter == "claude_sessions":
         records = []
         for number, line in enumerate(text.splitlines(), 1):
