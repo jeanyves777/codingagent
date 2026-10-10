@@ -18,7 +18,7 @@ def profile(workspace: Path) -> dict:
     config_path = workspace / "coding-brain.json"
     if config_path.exists():
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        if set(config) - {"test_profile", "test_command"}:
+        if set(config) - {"test_profile", "test_command", "preview"}:
             raise ValueError("Unknown sandbox configuration key")
         name = config.get("test_profile", "python")
         command = config.get("test_command", DEFAULTS.get(name))
@@ -99,3 +99,39 @@ def run_tests(workspace: Path, images: str | dict, should_cancel=None) -> dict:
         output.seek(0)
         text = output.read(16_000).decode("utf-8", errors="replace")
     return {"passed": code == 0, "exit_code": code, "profile": selected["name"], "output": text}
+
+
+BUILD_TIMEOUT = 300
+
+
+def run_build(workspace: Path, images: str | dict, command: list, output: Path) -> dict:
+    """A frontend preview build in the same offline sandbox as the tests. The project stays
+    read-only; the build may write only to /out (and a private /tmp)."""
+    selected = profile(workspace)
+    image = images if isinstance(images, str) else (images or {}).get(selected["name"])
+    if not image:
+        return {"passed": False, "output": "No sandbox image configured for profile"}
+    if not isinstance(command, list) or not 1 <= len(command) <= 20 or command[0] not in ALLOWED_EXECUTABLES \
+            or any(not isinstance(arg, str) or len(arg) > 300 for arg in command):
+        return {"passed": False, "output": "Preview build command is not allowed"}
+    name = "coding-brain-build-" + uuid.uuid4().hex
+    docker = ["docker", "run", "--rm", "--pull=never", "--name", name,
+              "--network=none", "--read-only", "--cap-drop=ALL",
+              "--security-opt=no-new-privileges", "--pids-limit=256",
+              "--memory=1g", "--memory-swap=1g", "--cpus=2",
+              "--user=65534:65534", "--tmpfs=/tmp:rw,nosuid,size=256m",
+              "--mount", f"type=bind,source={workspace.resolve()},target=/code,readonly",
+              "--mount", f"type=bind,source={output.resolve()},target=/out",
+              "--workdir=/code", "--env=HOME=/tmp", "--env=NPM_CONFIG_CACHE=/tmp/npm",
+              "--env=NODE_PATH=/opt/node_modules", "--env=BUILD_OUT=/out",
+              "--env=PATH=/opt/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+              image, *command]
+    with tempfile.TemporaryFile() as log:
+        try:
+            code = subprocess.run(docker, stdout=log, stderr=subprocess.STDOUT, timeout=BUILD_TIMEOUT).returncode
+        except subprocess.TimeoutExpired:
+            _remove(name)
+            return {"passed": False, "output": "Preview build timed out"}
+        log.seek(0)
+        text = log.read(16_000).decode("utf-8", errors="replace")
+    return {"passed": code == 0, "exit_code": code, "output": text}

@@ -9,6 +9,8 @@ on:
       - "pyproject.toml"
       - "tests/test_local.py"
       - "tests/test_memory.py"
+      - "tests/test_multimodal.py"
+      - "tests/multimodal_fixtures.py"
       - ".github/workflows/windows-local-install.yml"
       - ".github/workflows/release.yml"
       - "scripts/release_gate.py"
@@ -41,16 +43,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Unit tests for the local installation
+      - name: Install Tesseract OCR (real OCR tests on Windows)
+        shell: pwsh
+        run: |
+          choco install tesseract --no-progress -y
+          & 'C:\Program Files\Tesseract-OCR\tesseract.exe' --version
+      - name: Unit tests for the local installation and multimodal features
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check -e ".[dev]"
-          python -m pytest -q -p no:cacheprovider tests/test_local.py tests/test_memory.py tests/test_release_gate.py
+          python -m pytest -q -p no:cacheprovider -rs tests/test_local.py tests/test_memory.py tests/test_multimodal.py tests/test_release_gate.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # The junction regression must run, not skip, on every Windows Python (3.11 has no Path.is_junction).
           $junction = python -m pytest -q -p no:cacheprovider -rs tests/test_memory.py -k windows_junction 2>&1 | Out-String
           Write-Host $junction
           if ($LASTEXITCODE -ne 0 -or $junction -notmatch '1 passed' -or $junction -match 'skipped') { throw 'the Windows junction regression did not run and pass' }
+          $attach = python -m pytest -q -p no:cacheprovider -rs tests/test_multimodal.py -k windows_junction_in_the_path 2>&1 | Out-String
+          Write-Host $attach
+          if ($LASTEXITCODE -ne 0 -or $attach -notmatch '2 passed' -or $attach -match 'skipped') { throw 'the Windows attachment junction regression did not run and pass' }
       - name: Build an older and a newer release
         shell: pwsh
         run: |
@@ -59,11 +69,63 @@ jobs:
           python scripts/build_release.py --out dist/new --version "$version.post1" --constraints dist/old/constraints.txt
       - name: Install, recognize, update, refuse bad updates, roll back, uninstall
         run: ./installer/windows/verify.ps1 -Old dist/old -New dist/new
+      - name: Download the published v0.9.0 release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download v0.9.0 --repo "${{ github.repository }}" --dir dist/published-0.9.0
+      - name: Upgrade from the published v0.9.0 release with codingbrain update
+        run: ./installer/windows/verify-upgrade.ps1 -New dist/new -PublishedDir dist/published-0.9.0
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: verify-report-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.shell }}
-          path: verify-report.json
+          path: |
+            verify-report.json
+            upgrade-report.json
+
+  engines:
+    # Real engines, no mocks: the whole test suite (gauntlet included) with Tesseract OCR, a
+    # headless Chromium and an Ollama vision model receiving actual images.
+    name: real OCR, browser and vision model (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CODINGBRAIN_TEST_VISION_MODEL: qwen2.5vl:3b
+      CODINGBRAIN_TEST_CODING_MODEL: qwen2.5-coder:7b
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Tesseract, Python packages and Chromium
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q tesseract-ocr
+          python -m pip install --disable-pip-version-check -e ".[dev]"
+          python -m playwright install --with-deps chromium
+      - name: Install Ollama and pull the vision model
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          (ollama serve > ollama.log 2>&1 &)
+          sleep 5
+          ollama pull "$CODINGBRAIN_TEST_VISION_MODEL"
+          ollama pull "$CODINGBRAIN_TEST_CODING_MODEL"
+          curl -s http://localhost:11434/api/show -d "{\"model\": \"$CODINGBRAIN_TEST_VISION_MODEL\"}" | python -c "import json, sys; print('capabilities:', json.load(sys.stdin).get('capabilities'))"
+      - name: Full test suite with real engines
+        shell: bash  # bash -eo pipefail: a failing pytest fails the step despite tee
+        run: |
+          # The benchmark isolation test needs mount namespaces (root); it runs in the next step.
+          python -m pytest -q -p no:cacheprovider -rfs -s tests \
+            --deselect tests/test_gauntlet.py::test_isolation_masks_outermost_roots_and_is_probed 2>&1 | tee engines-test.log
+      - name: Benchmark isolation test (needs root for mount namespaces)
+        run: sudo -E env "PATH=$PATH" python -m pytest -q -p no:cacheprovider -rfs tests/test_gauntlet.py::test_isolation_masks_outermost_roots_and_is_probed
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: engines-test-log
+          path: |
+            engines-test.log
+            ollama.log
 
   sandbox:
     # Windows runners cannot run Linux containers: the real Docker sandbox is exercised here, with a
@@ -98,7 +160,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [verify, sandbox]
+    needs: [verify, engines, sandbox]
     runs-on: windows-latest
     permissions:
       contents: write

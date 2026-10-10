@@ -39,7 +39,7 @@ AUTHORITY = {
     6: "unverified imported notes",
 }
 CATEGORIES = ("goal", "architecture", "rule", "convention", "decision", "rejected", "feature", "task",
-              "bug", "plan", "history", "change", "repair", "note")
+              "bug", "plan", "history", "change", "repair", "note", "design", "requirement")
 SCOPES = ("project_local", "agent_private", "account_global", "generated")
 
 # Sources -------------------------------------------------------------------------------------
@@ -61,6 +61,14 @@ DOCUMENTS = {
               "docs/roadmap*.md", "CHANGELOG.md"],
     "docs": ["docs/*.md"],
 }
+DESIGN_SYSTEM = ["tailwind.config.js", "tailwind.config.ts", "tailwind.config.cjs", "tailwind.config.mjs",
+                 "design-tokens.json", "tokens.json", "src/theme.*", "src/styles/theme.*", "src/styles/tokens.*",
+                 "src/index.css", "src/globals.css", "src/app/globals.css", "app/globals.css", "styles/globals.css",
+                 "src/styles/variables.*", "src/styles/globals.css", "src/App.css", "styles.css", "style.css",
+                 "css/style.css", "src/assets/main.css", "src/assets/base.css"]
+CSS_VARIABLE = re.compile(r"(--[\w-]{2,60})\s*:\s*([^;{}\n]{1,80});")
+THEME_ENTRY = re.compile(r"""^\s*['"]?([\w-]{2,40})['"]?\s*:\s*['"](#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|hsla?\([^)]*\)|[\d.]+(?:px|rem|em))['"]""",
+                         re.M)
 NEVER_READ = re.compile(r"(^|/)(\.env[^/]*|.*secret.*|.*credential.*|.*\.pem|.*\.key|id_rsa.*|.*\.pfx)$", re.I)
 MAX_FILE = 256_000
 MAX_DOCS = 60
@@ -231,6 +239,9 @@ def discover(root: Path, brain_store: Path | None = None) -> list[dict]:
                 if documents < MAX_DOCS:
                     documents += 1
                     add(_source("documents", "project", kind, path, "project_local", root=root))
+    for pattern in DESIGN_SYSTEM:  # the design system: tokens, theme and global styles
+        for path in _glob(root, pattern)[:3]:
+            add(_source("design_system", "project", "design_system", path, "project_local", root=root))
     head = _git(root, "rev-parse", "HEAD")
     if head:
         add(_source("git", "git", "history", None, "project_local", ref=f"git:{root}",
@@ -443,6 +454,8 @@ def parse_source(source: dict, root: Path) -> list[dict]:
             if title else []
     if source["kind"] == "adr":
         return parse_adr(text, path.stem)
+    if adapter == "design_system":
+        return parse_design_system(text, path.name)
     default = {"instructions": "rule", "account_instructions": "rule", "memory": "note", "readme": "goal",
                "architecture": "architecture", "plans": "plan", "docs": "note"}.get(source["kind"], "note")
     records = parse_markdown(text, default)
@@ -452,6 +465,39 @@ def parse_source(source: dict, root: Path) -> list[dict]:
             first["category"] = "goal"
     if source["kind"] == "plans" and path.name.upper().startswith("CHANGELOG"):
         records = [dict(item, category="feature") for item in records if item["category"] in {"feature", "plan", "note"}][:40]
+    return records
+
+
+def parse_design_system(text: str, name: str, limit: int = 40) -> list[dict]:
+    """Design tokens as conventions to reuse: CSS custom properties, Tailwind theme values and
+    JSON token files. The current values are read from the file, so they are verified state."""
+    tokens = []
+    if name.endswith((".css", ".scss", ".less")):
+        tokens = [(match.group(1), match.group(2).strip()) for match in CSS_VARIABLE.finditer(text)]
+    elif name.endswith(".json"):
+        try:
+            def walk(node, prefix=""):
+                for key, value in (node.items() if isinstance(node, dict) else []):
+                    if isinstance(value, dict) and "value" in value and not isinstance(value["value"], dict):
+                        tokens.append((prefix + key, str(value["value"])))
+                    elif isinstance(value, dict):
+                        walk(value, f"{prefix}{key}.")
+                    elif isinstance(value, (str, int, float)):
+                        tokens.append((prefix + key, str(value)))
+            walk(json.loads(text))
+        except ValueError:
+            return []
+    else:
+        tokens = [(match.group(1), match.group(2)) for match in THEME_ENTRY.finditer(text)]
+    seen, records = set(), []
+    for token, value in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        records.append({"text": f"Design token {token}: {value[:60]} ({name}); reuse it instead of new literal values",
+                        "line": 0, "heading": "design system", "category": "design", "verified": True})
+        if len(records) >= limit:
+            break
     return records
 
 
@@ -623,10 +669,14 @@ class MemoryStore:
         key = checksum(normalize(text))[:20]
         now = time.time()
         with self.connect() as db:
-            existing = db.execute("SELECT id FROM records WHERE key=?", (key,)).fetchone()
+            existing = db.execute("SELECT id, verification FROM records WHERE key=?", (key,)).fetchone()
             record_id = existing["id"] if existing else "m" + key[:11]
             flags = ["suspicious"] if INJECTION.search(text) else []
             if existing:
+                # Re-recording never weakens what the user approved or what was verified.
+                strength = {"approved": 3, "verified": 2, "verified_in_code": 1}
+                if strength.get(existing["verification"], 0) > strength.get(verification, 0):
+                    verification = existing["verification"]
                 db.execute("UPDATE records SET authority=MIN(authority, ?), verification=?, updated_at=?, status='active' "
                            "WHERE id=?", (authority, verification, now, record_id))
             else:
@@ -899,7 +949,8 @@ class ProjectMemory:
         quarantined ones, with open conflicts marked for the user to decide."""
         words = set(normalize(goal).split())
         conflicted = {item["a"] for item in self.store.conflicts()} | {item["b"] for item in self.store.conflicts()}
-        wanted = {"rule", "convention", "decision", "rejected", "architecture", "goal", "bug", "task"}
+        wanted = {"rule", "convention", "decision", "rejected", "architecture", "goal", "bug", "task", "design",
+                  "requirement"}
         records = [record for record in self.all_records() if record["category"] in wanted and
                    "suspicious" not in record["flags"] and record["verification"] != "not_found_in_code"]
         records.sort(key=lambda record: (record["authority"], -len(words & set(normalize(record["text"]).split()))))
@@ -951,6 +1002,8 @@ class ProjectMemory:
             "active_work": pick("task", "plan"),
             "bugs_and_repairs": pick("bug", "repair"),
             "conventions": pick("convention"),
+            "design": pick("design", limit=6),
+            "requirements": pick("requirement", limit=8),
             "history": pick("history", limit=5),
             "rejected_and_prohibited": pick("rejected") + [item for item in pick("rule", limit=40)
                                                            if PROHIBITION.search(item["text"])][:6],
@@ -981,7 +1034,8 @@ class ProjectMemory:
 def render_profile(profile: dict) -> str:
     lines = []
     labels = [("purpose", "Purpose"), ("architecture", "Architecture"), ("rules", "Rules"),
-              ("decisions", "Decisions"), ("conventions", "Conventions"), ("completed", "Completed (verified)"),
+              ("decisions", "Decisions"), ("conventions", "Conventions"), ("design", "Design system and references"),
+              ("requirements", "Documented requirements"), ("completed", "Completed (verified)"),
               ("claimed_but_not_found", "Claimed done but not found in the code"), ("active_work", "Open work and plans"),
               ("bugs_and_repairs", "Known bugs and repair attempts"), ("rejected_and_prohibited", "Rejected or prohibited"),
               ("history", "Earlier agent sessions")]

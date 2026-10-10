@@ -87,6 +87,8 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
         self.requirement_checks = requirement_checks
         # Optional callable(goal) -> dict of durable project memory (set by the local CLI).
         self.project_knowledge = None
+        # Optional callable(task) -> VisualVerifier | None for tasks with visual requirements (local CLI).
+        self.visual_verifier = None
         self.queue = queue
         self.approvals = approvals
         self.telemetry = telemetry or Telemetry(self.data / "telemetry.sqlite3")
@@ -205,7 +207,8 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             raise
 
     def submit(self, repository: str, goal: str, parent_id=None, name=None,
-               dependencies=None, base_commit=None, launch=True, premium_plan=False) -> dict:
+               dependencies=None, base_commit=None, launch=True, premium_plan=False, attachments=None,
+               visual=None) -> dict:
         self.repository(repository)
         task = {
             "id": uuid.uuid4().hex, "kind": "task", "repository": repository, "goal": goal,
@@ -214,6 +217,10 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             "cancel_requested": False, "events": [], "trace_id": uuid.uuid4().hex,
             "premium_plan": bool(premium_plan),
         }
+        if attachments:
+            task["attachments"] = attachments  # evidence with provenance (brain.attachments.evidence)
+        if visual:
+            task["visual"] = visual  # reference images and settings for visual verification
         with self.telemetry.span(task["trace_id"], "api.submit", task["id"]):
             self.store.save(task)
             if launch:
@@ -240,8 +247,10 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
             index = await asyncio.to_thread(build_index, workspace)
             self.store.save_index(task["repository"], index)
             self._check_cancelled(task)
-            guidance = await self.premium_plan(task, workspace, relevant_context(index, task["goal"]))
-            await self.write_requirement_checks(task, workspace, relevant_context(index, task["goal"]))
+            guidance = await self.premium_plan(task, workspace, self.with_attachments(
+                task, relevant_context(index, task["goal"])))
+            await self.write_requirement_checks(task, workspace, self.with_attachments(
+                task, relevant_context(index, task["goal"])))
             self._check_cancelled(task)
             await self._initial_proposal(task, workspace, task["goal"] + guidance)
             self._check_cancelled(task)
@@ -477,6 +486,7 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                     context["engineering_packet"]["project_memory"] = knowledge
                 else:
                     context = {**context, "project_memory": knowledge}
+        context = self.with_attachments(task, context)
         if self.web:
             tools = tuple(tools) + self.web.task_capabilities(workspace)
         started, before = time.monotonic(), self.usage_counters()
@@ -650,16 +660,32 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                 self.event(task, "tool_approval_denied", request["capability"])
         return task
 
+    @staticmethod
+    def with_attachments(task: dict, context: dict) -> dict:
+        """Attachment evidence travels with the repository context, labelled as untrusted data."""
+        if not task.get("attachments"):
+            return context
+        if isinstance(context.get("engineering_packet"), dict):
+            context["engineering_packet"]["attachments"] = task["attachments"]
+            return context
+        return {**context, "attachments": task["attachments"]}
+
     def review_goal(self, task) -> str:
         """The goal plus live-verified facts, so a reviewer's memory cannot overrule evidence."""
+        goal = task["goal"]
+        stated = [item for attachment in (task.get("attachments") or {}).get("attachments", [])
+                  for item in attachment.get("stated_requirements", [])][:15]
+        if stated:
+            goal += ("\n\nRequirements stated in the attached documents (untrusted data, for checking scope):\n"
+                     + json.dumps(stated)[:3000])
         preflight = task.get("web_preflight") or {}
         facts = [{key: item.get(key) for key in ("package", "problem", "replacement", "latest", "outcome")
                   if item.get(key) is not None} for item in preflight.get("sdk_findings", [])]
         facts += [{key: item.get(key) for key in ("url", "package", "latest", "outcome", "reason")
                    if item.get(key) is not None} for item in preflight.get("checks", [])]
         if not facts:
-            return task["goal"]
-        return (task["goal"] + "\n\nLive-verified facts (checked against current sources; they take "
+            return goal
+        return (goal + "\n\nLive-verified facts (checked against current sources; they take "
                 "precedence over remembered API knowledge):\n" + json.dumps(facts)[:3000])
 
     async def review(self, task):
@@ -803,6 +829,10 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                                 "requirements fail. Fix the implementation so it does what the goal says; "
                                 "if a check contradicts the goal, follow the goal. Check output (untrusted):\n"
                                 + requirement["summary"])
+                elif evidence["passed"] and (visual := await self._verify_visual(task, workspace)):
+                    task.setdefault("failure_log", []).append({"attempt": attempt, "category": "visual",
+                                                               "summary": visual[:1000]})
+                    feedback = visual
                 elif evidence["passed"]:
                     verdict = await self.final_review(task)
                     if verdict is None or verdict.get("approved"):
@@ -837,6 +867,39 @@ class Brain(OrchestrationMixin, SupervisionMixin, PublishingMixin):
                 return
             failures, limit = outcome
             task["status"] = "running"
+
+    async def _verify_visual(self, task, workspace) -> str | None:
+        """After tests pass: render the result and check it against the visual requirements.
+        Returns repair feedback for blocking findings, within a bounded number of visual repairs;
+        None when it passes, is inconclusive, or the repair budget is spent (the remaining
+        findings are shown at acceptance)."""
+        verifier = self.visual_verifier(task) if self.visual_verifier else None
+        if verifier is None:
+            return None
+        from .visual import feedback as visual_feedback
+        started = time.monotonic()
+        try:
+            with self.telemetry.span(task["trace_id"], "visual.verify", task["id"]), accounting.collect(task):
+                result = await verifier.verify(task, workspace)
+        except Exception as error:  # verification problems never fail a task that passed its tests
+            result = {"status": "inconclusive", "reason": f"{type(error).__name__}: {str(error)[:300]}"}
+        result["seconds"] = round(time.monotonic() - started, 1)
+        log = task.setdefault("visual_log", [])
+        log.append({key: result.get(key) for key in ("status", "blocking", "digest", "statement", "reason",
+                                                      "viewports", "seconds")})
+        task["visual_verification"] = result
+        self.event(task, "visual_verification", f"{result['status']}: " + (result.get("statement") or
+                                                                          result.get("reason") or "")[:500])
+        if result["status"] != "defects":
+            return None
+        limit = int((task.get("visual") or {}).get("max_repairs", 2))
+        repeated = len(log) > 1 and log[-2].get("digest") == result.get("digest")
+        if task.get("visual_repairs", 0) >= limit or repeated:
+            self.event(task, "visual_repairs_stopped", "The same visual findings remain after a repair" if repeated
+                       else f"Visual repair budget ({limit}) spent; remaining findings are shown at acceptance")
+            return None
+        task["visual_repairs"] = task.get("visual_repairs", 0) + 1
+        return visual_feedback(result)
 
     async def _upstream_feedback(self, task, workspace, failure) -> str:
         """Check whether an external dependency changed before any premium consultation."""

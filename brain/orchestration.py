@@ -6,7 +6,7 @@ from .contracts import Delegation, validate_graph
 
 
 class OrchestrationMixin:
-    def delegate(self, repository: str, goal: str) -> dict:
+    def delegate(self, repository: str, goal: str, attachments=None) -> dict:
         source = self.repository(repository)
         if not self.manager.is_git(source):
             raise ValueError("Dependency orchestration requires a Git repository")
@@ -15,6 +15,8 @@ class OrchestrationMixin:
             "goal": goal, "status": "queued", "children": [], "events": [],
             "trace_id": uuid.uuid4().hex,
         }
+        if attachments:
+            group["attachments"] = attachments
         with self.telemetry.span(group["trace_id"], "api.delegate", group["id"]):
             self.store.save(group)
             self.schedule(group["id"], "plan_group")
@@ -25,12 +27,16 @@ class OrchestrationMixin:
         group["status"] = "planning"
         self.event(group, "coordinator", "Creating dependency graph")
         graph, entries = None, []
+        goal = group["goal"]
+        if group.get("attachments"):
+            from .attachments import brief
+            goal += "\n\n" + brief(group["attachments"])
         if self.supervision and self.supervision.plan_orchestrations:
-            consultation = await self._consult(group, "decompose", {"goal": group["goal"]})
+            consultation = await self._consult(group, "decompose", {"goal": goal})
             graph = consultation["result"] if consultation else None
         if graph is None:
             with accounting.collect(entries):
-                graph = await self.coordinator.decompose(group["goal"])
+                graph = await self.coordinator.decompose(goal)
         delegation = Delegation.model_validate(graph)
         validate_graph(delegation)
         group = self.store.get(group_id)
@@ -47,7 +53,7 @@ class OrchestrationMixin:
         group["integration_workspace"] = str(integration)
         for assignment in delegation.assignments:
             child = self.submit(group["repository"], assignment.goal, group_id, assignment.name,
-                                assignment.depends_on, launch=False)
+                                assignment.depends_on, launch=False, attachments=group.get("attachments"))
             group["children"].append({"name": assignment.name, "id": child["id"],
                                       "depends_on": assignment.depends_on})
         group["status"] = "active"
