@@ -249,6 +249,12 @@ class Workspace:
         self._engine_status_cache = (now, report)
         return report
 
+    def update_status(self) -> dict:
+        """An uncached GitHub stable-release check for both installed components."""
+        from .updates import release_status
+        engine = self.engine_status()["engine"]
+        return release_status(engine.get("version"))
+
     def installation_status(self) -> dict:
         try:
             cli = self.cli_command()
@@ -666,6 +672,13 @@ def create_app(state: Workspace | None = None) -> FastAPI:
     @app.get("/api/engine/status", dependencies=[Depends(auth)])
     def engine_status(refresh: bool = False):
         return state.engine_status(refresh=refresh)
+
+    @app.get("/api/updates/status", dependencies=[Depends(auth)])
+    def update_status():
+        try:
+            return state.update_status()
+        except (OSError, ValueError) as error:
+            raise HTTPException(503, f"Could not check GitHub's stable releases: {type(error).__name__}") from error
 
     @app.get("/api/setup", dependencies=[Depends(auth)])
     def setup_status():
