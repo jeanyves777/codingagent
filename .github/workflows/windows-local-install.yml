@@ -17,6 +17,7 @@ on:
       - "tests/test_new.py"
       - "tests/test_assistant.py"
       - "tests/test_engine.py"
+      - "scripts/engine_client_check.py"
       - ".github/workflows/windows-local-install.yml"
   workflow_dispatch:
   push:
@@ -82,6 +83,14 @@ jobs:
           if (Get-ChildItem $env:CODINGBRAIN_HOME -Recurse -Filter brain.sqlite3 -ErrorAction SilentlyContinue) {
             throw 'a conversation created a task store'
           }
+      - name: Engine API through a real stdio client, with this runner's installed Python
+        run: |
+          # The engine runs as a separate process, as the desktop app starts it: handshake, info,
+          # conversation, structured errors for invalid requests, registration, and a killed engine
+          # restarted from its persisted state. No model or sandbox on this runner (no task here).
+          $env:CODINGBRAIN_HOME = Join-Path $env:RUNNER_TEMP 'cb-api'
+          python scripts/engine_client_check.py
+          if ($LASTEXITCODE -ne 0) { throw "engine client check exited $LASTEXITCODE" }
       - name: Installer on a real Windows runner (preflight, plan, readiness, winget package ids)
         shell: pwsh
         run: |
@@ -260,6 +269,18 @@ jobs:
         env:
           CODINGBRAIN_CAPABILITY_REPORT: ${{ github.workspace }}/goal-first-capability.json
         run: python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py tests/test_new.py -k real 2>&1 | tee installer-real.log
+      - name: Engine API with a real task (real stdio client, real model, real sandbox)
+        if: always()
+        shell: bash
+        run: |
+          # The contract (digest-bound single-use approval, task-scoped live events, accept) is a
+          # gate; whether the model's fix passes its tests is reported (exit 2) without failing it.
+          export CODINGBRAIN_HOME="$RUNNER_TEMP/cb-real"
+          set +e
+          python scripts/engine_client_check.py --task 2>&1 | tee engine-client.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" = 2 ]; then echo "::warning::Engine API contract held; the real model's change did not pass (see engine-client.log)"; exit 0; fi
+          exit "$code"
       - name: Real-model goal-first capability (reported, not a merge gate; required before production-ready)
         if: always()
         continue-on-error: true
@@ -295,6 +316,7 @@ jobs:
             doctor-full.json
             installer-real.log
             goal-first-capability.json
+            engine-client.log
             ollama.log
 
   release:

@@ -205,3 +205,124 @@ def test_cli_describe(world):
     result = subprocess.run([sys.executable, "-m", "brain.local", "api", "--describe"], capture_output=True, text=True,
                             env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])}, timeout=60)
     assert result.returncode == 0 and json.loads(result.stdout)["api_version"] == "1.0"
+
+
+def stdio_session(engine, requests):
+    """Run a stdio session over `requests` (lines, or callables that return a line once the test is
+    ready to send it) and return every output line, parsed."""
+    def reader():
+        for item in requests:
+            yield (item() if callable(item) else item) + "\n"
+    out = io.StringIO()
+    serve_stdio(engine, reader(), out)
+    return [json.loads(line) for line in out.getvalue().splitlines()]
+
+
+def test_every_request_gets_exactly_one_structured_response(world):
+    """Valid JSON that is not a request object, and ids of the wrong type, are answered with
+    bad_request instead of being dropped (the UI would otherwise wait forever)."""
+    requests = ["[]", "null", "123", '"hi"', "true", "{not json", json.dumps({"id": [1], "op": "engine.info"}),
+                json.dumps({"id": True, "op": "engine.info"}), json.dumps({"id": 7, "op": "engine.info", "params": []}),
+                json.dumps({"id": 8}), json.dumps({"id": "ok", "op": "engine.info", "params": None})]
+    engine = Engine(world["layout"], world["home"])
+    lines = [line for line in stdio_session(engine, requests) if "event" not in line]
+    assert len(lines) == len(requests)
+    errors = [line for line in lines if not line["ok"]]
+    assert len(errors) == len(requests) - 1 and {line["error"]["code"] for line in errors} == {"bad_request"}
+    assert {line["id"] for line in errors} == {None, 7, 8}
+    assert [line["id"] for line in lines if line["ok"]] == ["ok"]
+
+
+def test_live_events_belong_to_the_operations_task(world, monkeypatch):
+    """Two tasks run at the same time in one project; each operation's feed carries only its own task."""
+    import threading
+    import time
+    engine, pid = world["engine"], world["project"]["id"]
+    with_fake_brain(world, monkeypatch)
+
+    def slow_tests(*a, **k):
+        time.sleep(1.0)
+        return {"passed": True, "exit_code": 0, "profile": "python", "output": "1 passed"}
+    monkeypatch.setattr("brain.service.run_tests", slow_tests)
+    feeds, results = {"a": [], "b": []}, {}
+    starts = {key: engine.call("tasks.start", {"project_id": pid, "goal": f"Fix {key}"}, emit=feeds[key].append)
+              for key in feeds}
+    for key in feeds:
+        assert feeds[key] and {event["task_id"] for event in feeds[key]} == {starts[key]["id"]}
+        feeds[key].clear()
+
+    def approve(key):
+        task = starts[key]
+        results[key] = engine.call("tasks.approve", {"project_id": pid, "task_id": task["id"], "digest": task["digest"],
+                                                     "decision": "approve"}, emit=feeds[key].append)
+    threads = [threading.Thread(target=approve, args=(key,)) for key in feeds]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+    for key, other in (("a", "b"), ("b", "a")):
+        assert results[key]["status"] == "passed"
+        ids = {event["task_id"] for event in feeds[key]}
+        assert ids == {starts[key]["id"]} and starts[other]["id"] not in ids
+        assert any(event["event_type"] == "test_result" for event in feeds[key])
+
+
+def test_stop_interrupts_a_running_task_over_the_same_stdio_session(world, monkeypatch):
+    import threading
+    engine, pid = world["engine"], world["project"]["id"]
+    with_fake_brain(world, monkeypatch)
+    started = threading.Event()
+
+    def blocking_tests(workspace, image, should_cancel=None, only=None):
+        started.set()
+        for _ in range(400):  # up to 20 s; the sandbox polls should_cancel the same way
+            if should_cancel and should_cancel():
+                return {"passed": False, "cancelled": True, "exit_code": None, "profile": "python", "output": ""}
+            threading.Event().wait(0.05)
+        return {"passed": True, "exit_code": 0, "profile": "python", "output": "never stopped"}
+    monkeypatch.setattr("brain.service.run_tests", blocking_tests)
+    task = engine.call("tasks.start", {"project_id": pid, "goal": "Fix x"})
+    approve = json.dumps({"id": "run", "op": "tasks.approve", "params": {
+        "project_id": pid, "task_id": task["id"], "digest": task["digest"], "decision": "approve"}})
+
+    def stop():
+        assert started.wait(30), "the sandbox never started"
+        return json.dumps({"id": "stop", "op": "tasks.stop", "params": {"project_id": pid, "task_id": task["id"]}})
+    lines = stdio_session(engine, [approve, stop])
+    by_id = {line["id"]: line for line in lines if "event" not in line}
+    assert by_id["stop"]["ok"] and by_id["stop"]["result"]["status"] in {"cancellation_requested", "cancelled"}
+    final = by_id["run"]
+    assert final["ok"] and final["result"]["status"] == "cancelled"
+    assert lines.index(by_id["stop"]) < lines.index(final)  # stop answered while the run was in flight
+    assert git(world["root"], "status", "--porcelain") == ""
+
+
+def test_restart_recovers_from_the_journal_without_duplicates(world, monkeypatch):
+    """The engine process died while a task was testing: a new engine reports the task as
+    interrupted (blocked, retry required), never as passed, and starts nothing on its own."""
+    engine, pid, layout = world["engine"], world["project"]["id"], world["layout"]
+    brain = with_fake_brain(world, monkeypatch)
+    task = engine.call("tasks.start", {"project_id": pid, "goal": "Fix x"})
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    stored = brain.store.get(task["id"])
+    stored.update(status="testing", owner={**stored["owner"], "pid": dead.pid})
+    brain.store.save(stored)
+    engine.close()
+
+    restarted = Engine(layout, world["home"], system=FakeMachine(platform="linux", programs={"git"}))
+    try:
+        recovered = restarted.call("tasks.get", {"project_id": pid, "task_id": task["id"]})
+        assert recovered["status"] == "testing" and recovered["interrupted"]  # a read starts nothing
+        assert recovered["tests"] is None  # never reported as passed
+        assert restarted.call("tasks.events", {"project_id": pid, "task_id": task["id"]})  # the journal persists
+        with pytest.raises(ApiError) as error:  # nothing is resumed or duplicated on its own
+            restarted.call("tasks.resume", {"project_id": pid, "task_id": task["id"]})
+        assert error.value.code == "refused"
+        after = restarted.call("tasks.get", {"project_id": pid, "task_id": task["id"]})
+        assert after["status"] == "blocked" and not after["interrupted"]  # the service marked it: retry required
+        assert any(event["data"].get("kind") == "interrupted" or "interrupted" in event["summary"]
+                   for event in restarted.call("tasks.events", {"project_id": pid, "task_id": task["id"]}))
+        assert [item["id"] for item in restarted.call("tasks.list", {"project_id": pid})] == [task["id"]]
+    finally:
+        restarted.close()

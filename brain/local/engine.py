@@ -78,6 +78,20 @@ def describe() -> dict:
                            for name, (kind, params, returns) in OPERATIONS.items()}}
 
 
+def interrupted(task: dict) -> bool:
+    """An active task whose engine process on this computer is gone. Reads never start the
+    service, so they report this instead of a stale "testing"; the next action marks the task
+    blocked (retry required). It is never reported as passed or restarted on its own."""
+    import os
+    import socket
+    from ..service import Brain
+    from .session import pid_alive
+    owner = task.get("owner") or {}
+    if task.get("status") not in Brain.ACTIVE or owner.get("host") != socket.gethostname() or not owner.get("pid"):
+        return False
+    return owner["pid"] != os.getpid() and not pid_alive(int(owner["pid"]))
+
+
 def task_summary(task: dict) -> dict:
     proposal = task.get("proposal") or {}
     evidence = task.get("test_evidence") or {}
@@ -92,7 +106,7 @@ def task_summary(task: dict) -> dict:
             "failures": [{key: item.get(key) for key in ("attempt", "category", "diagnosis", "summary")}
                          for item in task.get("failure_log", [])][-6:],
             "branch": task.get("branch"), "commit": task.get("commit"),
-            "pending_tool_approval": task.get("pending_approval_id")}
+            "pending_tool_approval": task.get("pending_approval_id"), "interrupted": interrupted(task)}
 
 
 class Engine:
@@ -253,23 +267,37 @@ class Engine:
         from .project import project_id
         return {**record, "project_id": project_id(Path(record["path"]))}
 
-    def watching(self, project_id: str, emit):
-        """Stream the project's journal events while a long operation runs."""
+    def watching(self, project_id: str, emit, scope: set):
+        """Stream the journal events of this operation's task while it runs: events whose task_id
+        is in `scope`, or whose parent is (subtasks join the scope as they appear). Other tasks in
+        the same project never reach this feed. tasks.start fills `scope` once the task exists;
+        until then nothing is consumed, so no event of the task is skipped."""
         if emit is None:
             return lambda: None
         telemetry = self.brain(project_id).telemetry
         start = telemetry.last_seq()
         stop = threading.Event()
 
+        def drain(after):
+            if not scope:
+                return after
+            for event in telemetry.journal(None, after=after, limit=500):
+                after = event["seq"]
+                if event.get("task_id") in scope or event.get("parent_task_id") in scope:
+                    if event.get("task_id"):
+                        scope.add(event["task_id"])
+                    emit(event)
+            return after
+
         def follow():
             after = start
             while not stop.is_set():
-                for event in telemetry.journal(None, after=after, limit=500):
-                    after = event["seq"]
-                    emit(event)
+                after = drain(after)
                 stop.wait(0.5)
-            for event in telemetry.journal(None, after=after, limit=500):
-                emit(event)
+            while True:
+                last, after = after, drain(after)
+                if after == last:
+                    break
         thread = threading.Thread(target=follow, daemon=True)
         thread.start()
 
@@ -286,14 +314,19 @@ class Engine:
     def op_tasks_start(self, project_id: str, goal: str, new_project: bool = False, emit=None):
         brain = self.brain(project_id)
         context = self.context(project_id)
-        done = self.watching(project_id, emit)
+        scope = set()
+        done = self.watching(project_id, emit, scope)
 
         async def go():
             task = brain.submit(context.root.name, goal, launch=False)
+            scope.add(task["id"])
             if new_project:
                 task["tests_expected"] = True
-            task = await brain.create(task)
-            await self._drain(brain)
+            try:
+                task = await brain.create(task)
+                await self._drain(brain)
+            except asyncio.CancelledError:  # tasks.stop: the task stopped at a safe boundary
+                pass
             return brain.store.get(task["id"])
         try:
             return task_summary(self.run(go()))
@@ -310,13 +343,15 @@ class Engine:
         if digest != task.get("digest"):
             raise ApiError("refused", "the digest does not match the current proposal; fetch the task again")
         if decision == "decline":
-            brain.cancel(task_id)
-            return task_summary(brain.store.get(task_id))
-        done = self.watching(project_id, emit)
+            return self.op_tasks_stop(project_id, task_id)
+        done = self.watching(project_id, emit, {task_id})
 
         async def go():
-            await brain.execute(task_id, digest)
-            await self._drain(brain)
+            try:
+                await brain.execute(task_id, digest)
+                await self._drain(brain)
+            except asyncio.CancelledError:  # tasks.stop: the task stopped at a safe boundary
+                pass
             return brain.store.get(task_id)
         try:
             return task_summary(self.run(go()))
@@ -337,17 +372,26 @@ class Engine:
         return task_summary(self.run(go()))
 
     def op_tasks_stop(self, project_id: str, task_id: str):
+        """Request cancellation; a running task stops at its next safe boundary (the sandbox polls
+        for it). Runs on the engine loop, so it is ordered with the task's own state changes, and
+        returns at once: it never waits for the running operation."""
         brain = self.brain(project_id)
-        brain.cancel(task_id)
-        return task_summary(brain.store.get(task_id))
+
+        async def go():
+            brain.cancel(task_id)
+            return brain.store.get(task_id)
+        return task_summary(self.run(go(), timeout=60))
 
     def op_tasks_resume(self, project_id: str, task_id: str, emit=None):
         brain = self.brain(project_id)
-        done = self.watching(project_id, emit)
+        done = self.watching(project_id, emit, {task_id})
 
         async def go():
-            await brain.resume(task_id)
-            await self._drain(brain)
+            try:
+                await brain.resume(task_id)
+                await self._drain(brain)
+            except asyncio.CancelledError:  # tasks.stop: the task stopped at a safe boundary
+                pass
             return brain.store.get(task_id)
         try:
             return task_summary(self.run(go()))
@@ -368,17 +412,23 @@ def serve_stdio(engine: Engine, reader=None, writer=None):
             writer.write(json.dumps(payload, default=str) + "\n")
             writer.flush()
 
-    def handle(request: dict):
-        op_id = request.get("id")
+    def handle(request):
+        op_id = None
         try:
-            if not isinstance(request.get("op"), str) or not isinstance(request.get("params", {}), dict):
+            if not isinstance(request, dict):
+                raise ApiError("bad_request", "a request is a JSON object: {\"id\": ..., \"op\": \"name\", \"params\": {...}}")
+            op_id = request.get("id")
+            if isinstance(op_id, bool) or not isinstance(op_id, (str, int, type(None))):
+                op_id = None
+                raise ApiError("bad_request", "'id' must be a string, an integer or null")
+            if not isinstance(request.get("op"), str) or not isinstance(request.get("params", {}), (dict, type(None))):
                 raise ApiError("bad_request", "a request is {\"id\": ..., \"op\": \"name\", \"params\": {...}}")
             result = engine.call(request["op"], request.get("params") or {},
                                  emit=lambda event: write({"event": event, "op_id": op_id}))
             write({"id": op_id, "ok": True, "result": result})
         except ApiError as error:
             write({"id": op_id, "ok": False, "error": {"code": error.code, "message": str(error)[:2000]}})
-        except Exception as error:  # an engine fault is reported, never a dead pipe
+        except Exception as error:  # an engine fault is reported, never a dead pipe or a lost response
             write({"id": op_id, "ok": False, "error": {"code": "engine_error",
                                                        "message": f"{type(error).__name__}: {str(error)[:2000]}"}})
 

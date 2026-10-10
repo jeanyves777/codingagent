@@ -12,7 +12,13 @@ See docs/engine-api.md.
   - projects (list, register, create);
   - conversation, which only proposes;
   - tasks, with digest-bound, single-use approval, acceptance as a new branch, stop and resume;
-  - activity-journal events streamed live while tasks run.
+  - activity-journal events streamed live while tasks run, scoped to the operation's own task;
+  - exactly one structured response per request line, including invalid JSON values;
+  - `tasks.stop` during a running task over the same session, ending in `cancelled`;
+  - after a restart, tasks whose engine process is gone are reported as `interrupted`, never as
+    passed or restarted on their own.
+- **`scripts/engine_client_check.py`:** a real out-of-process client, run in CI on Windows and,
+  with a real model and sandbox, on Ubuntu.
 - **Provider registry (issue #14):** each provider reports separately whether it is installed,
   how it is authenticated, whether it is enabled and ready, how it is billed and its cost gate.
   Providers without a reviewed adapter (Gemini, Grok, Muse) are never reported as connected.

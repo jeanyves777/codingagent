@@ -17,18 +17,28 @@ The same operations are available in-process as `brain.local.engine.Engine(...).
 - **Error codes:**
   - `unknown_op`
   - `bad_params`
-  - `bad_request`
+  - `bad_request`: the line is not JSON, not a JSON object, or its `id` is not a string, an
+    integer or null. Every line gets exactly one response, so a client never waits for a request
+    the engine dropped. When the `id` itself is unusable, the response's `id` is `null`.
   - `not_found`
   - `refused`: a safety rule or the task state said no
   - `engine_error`
 - **Events:** `{"event": {...journal event...}, "op_id": 7}`. While a long operation runs
-  (`tasks.start`, `tasks.approve`, `tasks.accept` or `tasks.resume`), the server streams that
-  project's activity-journal events as they happen. These are the same events
+  (`tasks.start`, `tasks.approve` or `tasks.resume`), the server streams the activity-journal
+  events of **that operation's task** (and its subtasks) as they happen. Each event carries its
+  `task_id`; other tasks in the same project never appear in this feed. To follow a task you did
+  not start in this session, poll `tasks.events` with `after_seq`. These are the same events
   `codingbrain watch` shows. Each event has its stage, agent, model, status, duration and summary.
   Events are what really happened; nothing is estimated or invented. The first line the server
   writes is a `ready` event that carries the API version.
 - **Concurrency:** requests run concurrently, so `tasks.stop` works while `tasks.approve` is
-  testing.
+  testing, over the same session. `tasks.stop` answers at once (`cancellation_requested`); the
+  running `tasks.approve` then returns the task with status `cancelled` once it stops at a safe
+  boundary. Nothing is applied to the project.
+- **Restarts:** tasks and their journals are persisted. After the engine (or the UI) is killed,
+  a new engine reports a task whose process is gone with `"interrupted": true` and its last
+  status; it is never reported as passed and never restarted on its own. The next action on that
+  project marks it `blocked` (retry required).
 
 ## Operations
 
@@ -57,7 +67,7 @@ The same operations are available in-process as `brain.local.engine.Engine(...).
 | `tasks.start {project_id, goal, new_project}` | Plans the goal. Returns the proposal, the files and the diff, and the **digest**. Nothing is applied. |
 | `tasks.approve {project_id, task_id, digest, decision}` | `approve` reviews the proposal, applies it in the isolated worktree and tests it in the sandbox, repairing or escalating within the budgets. Only the current digest is accepted, so an approval cannot be replayed once the task moves on. `decline` cancels. |
 | `tasks.accept {project_id, task_id}` | Accepts a tested result as a **new branch**. The checked-out branch is unchanged. |
-| `tasks.stop {project_id, task_id}` | Requests cancellation. |
+| `tasks.stop {project_id, task_id}` | Requests cancellation; returns at once. A running task stops at its next safe boundary. |
 | `tasks.resume {project_id, task_id}` | Continues an unfinished task. |
 
 There is no `--yes`, and the API adds no shortcuts. Every action goes through the same authority
@@ -89,3 +99,19 @@ What each provider is today:
 
 A provider that is `not_supported` is never selectable and never reported as connected. Being
 installed does not mean a provider is ready.
+
+## Testing the contract
+
+- `python -m pytest tests/test_engine.py`: the contract in-process, with fakes (validation,
+  conversation that never executes, digest-bound single-use approval, two simultaneous tasks with
+  separate live feeds, stop during a running sandbox over one stdio session, restart recovery).
+- `python scripts/engine_client_check.py`: a real client that starts `codingbrain api --stdio` as a
+  separate process with the installed Python and checks the protocol from outside, including a
+  killed engine restarted from its persisted state. CI runs it on Windows (Windows PowerShell 5.1
+  and PowerShell 7, Python 3.11 and 3.12).
+- `python scripts/engine_client_check.py --task`: also a real task through the real model and
+  sandbox (CI: Ubuntu with Ollama and Docker). The contract checks are a gate; whether the model's
+  fix passes its tests is reported separately (exit status 2).
+
+Not covered yet: the desktop app itself driving the engine on a real Windows PC, and a real task
+on Windows (GitHub's Windows runners have no Linux containers for the sandbox).
