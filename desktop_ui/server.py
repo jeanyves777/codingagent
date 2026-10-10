@@ -404,6 +404,18 @@ class Workspace:
             raise ValueError("Unknown mode")
         if mode == "run" and (not self.project or not self.git_branch(self.project)):
             raise ValueError("Select an existing Git repository to run a coding task")
+        if mode == "new":
+            # Feature checks must refer to the INSTALLED engine, not an importable
+            # copy of the UI's Python package. Never create a job on older engines.
+            engine = self.engine_status()["engine"]
+            if not engine.get("new_project", False):
+                version = engine.get("version") or "unknown"
+                raise ValueError(
+                    f"New-project creation is unavailable in installed Coding Brain v{version}. "
+                    "No task started and no files were created. "
+                    "Use Browse folder to open an existing project, or install a verified "
+                    "Coding Brain release that supports 'codingbrain new'."
+                )
         # Never treat chat as a coding task. Newer CLIs provide chat; older ones
         # return a clear unsupported-command error instead of running code.
         command = [*self.cli_command(), "chat" if mode == "chat" else "new" if mode == "new" else "run", body.message]
