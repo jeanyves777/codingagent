@@ -97,6 +97,7 @@
           <div class="explorer-tabs" role="tablist" aria-label="Explorer tabs">
             <button role="tab" class="active" id="tab-files" aria-selected="true">Files</button>
             <button role="tab" id="tab-activity" aria-selected="false">Activity</button>
+             <button role="tab" id="tab-git" aria-selected="false">Git</button>
           </div>
           <div class="file-panel" id="file-panel">
             <div class="file-toolbar"><span id="explorer-folder" class="folder-name">No project selected</span><button id="refresh-files" title="Refresh files" aria-label="Refresh files">↻</button></div>
@@ -104,7 +105,33 @@
             <div class="preview" id="preview" hidden><div class="preview-bar"><span id="preview-name"></span><button id="preview-close" aria-label="Close preview">✕</button></div><pre id="preview-content"></pre></div>
           </div>
           <div class="activity-panel" id="activity-panel" hidden><div class="activity-title">Live activity</div><div id="activity-list" class="activity-list"><p class="muted">Activity appears here when Coding Brain starts working.</p></div></div>
-          <div class="explorer-footer"><span id="branch-name">◇ No repository</span><span id="file-count"></span></div>
+          <section class="git-panel" id="git-panel" aria-label="Git branches and commit history" hidden>
+             <div class="git-head">
+               <div><h3>Source control</h3><p id="git-updated" class="git-muted">Select a project to inspect Git.</p></div>
+               <button type="button" id="git-refresh" class="git-icon-btn" aria-label="Refresh Git status now" title="Refresh Git status">↻</button>
+             </div>
+             <div id="git-notice" class="git-notice" role="status" aria-live="polite">Choose a project to see Git history.</div>
+             <div id="git-details" hidden>
+               <div class="git-current" aria-label="Current Git branch">
+                 <span class="git-kicker">CURRENT BRANCH</span>
+                 <strong id="git-current-branch">—</strong>
+                 <span id="git-current-head" class="git-muted"></span>
+               </div>
+               <div class="git-summary" aria-label="Working tree changes">
+                 <span id="git-summary-staged">0 staged</span>
+                 <span id="git-summary-modified">0 modified</span>
+                 <span id="git-summary-untracked">0 untracked</span>
+               </div>
+               <div class="git-section-heading"><h4>Changed files</h4><span id="git-changes-count"></span></div>
+               <div id="git-changes" class="git-scroll-list" role="list"></div>
+               <div class="git-section-heading"><h4>Local branches</h4><span id="git-branches-count"></span></div>
+               <div id="git-branches" class="git-scroll-list" role="list"></div>
+               <div class="git-section-heading"><h4>Recent commits</h4><span>Latest 20</span></div>
+               <div id="git-commits" class="git-scroll-list git-commit-list" role="list"></div>
+             </div>
+             <p class="git-footnote">Local Git · Read-only · Automatically refreshes every 3 seconds while visible</p>
+           </section>
+           <div class="explorer-footer"><span id="branch-name">◇ No repository</span><span id="file-count"></span></div>
         </aside>
       </div>
       <footer class="bottombar"><span><span class="dot green"></span> Desktop connected</span><span id="footer-status">Ready</span><span id="footer-private">Private · 127.0.0.1</span></footer>
