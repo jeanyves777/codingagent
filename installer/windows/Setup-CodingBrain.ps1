@@ -6,10 +6,13 @@
   engine always matches the desktop it ships with:
     - no engine yet        -> install.ps1 -From <bundle> -Full   (Python/Git if missing, the engine, then everything)
     - an older engine      -> codingbrain update --source <bundle>, then install --full
-    - same or newer engine -> install --full only (adds whatever is still missing; safe to re-run)
+    - same version       -> verify the real typed conversational API; repair with a force update if needed
+    - newer engine       -> verify compatibility; refuse unsafe downgrade or an unusable API
   The environment step is Coding Brain's own installer: it shows its plan, Windows still asks before
   any administrator change, and progress is checkpointed (a restart continues with install --resume).
-  Finally runs doctor and opens the desktop. Nothing here stores or asks for credentials.
+  The installed engine must pass its real typed conversational API probe and doctor before
+  setup may open the desktop. A failed setup never launches the desktop as if it succeeded.
+  Nothing here stores or asks for credentials.
 #>
 [CmdletBinding()]
 param(
@@ -25,12 +28,26 @@ function Write-Step([string]$Message) { Write-Host "`n==> $Message" -ForegroundC
 function Write-Note([string]$Message) { Write-Host "    $Message" -ForegroundColor DarkGray }
 function Finish([int]$Code, [string]$Message) {
   if ($Code -eq 0) { Write-Host "`n$Message" -ForegroundColor Green } else { Write-Host "`n$Message" -ForegroundColor Yellow }
-  if ($Desktop -and (Test-Path -LiteralPath $Desktop)) {
+  if ($Code -eq 0 -and $Desktop -and (Test-Path -LiteralPath $Desktop)) {
     Write-Note 'Opening Coding Brain Desktop...'
     Start-Process -FilePath $Desktop
   }
   Read-Host "`nPress Enter to close this window"
   exit $Code
+}
+
+function Test-Conversation([string]$PythonExe, [string]$Version) {
+  if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {
+    Write-Host "The installed engine interpreter is missing: $PythonExe" -ForegroundColor Yellow
+    return $false
+  }
+  $probe = Join-Path $PSScriptRoot 'Verify-CodingBrainEngine.py'
+  if (-not (Test-Path -LiteralPath $probe -PathType Leaf)) {
+    Write-Host 'Installer is missing its read-only conversational API verifier.' -ForegroundColor Yellow
+    return $false
+  }
+  & $PythonExe -I $probe --python $PythonExe --expected-version $Version --timeout 55
+  return ($LASTEXITCODE -eq 0)
 }
 
 Write-Host 'CODING BRAIN SETUP' -ForegroundColor Cyan
@@ -71,31 +88,80 @@ if (-not $installed) {
   & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Bundle 'install.ps1') -From $Bundle -InstallDir $InstallDir -Full -Yes
   $code = $LASTEXITCODE
   if ($code -ne 0) { Finish $code "Setup stopped (exit $code). Fix the step above, then run 'codingbrain install --resume' or re-run this installer." }
-  Finish 0 'Coding Brain is installed and set up.'
+  $installed = (Get-Content -Raw -LiteralPath $current | ConvertFrom-Json).version
+  $python = Join-Path $InstallDir "app\versions\$installed\venv\Scripts\python.exe"
+  Write-Step 'Verifying the installed conversational engine'
+  if (-not (Test-Conversation $python $bundled)) {
+    Finish 1 "The installed engine is not ready for desktop Chat/Run/New project. Setup is incomplete; review the error above."
+  }
+  Write-Step 'Final engine diagnostics'
+  & $python -I -m brain.local doctor
+  if ($LASTEXITCODE -ne 0) { Finish 1 'The Coding Brain doctor failed. The desktop will not be opened as ready.' }
+  Finish 0 'Coding Brain engine and desktop have matching verified capabilities.'
 }
 
 $python = Join-Path $InstallDir "app\versions\$installed\venv\Scripts\python.exe"
 $env:CODINGBRAIN_HOME = $InstallDir
-$newer = & $python -I -c "import sys; from packaging.version import Version as V; print(int(V(sys.argv[1]) > V(sys.argv[2])))" $bundled $installed
-if ($newer -eq '1') {
-  Write-Step "Updating the engine $installed -> $bundled (state is backed up; rollback with 'codingbrain rollback')"
-  & $python -I -m brain.local update --source $Bundle --channel dev
-  if ($LASTEXITCODE -ne 0) {
-    Write-Host "The engine update was not applied (see the reason above). Continuing with $installed." -ForegroundColor Yellow
-  } else {
-    $installed = (Get-Content -Raw -LiteralPath $current | ConvertFrom-Json).version
-    $python = Join-Path $InstallDir "app\versions\$installed\venv\Scripts\python.exe"
-  }
-} else {
-  Write-Note "The installed engine is current; keeping $installed."
+if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+  Finish 1 "Installed engine interpreter missing: $python. Cannot safely update; run repair installation."
 }
 
-# 3. Environment: Coding Brain's own installer adds whatever is still missing.
+$newer = & $python -I -c "import sys; from packaging.version import Version as V; print(int(V(sys.argv[1]) > V(sys.argv[2])))" $bundled $installed
+if ($LASTEXITCODE -ne 0 -or [string]$newer -notmatch '^[01]$') {
+  Finish 1 'The installed engine could not compare versions. No update was attempted.'
+}
+$older = & $python -I -c "import sys; from packaging.version import Version as V; print(int(V(sys.argv[1]) < V(sys.argv[2])))" $bundled $installed
+if ($LASTEXITCODE -ne 0 -or [string]$older -notmatch '^[01]$') {
+  Finish 1 'The installed engine could not compare versions. No update was attempted.'
+}
+if ($older -eq '1') {
+  # Do not silently downgrade the engine to a bundled, older preview.
+  Write-Step "Installed engine $installed is newer than the bundled $bundled"
+  if (-not (Test-Conversation $python $installed)) {
+    Finish 1 'Your newer engine is not compatible with this desktop. Refusing downgrade. Install a matching newer desktop build.'
+  }
+  Write-Note 'Newer installed engine passed the conversational API probe; preserving it.'
+} elseif ($newer -eq '1') {
+  Write-Step "Updating the engine $installed -> $bundled (state is backed up; rollback with 'codingbrain rollback')"
+  & $python -I -m brain.local update --source $Bundle --channel dev
+  if ($LASTEXITCODE -ne 0) { Finish 1 'The bundled engine update failed. The desktop will not be opened as ready.' }
+  $installed = (Get-Content -Raw -LiteralPath $current | ConvertFrom-Json).version
+  $python = Join-Path $InstallDir "app\versions\$installed\venv\Scripts\python.exe"
+  if (-not (Test-Conversation $python $bundled)) {
+    Finish 1 'The newly installed engine does not expose the required conversational API. Review or rollback the update.'
+  }
+} else {
+  Write-Step "Checking installed engine $installed capabilities, not just its version"
+  if (-not (Test-Conversation $python $bundled)) {
+    Write-Step "Repairing same-version engine $installed from checksum-verified bundled files"
+    & $python -I -m brain.local update --source $Bundle --channel dev --force
+    if ($LASTEXITCODE -ne 0) {
+      Finish 1 'The same-version engine repair failed. The desktop will not be opened as ready.'
+    }
+    $installed = (Get-Content -Raw -LiteralPath $current | ConvertFrom-Json).version
+    $python = Join-Path $InstallDir "app\versions\$installed\venv\Scripts\python.exe"
+    if (-not (Test-Conversation $python $bundled)) {
+      Finish 1 'Engine repair completed but conversational API is still unavailable. The desktop will not be opened.'
+    }
+  } else {
+    Write-Note "Installed engine $installed is current and its conversational API is verified."
+  }
+}
+
+# Prepare remaining components only after a compatible, verified engine is installed.
 Write-Step 'Preparing the full environment (models, sandbox, OCR, vision, knowledge, supervisors)'
 & $python -I -m brain.local install --full --yes
 $code = $LASTEXITCODE
+if ($code -ne 0) {
+  Finish $code "Full environment setup failed (exit $code). Run 'codingbrain install --resume' to continue."
+}
 
-Write-Step 'Final check'
+Write-Step 'Final checks: API capabilities and engine doctor'
+if (-not (Test-Conversation $python $installed)) {
+  Finish 1 'Final installed-engine API verification failed. Restart and repair before opening the desktop.'
+}
 & $python -I -m brain.local doctor
-if ($code -ne 0) { Finish $code "Some steps need attention (exit $code). Run 'codingbrain install --resume' after fixing them." }
-Finish 0 'Coding Brain is set up.'
+if ($LASTEXITCODE -ne 0) {
+  Finish 1 'Coding Brain doctor failed. The desktop will not be opened as ready.'
+}
+Finish 0 'Coding Brain engine, conversation API and desktop are verified.'
