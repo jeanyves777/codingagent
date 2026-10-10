@@ -1,0 +1,133 @@
+name: Release (owner-approved)
+
+# Publishes one verified commit of main as a release, only after the repository owner approves the
+# `production` deployment. Started by hand (Actions > Release (owner-approved) > Run workflow, or
+# the API) with the exact commit SHA and version:
+#   1. gate     (read-only)  scripts/release_gate.py: commit on main, version and changelog match,
+#                            tag absent, newer than the latest release, CI green on this exact
+#                            code, and `production` requires a reviewer. Any failure stops here.
+#   2. publish  (production) waits for the owner's approval, then builds from that commit, checks
+#                            it built that commit, attests provenance, creates tag v<version> on it
+#                            and publishes the release with SHA256SUMS.
+#   3. confirm  (read-only)  downloads the published release and verifies every checksum, the
+#                            version and that the tag points at the approved commit.
+# The tag-push release path in windows-local-install.yml is unchanged and still works.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full 40-character commit SHA on main to release"
+        required: true
+      version:
+        description: "The version in pyproject.toml at that commit, e.g. 0.9.1"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+      actions: read
+      pull-requests: read
+      deployments: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main  # the gate itself always runs from main, never from the candidate
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check the candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ inputs.sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          python -m pip install --disable-pip-version-check -q packaging
+          git fetch -q origin main
+          python scripts/release_gate.py --sha "$SHA" --version "$VERSION" --repo "$GITHUB_REPOSITORY"
+
+  publish:
+    needs: gate
+    runs-on: windows-latest
+    environment: production  # pauses here until the owner approves this deployment
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build release assets from the approved commit
+        shell: pwsh
+        env:
+          SHA: ${{ inputs.sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $env:SHA) { throw "Checked out $head, expected $env:SHA" }
+          $version = (Select-String -Path pyproject.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          if ($version -ne $env:VERSION) { throw "pyproject.toml says $version, expected $env:VERSION" }
+          python scripts/build_release.py --out dist/release
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/release/*.whl
+      - name: Tag the approved commit and publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ inputs.sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          $tag = "v$env:VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a $tag $env:SHA -m "Coding Brain $env:VERSION (owner-approved release of $env:SHA)"
+          git push origin "refs/tags/$tag"
+          $info = Get-Content -Raw dist/release/release.json | ConvertFrom-Json
+          Set-Content -Path notes.md -Value $info.notes
+          $flags = @()
+          if ($info.channel -eq 'dev') { $flags += '--prerelease' } else { $flags += '--latest' }
+          gh release create $tag (Get-ChildItem dist/release -File).FullName --title "Coding Brain $($info.version)" --notes-file notes.md --verify-tag @flags
+
+  confirm:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Verify the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ inputs.sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir published && cd published
+          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY"
+          sha256sum --check --strict SHA256SUMS
+          test "$(python3 -c 'import json; print(json.load(open("release.json"))["version"])')" = "$VERSION"
+          test -f "coding_brain-$VERSION-py3-none-any.whl"
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION")
+          object=$(echo "$ref" | python3 -c 'import json, sys; print(json.load(sys.stdin)["object"]["sha"])')
+          kind=$(echo "$ref" | python3 -c 'import json, sys; print(json.load(sys.stdin)["object"]["type"])')
+          if [ "$kind" = tag ]; then
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object" --jq .object.sha)
+          fi
+          test "$object" = "$SHA"
+          echo "v$VERSION is published, its checksums verify, and it points at $SHA." | tee -a "$GITHUB_STEP_SUMMARY"

@@ -25,6 +25,9 @@ Live activity, execution traces and snapshots (see docs/live-activity.md).
 
 Images, screenshots and documents, plus a visual development loop (see docs/multimodal.md).
 
+- **Security (from review):** an attachment is refused when any folder in its path, not only the
+  file itself, is a symbolic link or a Windows junction (reparse point), checked before reading,
+  including on Python 3.11.
 - **Attachments:** `codingbrain run "goal" --attach FILE` (repeatable) accepts PNG, JPEG, WebP,
   GIF (frame selection), PDF, DOCX, XLSX, CSV, text, Markdown, JSON, YAML, XML and source files.
   - Formats are detected from content.
@@ -75,6 +78,11 @@ Images, screenshots and documents, plus a visual development loop (see docs/mult
 ## 0.10.0
 
 Durable cross-agent project memory (see docs/project-memory.md).
+
+- **Security (from review):** project-local memory sources are read only if they are regular files
+  inside the project reached without symbolic links or junctions, re-validated just before reading;
+  secret-looking names are refused before any file is opened, including names matched by an
+  OpenCode instructions glob.
 
 - **Discovery:** project instruction files from Claude Code, Codex, Cursor, Copilot, OpenCode and
   others; READMEs, architecture docs, ADRs, plans, changelogs, Git history and Coding Brain's own

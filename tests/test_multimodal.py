@@ -856,3 +856,59 @@ def test_comparison_falls_back_to_separate_descriptions_when_a_small_model_canno
     assert ("text", "missing") in areas and ("button 'Pay now'", "missing") in areas
     assert "text 'Dashboard'" in findings["matches"]
     assert any("separate descriptions" in note for note in findings["uncertain"])
+
+
+def _no_reads(monkeypatch):
+    """Record every attempt to read, hash, copy or parse an attachment."""
+    from brain import attachments
+    touched = []
+    monkeypatch.setattr(attachments, "sha256_file", lambda path: touched.append(("hash", str(path))) or "0" * 64)
+    monkeypatch.setattr(attachments.shutil, "copyfile", lambda a, b: touched.append(("copy", str(a))))
+    monkeypatch.setattr(attachments, "run_worker", lambda *a, **k: touched.append(("parse", str(a[0]))) or {})
+    return touched
+
+
+def test_a_linked_folder_above_the_file_is_refused_before_reading(tmp_path, files, monkeypatch):
+    """Not only the file itself: a symbolic link anywhere in the path is refused."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    fx.ui_image(outside / "real.png")
+    alias = files / "alias"
+    try:
+        alias.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are not available")
+    touched = _no_reads(monkeypatch)
+    with pytest.raises(AttachmentError, match="links and junctions"):
+        ingest(str(alias / "real.png"), tmp_path / "work")
+    assert touched == [] and not (tmp_path / "work").exists()
+    monkeypatch.undo()  # real reading again: the same file attached directly is accepted
+    with pytest.raises(AttachmentError, match="links and junctions"):
+        ingest(str(alias / "real.png"), tmp_path / "work")
+    assert ingest(str(outside / "real.png"), tmp_path / "work2").sha256
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are a Windows feature")
+@pytest.mark.parametrize("target_kind", ["outside_pdf", "coding_brain_state"])
+def test_windows_junction_in_the_path_is_refused_before_reading(tmp_path, monkeypatch, target_kind):
+    """A directory junction (mklink /J, no Developer Mode needed) under a project, to a normal
+    looking PDF outside it or to Coding Brain's own data folder, is refused before the file is
+    read, hashed, copied or parsed. Runs on every Windows Python, including 3.11."""
+    project = tmp_path / "project"
+    project.mkdir()
+    target = tmp_path / ("elsewhere" if target_kind == "outside_pdf" else "CodingBrain-data")
+    target.mkdir()
+    (target / "document.pdf").write_bytes(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n")
+    junction = project / "alias"
+    made = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(target)], capture_output=True, text=True)
+    assert made.returncode == 0, made.stdout + made.stderr
+    try:
+        assert os.lstat(junction).st_file_attributes & 0x400  # really a reparse point
+        touched = _no_reads(monkeypatch)
+        forbidden = [str(target)] if target_kind == "coding_brain_state" else []
+        with pytest.raises(AttachmentError, match="links and junctions"):
+            ingest(str(junction / "document.pdf"), tmp_path / "work", forbidden_roots=forbidden)
+        assert touched == [] and not (tmp_path / "work").exists()
+    finally:
+        os.rmdir(junction)  # removes the junction, never its target
+    assert (target / "document.pdf").exists()
