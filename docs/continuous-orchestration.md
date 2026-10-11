@@ -152,6 +152,14 @@ the API nor the desktop can run the backlog: that stays `codingbrain backlog run
   runs in CI.
 - `tests/test_sqlite_concurrency.py`: readers are not blocked by writers, a cancel request
   survives a stale write, and concurrent ledger appends keep one chain.
+- `scripts/windows_acceptance.ps1`: the end-to-end acceptance test for a Windows PC, run with
+  `powershell -NoProfile -ExecutionPolicy Bypass -File windows_acceptance.ps1 -Model <ollama model>`.
+  It runs in its own folder and Coding Brain home, so your configuration and projects are not
+  touched. It checks the real model and sandbox (`doctor --full`), backlog items with frozen
+  acceptance tests, a restart in the middle of a run, independent verification, agents in
+  parallel, the combined result, the ledger, your acceptance (one new branch, your branch
+  unchanged) and a dependent item that builds on the accepted work. It writes
+  `acceptance-report.md` and `acceptance-report.json`.
 - `scripts/backlog_benchmark.py`: a whole real run (model, sandbox, integration, optional
   supervisor and acceptance) with throughput, completion, simultaneous model calls, CPU/RAM and
   premium use.
