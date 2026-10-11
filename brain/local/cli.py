@@ -130,10 +130,18 @@ class Context:
             self.register()
             os.environ.update(settings.project_environment(self.layout, self.config, self.root, self.data))
             from ..factory import build_brain_from_env
-            self._brain = build_brain_from_env()
-            self._brain.project_knowledge = self.memory.context_for
-            self._brain.visual_verifier = self.visual_verifier
+            self.attach(build_brain_from_env())
         return self._brain
+
+    def attach(self, brain):
+        """Connect a Brain to this project: project memory feeds its prompts, and the lessons of
+        finished work (accepted changes, observed failures) go back into it. Every way of
+        working (CLI, backlog, engine API, desktop) goes through here."""
+        self._brain = brain
+        brain.project_knowledge = self.memory.context_for
+        brain.visual_verifier = self.visual_verifier
+        brain.lesson_sink = self.memory.learn
+        return brain
 
     def visual_verifier(self, task: dict):
         """Visual verification for tasks that carry reference images and a visual goal."""
@@ -267,12 +275,10 @@ async def handle(context: Context, task: dict, auto: bool) -> dict:
         else:
             quiet_live()  # print the outcome after every event that led to it
             if status in {"failed", "blocked", "integration_conflict"}:
+                # the lesson (observed failures) was recorded by the Brain when the run ended
                 evidence = task.get("test_evidence") or {}
                 last = (task.get("failure_log") or [{"category": "sandbox" if evidence.get("exit_code") in (None, 125, 126, 127)
                                                      else "tests", "summary": (evidence.get("output") or "")[-300:]}])[-1]
-                context.memory.remember("repair", f"Attempt at '{task['goal'][:200]}' ended {status}: "
-                                        f"{last.get('category', '')} {str(last.get('summary', ''))[:300]}",
-                                        verified=False, ref=f"task:{task['id']}")
                 print(f"\nTask {status}. {last.get('category', '')} {str(last.get('summary', ''))[:800]}")
                 print(f"Retry with `codingbrain resume {task['id'][:8]}`.")
             return task
@@ -293,12 +299,7 @@ async def accept(context: Context, task: dict) -> dict:
             task["attachments"] = {"redacted": "sensitive attachments: only checksums are kept",
                                    "sha256": [item["sha256"] for item in task["attachments"].get("attachments", [])]}
             context.brain.store.save(task)
-    if task["status"] == "accepted":
-        # Tested in the sandbox and accepted by the user: a verified fact about the project.
-        plan = (task.get("proposal") or {}).get("plan", "")[:300]
-        context.memory.remember("change", f"Accepted: {task['goal'][:240]}. Plan: {plan}"
-                                + (f" Branch {task['branch']}." if task.get("branch") else ""),
-                                verified=True, ref=f"task:{task['id']}")
+    # The accepted change's lesson was recorded in project memory by Brain.accept (Context.attach).
     return task
 
 

@@ -72,6 +72,38 @@ When records disagree, the lower authority level wins:
   context.
 - **Secrets redacted** before anything is stored.
 
+## Lessons from Coding Brain's own work
+
+When you accept a tested task, Coding Brain records one lesson in project memory. That happens
+whether you accept with `codingbrain accept`, `codingbrain backlog accept`, the engine API or the
+desktop. A lesson records, in this order:
+
+- **Verified fix:** the test result, for example "1 passed". It comes first so that a prompt that
+  shortens a lesson still shows it was verified.
+- **Problem:** the goal.
+- **Fix:** the plan and the files of the accepted change.
+- **Cause found:** only Coding Brain's own deterministic diagnoses, for example that tests share
+  state. A model's opinion is never recorded as a cause.
+- **Failed before:** for each earlier failed attempt, its category and the one most telling line
+  of the test output.
+
+When a run ends failed, Coding Brain records the observed failure as unverified, "Not solved yet".
+It keeps one record per goal, and the newest failure replaces the older one. When the goal is
+later solved, the accepted lesson retires that record. One accepted task gives exactly one
+record, so retries and restarts never duplicate it.
+
+Lessons are redacted like every other record. Raw logs are cut to one line, and the whole lesson
+to 1,500 characters.
+
+A new task receives a lesson only if it is relevant. The lesson must share a code identifier
+with the goal (such as `parse_duration`), or at least two distinctive words. The task receives
+at most three accepted lessons and two unsolved failures, closest first. The same relevance rule
+decides which earlier fixes appear among the task's `verified_fixes`. Project rules and
+conventions still apply to every task, as before.
+
+Records written before structured lessons existed keep working. Older "Accepted: ..." records
+are retrieved by the same rule, and older Coding Brain rows are still imported.
+
 ## Commands
 
 ```powershell
