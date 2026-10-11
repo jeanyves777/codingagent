@@ -119,7 +119,8 @@ def test_supervised_sandbox_stops_on_cancellation_and_timeout(tmp_path, monkeypa
     assert removed[-1][1:3] == ["rm", "-f"]
     monkeypatch.setattr(sandbox, "TIMEOUT", 0)
     result = sandbox.run_tests(tmp_path, "image", should_cancel=lambda: False)
-    assert result["output"].startswith("Sandbox timed out") and len(removed) == 2
+    assert result["output"].startswith("Sandbox timed out")
+    assert len([command for command in removed if command[1:3] == ["rm", "-f"]]) == 2
 
 
 def test_cancellation_during_tests_stops_task(brain, monkeypatch):
@@ -372,7 +373,12 @@ def test_ollama_prose_answer_is_finalized_with_structured_output(tmp_path, monke
 def test_a_slow_docker_cleanup_never_fails_the_task(tmp_path, monkeypatch):
     calls = []
 
+    class Healthy:
+        returncode, stdout, stderr = 0, "29.8.1", ""
+
     def slow_rm(command, **kwargs):
+        if command[1] == "info":
+            return Healthy()  # Docker answers; only the cleanup is slow
         calls.append(command)
         raise subprocess.TimeoutExpired(command, 15)
     monkeypatch.setattr(subprocess, "Popen", Process)
@@ -381,3 +387,25 @@ def test_a_slow_docker_cleanup_never_fails_the_task(tmp_path, monkeypatch):
     result = sandbox.run_tests(tmp_path, "image", should_cancel=lambda: False)
     assert result["passed"] is False and result["output"].startswith("Sandbox timed out")  # a result, not an error
     assert calls and calls[0][1:3] == ["rm", "-f"]
+
+
+def test_a_hung_docker_is_reported_as_infrastructure_with_what_to_do(tmp_path, monkeypatch):
+    def run(command, **kwargs):
+        if command[1] == "info":
+            raise subprocess.TimeoutExpired(command, 20)
+        return None
+    monkeypatch.setattr(subprocess, "Popen", Process)
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(sandbox, "TIMEOUT", 0)
+    result = sandbox.run_tests(tmp_path, "image", should_cancel=lambda: False)
+    assert result["infrastructure"] and "Restart Docker Desktop" in result["output"]
+    from brain.validators import classify_test_failure
+    assert classify_test_failure(result)["category"] == "infrastructure"
+
+
+def test_docker_ready_reports_a_stopped_engine(monkeypatch):
+    class Done:
+        returncode, stdout, stderr = 1, "", "error during connect: the engine is stopped"
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: Done())
+    ready, detail = sandbox.docker_ready()
+    assert not ready and "engine is stopped" in detail

@@ -55,6 +55,35 @@ def _remove(name: str):
         pass
 
 
+DOCKER_HELP = ("Docker is not responding ({detail}). Restart Docker Desktop (tray icon > Restart, or quit and "
+               "reopen it), wait for \"Engine running\", then retry. Your code was not tested, so this is not a test failure.")
+
+
+def docker_ready() -> tuple[bool, str]:
+    """Whether the Docker engine answers at all, within 20 s. Used to explain a timeout or a docker
+    error: a hung Docker Desktop is an infrastructure problem, not something to repair in the code."""
+    try:
+        probe = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"], capture_output=True, text=True,
+                               timeout=20)
+    except subprocess.TimeoutExpired:
+        return False, "it did not answer within 20 s"
+    except OSError as error:
+        return False, f"docker could not be started: {error}"
+    except Exception:  # a test double or an unexpected runner: do not guess
+        return True, ""
+    if getattr(probe, "returncode", 0) != 0 or not str(getattr(probe, "stdout", "x")).strip():
+        return False, (str(getattr(probe, "stderr", "") or "").strip()[:200] or "the engine is not running")
+    return True, ""
+
+
+def _docker_problem(selected: dict) -> dict | None:
+    ready, detail = docker_ready()
+    if ready:
+        return None
+    return {"passed": False, "exit_code": None, "profile": selected["name"], "infrastructure": True,
+            "output": DOCKER_HELP.format(detail=detail)}
+
+
 def _stop(process):
     process.kill()
     try:
@@ -125,8 +154,13 @@ def run_tests(workspace: Path, images: str | dict, should_cancel=None, only=None
                 _remove(name)
                 code = "timeout"
         if code == "timeout":
-            return {"passed": False, "exit_code": None, "profile": selected["name"],
-                    "output": f"Sandbox timed out after {TIMEOUT} s (on a slow machine, set CODINGBRAIN_SANDBOX_TIMEOUT)"}
+            return _docker_problem(selected) or {
+                "passed": False, "exit_code": None, "profile": selected["name"],
+                "output": f"Sandbox timed out after {TIMEOUT} s (on a slow machine, set CODINGBRAIN_SANDBOX_TIMEOUT)"}
+        if code in (125, 126, 127):  # docker itself failed (daemon, image or runtime), not the tests
+            problem = _docker_problem(selected)
+            if problem:
+                return problem
         if code == "cancelled":
             return {"passed": False, "exit_code": None, "profile": selected["name"],
                     "cancelled": True, "output": "Sandbox stopped by cancellation"}

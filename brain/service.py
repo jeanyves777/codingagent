@@ -948,6 +948,10 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                                 "when the output above shows none ran.")
                 elif evidence["exit_code"] in (None, 5, 125, 126, 127) or sandbox_error(evidence.get("output", "")):
                     # Missing tests or sandbox problems are not the model's fault; never escalate them.
+                    # Keep the reason ("Docker is not responding ...") so the user sees what to do.
+                    task.setdefault("failures", []).append({"attempt": attempt, "category": "infrastructure"
+                                                            if evidence.get("infrastructure") else "sandbox",
+                                                            "summary": str(evidence.get("output", ""))[:800]})
                     task["status"] = "failed"
                     return
                 else:
