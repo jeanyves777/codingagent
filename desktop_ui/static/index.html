@@ -97,6 +97,7 @@
           <div class="explorer-tabs" role="tablist" aria-label="Explorer tabs">
             <button role="tab" class="active" id="tab-files" aria-selected="true">Files</button>
             <button role="tab" id="tab-activity" aria-selected="false">Activity</button>
+            <button role="tab" id="tab-backlog" aria-selected="false">Backlog</button>
           </div>
           <div class="file-panel" id="file-panel">
             <div class="file-toolbar"><span id="explorer-folder" class="folder-name">No project selected</span><button id="refresh-files" title="Refresh files" aria-label="Refresh files">↻</button></div>
@@ -104,6 +105,10 @@
             <div class="preview" id="preview" hidden><div class="preview-bar"><span id="preview-name"></span><button id="preview-close" aria-label="Close preview">✕</button></div><pre id="preview-content"></pre></div>
           </div>
           <div class="activity-panel" id="activity-panel" hidden><div class="activity-title">Live activity</div><div id="activity-list" class="activity-list"><p class="muted">Activity appears here when Coding Brain starts working.</p></div></div>
+          <div class="backlog-panel" id="backlog-panel" hidden>
+            <div class="file-toolbar"><span class="folder-name" id="backlog-summary">Backlog</span><button id="refresh-backlog" title="Refresh backlog" aria-label="Refresh backlog">↻</button></div>
+            <div id="backlog-body" class="backlog-body" role="status" aria-live="polite"><p class="muted">Select a project to see its backlog.</p></div>
+          </div>
           <div class="explorer-footer"><span id="branch-name">◇ No repository</span><span id="file-count"></span></div>
         </aside>
       </div>

@@ -533,41 +533,33 @@ def cmd_trace(args, layout):
 
 def cmd_backlog(args, layout):
     """The capability backlog and the conductor that works through it with every available agent."""
-    from ..conductor import Backlog, BacklogError, BrainExecutor, Conductor, Resources
+    from ..conductor import (Backlog, BacklogError, BrainExecutor, Conductor, add_from_project, backlog_status,
+                             ledger_report)
     context = Context(layout, Path.cwd())
     backlog = Backlog(context.data / "backlog.sqlite3")
     try:
         if args.action == "add":
             if not args.goal:
                 raise SystemExit("backlog add needs a goal")
-            acceptance = None
-            if args.accept_file or args.accept_node:
-                files = {}
-                root = context.root.resolve()
-                for name in args.accept_file or []:
-                    path = (context.root / name).resolve()
-                    if not path.is_relative_to(root) or not path.is_file():
-                        raise SystemExit(f"acceptance file must be a file inside the project: {name}")
-                    files[path.relative_to(root).as_posix()] = path.read_text(encoding="utf-8")  # frozen now
-                acceptance = {"files": files, "nodes": args.accept_node or [], "criteria": args.criteria or ""}
-            item = backlog.add(" ".join(args.goal), title=args.title, priority=args.priority,
-                               depends_on=[backlog.get(ref)["id"] for ref in args.depends or []],
-                               acceptance=acceptance, max_attempts=args.max_attempts)
+            item = add_from_project(backlog, context.root, " ".join(args.goal), title=args.title,
+                                    priority=args.priority, depends_on=args.depends or [],
+                                    accept_files=args.accept_file or [], accept_nodes=args.accept_node or [],
+                                    criteria=args.criteria, max_attempts=args.max_attempts)
             print(f"Added {item['id']} ({item['priority_name']}, {item['state']})" +
-                  ("" if acceptance else "\nNote: without acceptance tests this item can never be verified."))
+                  ("" if item["acceptance"] else "\nNote: without acceptance tests this item can never be verified."))
         elif args.action in {"list", "status"}:
-            status = Conductor(backlog, None, resources=_backlog_resources(args, context)).status()
+            status = backlog_status(backlog, _backlog_resources(args, context).local_slots())
             if args.json:
                 print(json.dumps(status, indent=2))
             else:
                 print_backlog_status(status)
         elif args.action == "ledger":
-            entries = backlog.ledger(backlog.get(args.goal[0])["id"] if args.goal else None)
+            report = ledger_report(backlog, args.goal[0] if args.goal else None)
             if args.json:
-                print(json.dumps({"intact": backlog.verify_ledger(), "entries": entries}, indent=2, default=str))
+                print(json.dumps(report, indent=2, default=str))
             else:
-                print(f"Ledger {'intact' if backlog.verify_ledger() else 'BROKEN: an entry was changed or removed'}")
-                for entry in entries:
+                print(f"Ledger {'intact' if report['intact'] else 'BROKEN: an entry was changed or removed'}")
+                for entry in report["entries"]:
                     print(f"  {entry['item_id']}  {entry['kind']:<12} {entry['verdict']:<8} "
                           f"exit {entry['evidence'].get('exit_code')}  {entry['digest'][:12]}")
         elif args.action == "cancel":

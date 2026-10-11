@@ -236,6 +236,65 @@ class Backlog:
         return [dict(row) for row in reversed(rows)]
 
 
+def backlog_status(backlog: Backlog | None, local_slots: int) -> dict:
+    """The backlog as people and programs see it: Conductor.status, `codingbrain backlog status`
+    and the engine API's backlog.status all use this one function. It only reads: it starts no
+    agent, no task and no Brain service. `None` is a project that has no backlog yet."""
+    items = backlog.list() if backlog else []
+    by_id = {item["id"]: item for item in items}
+    counts = {state: sum(1 for item in items if item["state"] == state) for state in sorted(STATES)}
+    running = [attempt for attempt in (backlog.open_attempts() if backlog else [])
+               if by_id.get(attempt["item_id"], {}).get("state") in {"running", "verifying"}]
+    people = {"awaiting_approval", "verified"}
+    return {
+        "counts": {state: count for state, count in counts.items() if count},
+        "agents": {"local_slots": local_slots,
+                   "busy": [{"item": a["item_id"], "strategy": a["strategy"], "task": a["task_id"]} for a in running]},
+        "items": [{"id": item["id"], "title": item["title"], "priority": item["priority_name"],
+                   "state": item["state"], "attempts": item["attempts"], "reason": item["reason"] or ""}
+                  for item in items],
+        "finished": all(item["state"] in {"done", "blocked", "cancelled"} for item in items),
+        # nothing is running or ready, and what is left waits for a person (an approval, an
+        # acceptance, or a dependency that is verified but not yet accepted)
+        "waiting_on_people_only": bool(items) and not running and
+                                  not any(item["state"] in {"ready", "running", "verifying"} for item in items) and
+                                  any(item["state"] in people for item in items),
+        "ledger_intact": backlog.verify_ledger() if backlog else True,
+    }
+
+
+def ledger_report(backlog: Backlog | None, item: str | None = None) -> dict:
+    """The evidence ledger (optionally one item's entries, by id prefix) and whether its hash
+    chain is intact. Read-only; used by `codingbrain backlog ledger` and the engine API."""
+    if backlog is None:
+        if item:
+            raise KeyError(f"no single backlog item matches {item!r}")
+        return {"intact": True, "entries": []}
+    return {"intact": backlog.verify_ledger(), "entries": backlog.ledger(backlog.get(item)["id"] if item else None)}
+
+
+def add_from_project(backlog: Backlog, root: Path, goal: str, *, title: str | None = None, priority: str = "P1",
+                     depends_on=(), accept_files=(), accept_nodes=(), criteria: str | None = None,
+                     max_attempts: int = 3) -> dict:
+    """Add an item whose acceptance tests are files of the project at `root`, frozen now: later
+    edits to those files (by anyone, including an agent) do not change what verification runs.
+    Shared by `codingbrain backlog add` and the engine API's backlog.add. Dependencies may be
+    given by id prefix."""
+    acceptance = None
+    if accept_files or accept_nodes:
+        files = {}
+        root = Path(root).resolve()
+        for name in accept_files:
+            path = (root / name).resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                raise BacklogError(f"acceptance file must be a file inside the project: {name}")
+            files[path.relative_to(root).as_posix()] = path.read_text(encoding="utf-8")  # frozen now
+        acceptance = {"files": files, "nodes": list(accept_nodes), "criteria": criteria or ""}
+    return backlog.add(goal, title=title, priority=priority,
+                       depends_on=[backlog.get(ref)["id"] for ref in depends_on],
+                       acceptance=acceptance, max_attempts=max_attempts)
+
+
 class Resources:
     """How many local agents this machine runs efficiently: one per `per_agent_gb` of memory and
     two cores, never more than `max_local`, at least one. Read again on every tick."""
@@ -482,26 +541,7 @@ class Conductor:
             await asyncio.sleep(poll)
 
     def status(self) -> dict:
-        items = self.backlog.list()
-        counts = {state: sum(1 for item in items if item["state"] == state) for state in sorted(STATES)}
-        running = [attempt for attempt in self.backlog.open_attempts()
-                   if self.backlog.get(attempt["item_id"])["state"] in {"running", "verifying"}]
-        people = {"awaiting_approval", "verified"}
-        return {
-            "counts": {state: count for state, count in counts.items() if count},
-            "agents": {"local_slots": self.resources.local_slots(),
-                       "busy": [{"item": a["item_id"], "strategy": a["strategy"], "task": a["task_id"]} for a in running]},
-            "items": [{"id": item["id"], "title": item["title"], "priority": item["priority_name"],
-                       "state": item["state"], "attempts": item["attempts"], "reason": item["reason"] or ""}
-                      for item in items],
-            "finished": all(item["state"] in {"done", "blocked", "cancelled"} for item in items),
-            # nothing is running or ready, and what is left waits for a person (an approval, an
-            # acceptance, or a dependency that is verified but not yet accepted)
-            "waiting_on_people_only": bool(items) and not running and
-                                      not any(item["state"] in {"ready", "running", "verifying"} for item in items) and
-                                      any(item["state"] in people for item in items),
-            "ledger_intact": self.backlog.verify_ledger(),
-        }
+        return backlog_status(self.backlog, self.resources.local_slots())
 
 
 class BrainExecutor:

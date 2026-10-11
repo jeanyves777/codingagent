@@ -76,6 +76,14 @@ Everything is stored in the project's data folder (`backlog.sqlite3`): items, at
 ledger and the scheduler's decisions. Stopping `backlog run` (Ctrl+C) or restarting the computer
 loses nothing. The next run picks up the open attempts where they are.
 
+## From the desktop and other programs
+
+The [engine API](engine-api.md) offers the backlog as `backlog.status` and `backlog.ledger`
+(reads that never start the service or a run) and `backlog.add` (the same checks as
+`backlog add`; it starts nothing). The desktop's Backlog tab shows the status read-only: counts,
+busy agents, items and their reasons, "waiting for you" and whether the ledger is intact. Neither
+the API nor the desktop can run the backlog: that stays `codingbrain backlog run`.
+
 ## Evidence
 
 - `tests/test_conductor.py`: the scheduler with scripted agents. Covers parallel slots, priority,
@@ -85,6 +93,8 @@ loses nothing. The next run picks up the open attempts where they are.
   overlap, an agent that skips the tests or replaces pytest is caught and retried, and your
   acceptance releases a dependent.
 - `tests/test_conductor_cli.py`: the commands.
+- `tests/test_engine_backlog.py` and `tests/test_desktop_backlog.py`: the engine API operations
+  and the desktop's read-only Backlog tab.
 - `tests/test_conductor_real.py`: a real local model through Ollama and the real Docker sandbox,
   run in CI (`installer-e2e`).
   - The conductor's guarantees are a merge gate.

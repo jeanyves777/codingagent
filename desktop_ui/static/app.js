@@ -22,6 +22,7 @@
   let activeMaintenance = null;
   let maintenancePoll = null;
   let feedbackTimer = null;
+  let backlogTimer = null;
   const busyButtons = new WeakMap();
 
   function busyButton(button, working) {
@@ -307,6 +308,7 @@
     $('preview').hidden = true;
     if (project) loadTree();
     else renderEmptyExplorer();
+    if (!$('backlog-panel').hidden) loadBacklog();
   }
 
   function renderEmptyExplorer() {
@@ -445,6 +447,71 @@
     list.append(node);
     activityCount++;
     list.scrollTop = list.scrollHeight;
+  }
+
+  // The backlog is read from the installed engine (backlog.status) and only shown here: this
+  // window never works the backlog. `codingbrain backlog run` does, and approvals stay yours.
+  function backlogNote(text, broken = false) {
+    const note = document.createElement('p');
+    note.className = 'backlog-note' + (broken ? ' broken' : '');
+    note.textContent = text;
+    return note;
+  }
+
+  function renderBacklog(report) {
+    const body = $('backlog-body');
+    body.replaceChildren();
+    const status = report && report.status;
+    if (!status) {
+      $('backlog-summary').textContent = 'Backlog';
+      const empty = document.createElement('p');
+      empty.className = 'muted';
+      empty.textContent = (report && report.detail) || 'No backlog.';
+      body.append(empty);
+      return;
+    }
+    const counts = Object.entries(status.counts || {}).map(([state, count]) => `${count} ${state.replace(/_/g, ' ')}`);
+    $('backlog-summary').textContent = counts.length ? 'Backlog: ' + counts.join(', ') : 'Backlog: empty';
+    const busy = (status.agents && status.agents.busy) || [];
+    const agents = document.createElement('p');
+    agents.className = 'backlog-line';
+    agents.textContent = `Agents: ${busy.length} busy of ${status.agents ? status.agents.local_slots : '?'} local slots` +
+      busy.map(agent => `\n  ${agent.item} · ${agent.strategy} · task ${String(agent.task || '').slice(0, 8)}`).join('');
+    agents.style.whiteSpace = 'pre-wrap';
+    body.append(agents);
+    if (status.waiting_on_people_only) {
+      body.append(backlogNote('Waiting for you: approve proposals (codingbrain resume) or accept verified results (codingbrain accept).'));
+    }
+    body.append(status.ledger_intact
+      ? backlogNote('Evidence ledger intact.')
+      : backlogNote('Evidence ledger BROKEN: an entry was changed or removed.', true));
+    if (!(status.items || []).length) {
+      const empty = document.createElement('p');
+      empty.className = 'muted';
+      empty.textContent = 'No items yet. Add them with codingbrain backlog add.';
+      body.append(empty);
+    }
+    for (const item of status.items || []) {
+      const node = document.createElement('div');
+      node.className = 'backlog-item ' + String(item.state || '').replace(/[^a-z_]/g, '');
+      const title = document.createElement('strong');
+      title.textContent = item.title;
+      const meta = document.createElement('small');
+      meta.textContent = `${item.priority} · ${String(item.state || '').replace(/_/g, ' ')} · ${item.attempts} ${item.attempts === 1 ? 'try' : 'tries'} · ${item.id}`;
+      node.append(title, meta);
+      if (item.reason) {
+        const reason = document.createElement('p');
+        reason.textContent = item.reason;
+        node.append(reason);
+      }
+      body.append(node);
+    }
+  }
+
+  async function loadBacklog() {
+    if (!currentProject) { renderBacklog({status: null, detail: 'Select a project to see its backlog.'}); return; }
+    try { renderBacklog(await api('/api/backlog')); }
+    catch (e) { renderBacklog({status: null, detail: 'Unable to read the backlog: ' + e.message}); }
   }
 
   function approval(jobId, details) {
@@ -634,17 +701,20 @@
   for (const item of document.querySelectorAll('[data-suggestion]')) {
     item.addEventListener('click', () => {$('prompt').value = item.dataset.suggestion; $('prompt').focus();});
   }
-  for (const kind of ['files','activity']) {
+  const explorerTabs = ['files','activity','backlog'];
+  for (const kind of explorerTabs) {
     $('tab-' + kind).addEventListener('click', () => {
-      const fileMode = kind === 'files';
-      $('file-panel').hidden = !fileMode;
-      $('activity-panel').hidden = fileMode;
-      $('tab-files').classList.toggle('active', fileMode);
-      $('tab-activity').classList.toggle('active', !fileMode);
-      $('tab-files').setAttribute('aria-selected', String(fileMode));
-      $('tab-activity').setAttribute('aria-selected', String(!fileMode));
+      for (const other of explorerTabs) {
+        $(other + '-panel').hidden = other !== kind;
+        $('tab-' + other).classList.toggle('active', other === kind);
+        $('tab-' + other).setAttribute('aria-selected', String(other === kind));
+      }
+      clearInterval(backlogTimer);
+      backlogTimer = null;
+      if (kind === 'backlog') { loadBacklog(); backlogTimer = setInterval(loadBacklog, 15000); }
     });
   }
+  $('refresh-backlog').addEventListener('click', loadBacklog);
   $('collapse-explorer').addEventListener('click', () => setExplorerVisibility(false));
   $('open-explorer').addEventListener('click', () => setExplorerVisibility(true));
   $('profile-trigger').addEventListener('click', () => {

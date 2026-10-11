@@ -12,7 +12,9 @@ read-only too. An action does exactly what its name says, and only when called. 
   - conversation.send only proposes work, as an `action` for the caller to confirm;
   - tasks.approve runs a proposal only with its current digest, so an approval is bound to what
     was shown and cannot be replayed once the task has moved on;
-  - acceptance creates a new branch and never changes the checked-out one.
+  - acceptance creates a new branch and never changes the checked-out one;
+  - backlog.add only records an item: the backlog is worked by `codingbrain backlog run`, which
+    this API does not offer, and backlog.status reads without starting the service or a run.
 Every action goes through the same service authority checks as the CLI: path safety, the
 sandbox, review, premium budgets and digest binding. The API adds no shortcuts and has no --yes.
 """
@@ -51,6 +53,11 @@ OPERATIONS = {
     "tasks.get": ("read", {"project_id": ("str", True), "task_id": ("str", True)}, "one task (summary)"),
     "tasks.events": ("read", {"project_id": ("str", True), "task_id": ("str", True), "after_seq": ("int", False)},
                      "journal events after a sequence number"),
+    "backlog.status": ("read", {"project_id": ("str", True), "max_agents": ("int", False)},
+                       "the continuous-orchestration backlog: counts, agents, items, finished, "
+                       "waiting_on_people_only, ledger_intact (never starts the service or a run)"),
+    "backlog.ledger": ("read", {"project_id": ("str", True), "item_id": ("str", False)},
+                       "the backlog's verification evidence and whether its hash chain is intact"),
     "projects.register": ("action", {"path": ("str", True)}, "registers an existing Git project (read-only to it)"),
     "projects.create": ("action", {"goal": ("str", True), "name": ("str", False), "root": ("str", False),
                                    "stack": ("str", False), "git_name": ("str", False), "git_email": ("str", False)},
@@ -68,9 +75,15 @@ OPERATIONS = {
                             "(pending_tool_approval); the task then continues or stops"),
     "tasks.stop": ("action", {"project_id": ("str", True), "task_id": ("str", True)}, "requests cancellation"),
     "tasks.resume": ("action", {"project_id": ("str", True), "task_id": ("str", True)}, "continues an unfinished task"),
+    "backlog.add": ("action", {"project_id": ("str", True), "goal": ("str", True), "title": ("str", False),
+                               "priority": ("str", False), "depends_on": ("list[str]", False),
+                               "accept_files": ("list[str]", False), "accept_nodes": ("list[str]", False),
+                               "criteria": ("str", False), "max_attempts": ("int", False)},
+                    "adds a backlog item; acceptance files are read from the project and frozen now. "
+                    "Nothing is started: the backlog is worked only by `codingbrain backlog run`"),
 }
 LONG = {"tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
-CHECK_TYPES = {"str": str, "bool": bool, "int": int}
+CHECK_TYPES = {"str": str, "bool": bool, "int": int, "list[str]": list}
 
 
 def describe() -> dict:
@@ -124,6 +137,7 @@ class Engine:
         self.thread.start()
         self.lock = threading.Lock()
         self._assistant = None
+        self._machine = None
 
     def close(self):
         self.loop.call_soon_threadsafe(self.loop.stop)
@@ -138,6 +152,8 @@ class Engine:
             if required and key not in params:
                 raise ApiError("bad_params", f"{op} needs '{key}'")
             if key in params and params[key] is not None and not isinstance(params[key], CHECK_TYPES[kind]):
+                raise ApiError("bad_params", f"{op}: '{key}' must be {kind}")
+            if kind == "list[str]" and any(not isinstance(value, str) for value in params.get(key) or []):
                 raise ApiError("bad_params", f"{op}: '{key}' must be {kind}")
         unknown = set(params) - set(spec)
         if unknown:
@@ -243,7 +259,45 @@ class Engine:
         telemetry = context._brain.telemetry if context._brain else Telemetry(context.data / "telemetry.sqlite3")
         return telemetry.journal([task_id], after=after_seq, limit=2000)
 
+    def backlog(self, project_id: str):
+        """The project's backlog, or None when it has none yet. Opening it never creates one, never
+        builds the Brain service and never runs the conductor."""
+        from ..conductor import Backlog
+        path = self.context(project_id).data / "backlog.sqlite3"
+        return Backlog(path) if path.is_file() else None
+
+    def op_backlog_status(self, project_id: str, max_agents: int | None = None):
+        from ..conductor import Resources, backlog_status
+        if self._machine is None:  # facts are cached by the System object: one probe per engine
+            from .system import System
+            self._machine = self.system or System()
+        backlog = self.backlog(project_id)
+        return backlog_status(backlog, Resources(self._machine.facts, max_local=max_agents or 4).local_slots())
+
+    def op_backlog_ledger(self, project_id: str, item_id: str | None = None):
+        from ..conductor import ledger_report
+        try:
+            return ledger_report(self.backlog(project_id), item_id)
+        except KeyError as error:
+            raise ApiError("not_found", str(error).strip("'\"")) from error
+
     # actions --------------------------------------------------------------------------------------------
+    def op_backlog_add(self, project_id: str, goal: str, title=None, priority=None, depends_on=None,
+                       accept_files=None, accept_nodes=None, criteria=None, max_attempts=None):
+        """The same checks as `codingbrain backlog add`. Adding starts nothing: items are worked by
+        `codingbrain backlog run`, where every approval gate stays with the user."""
+        from ..conductor import Backlog, add_from_project
+        context = self.context(project_id)
+        item = add_from_project(Backlog(context.data / "backlog.sqlite3"), context.root, goal, title=title,
+                                priority=priority or "P1", depends_on=depends_on or [],
+                                accept_files=accept_files or [], accept_nodes=accept_nodes or [],
+                                criteria=criteria, max_attempts=3 if max_attempts is None else max_attempts)
+        acceptance = item["acceptance"]
+        return {"id": item["id"], "title": item["title"], "priority": item["priority_name"], "state": item["state"],
+                "attempts": item["attempts"], "reason": item["reason"] or "", "depends_on": item["depends_on"],
+                "acceptance": {"files": sorted(acceptance["files"]), "nodes": acceptance["nodes"],
+                               "criteria": acceptance["criteria"]} if acceptance else None}
+
     def op_projects_register(self, path: str):
         from .assistant import current_repository
         from .cli import Context
