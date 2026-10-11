@@ -534,3 +534,23 @@ def test_task_milestones_join_the_project_conversation(world, monkeypatch):
     assert any(text.startswith('[Task] Accepted "Fix x" on branch') for text in history)
     other = engine.call("conversation.history", {"project_id": "someone-else"})
     assert not any("[Task]" in turn["content"] for turn in other)  # never in another project's conversation
+
+
+def test_an_unexpected_engine_error_leaves_the_task_failed_not_mid_execution(world, monkeypatch):
+    import subprocess
+    engine, pid = world["engine"], world["project"]["id"]
+    brain = with_fake_brain(world, monkeypatch)
+    task = engine.call("tasks.start", {"project_id": pid, "goal": "Fix x"})
+
+    async def hung_sandbox(task_id, digest):
+        stored = brain.store.get(task_id)
+        stored["status"] = "testing"
+        brain.store.save(stored)
+        raise subprocess.TimeoutExpired(["docker", "rm", "-f", "coding-brain-x"], 15)
+    monkeypatch.setattr(brain, "execute", hung_sandbox)
+    with pytest.raises((ApiError, subprocess.TimeoutExpired)):  # the stdio server reports it as engine_error
+        engine.call("tasks.approve", {"project_id": pid, "task_id": task["id"], "digest": task["digest"], "decision": "approve"})
+    stored = brain.store.get(task["id"])
+    assert stored["status"] == "failed" and "TimeoutExpired" in stored["failures"][-1]["summary"]
+    from brain.local.session import running_tasks
+    assert not [item for item in running_tasks(world["layout"]) if item["id"] == task["id"]]  # updates are not blocked

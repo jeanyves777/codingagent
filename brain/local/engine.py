@@ -240,6 +240,20 @@ class Engine:
                                         read=lambda prompt="": "", interactive=False)
         return self._assistant
 
+    @staticmethod
+    def mark_failed(brain, task_id: str, error: Exception):
+        """An unexpected error (a hung sandbox, a crashed tool) must not leave the task recorded as
+        planning/testing forever: that blocks updates and confuses resume. Record it as failed."""
+        try:
+            task = brain.store.get(task_id)
+            if task.get("status") in {"planning", "running", "testing", "queued", "proposed_pending"}:
+                task["status"] = "failed"
+                task.setdefault("failures", []).append(
+                    {"summary": f"Interrupted by an engine error: {type(error).__name__}: {str(error)[:300]}"})
+                brain.store.save(task)
+        except Exception:
+            pass  # recording the failure must never hide the original error
+
     def remember_task(self, op: str, project_id: str | None, task: dict):
         """Task milestones become part of the project's conversation, so a follow-up ("now add tests
         for it") is understood. Facts from the task record only; never the diff or file contents."""
@@ -434,6 +448,9 @@ class Engine:
                 await self._drain(brain)
             except asyncio.CancelledError:  # tasks.stop: the task stopped at a safe boundary
                 pass
+            except Exception as error:  # never leave the task looking mid-execution
+                self.mark_failed(brain, task["id"], error)
+                raise
             return brain.store.get(task["id"])
         try:
             return task_summary(self.run(go()))
@@ -459,6 +476,9 @@ class Engine:
                 await self._drain(brain)
             except asyncio.CancelledError:  # tasks.stop: the task stopped at a safe boundary
                 pass
+            except Exception as error:  # never leave the task looking mid-execution
+                self.mark_failed(brain, task_id, error)
+                raise
             return brain.store.get(task_id)
         try:
             return task_summary(self.run(go()))
@@ -495,6 +515,9 @@ class Engine:
                 await self._drain(brain)
             except asyncio.CancelledError:  # tasks.stop: the task stopped at a safe boundary
                 pass
+            except Exception as error:  # never leave the task looking mid-execution
+                self.mark_failed(brain, task_id, error)
+                raise
             return brain.store.get(task_id)
         try:
             return task_summary(self.run(go()))
@@ -522,6 +545,9 @@ class Engine:
                 await self._drain(brain)
             except asyncio.CancelledError:  # tasks.stop: the task stopped at a safe boundary
                 pass
+            except Exception as error:  # never leave the task looking mid-execution
+                self.mark_failed(brain, task_id, error)
+                raise
             return brain.store.get(task_id)
         try:
             return task_summary(self.run(go()))
