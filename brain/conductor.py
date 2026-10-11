@@ -38,6 +38,7 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 from .redaction import redact
+from .sandbox import NODE_ID  # the sandbox runs only node ids of this form: refused when added
 
 PRIORITIES = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 # ready -> running -> (awaiting_approval) -> verifying -> verified -> done (accepted by the user)
@@ -55,8 +56,6 @@ TEST_CONFIG = {"conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.t
 # project folder first). A change that adds one is never verified.
 RUNNER_SHADOWS = {"pytest", "pytest.py", "_pytest", "pluggy", "py.py", "iniconfig", "sitecustomize.py",
                   "usercustomize.py"}
-NODE_ID = re.compile(r"[A-Za-z0-9_./-]+\.py(::[A-Za-z0-9_\[\]-]+)*")
-
 
 class BacklogError(ValueError):
     pass
@@ -79,7 +78,8 @@ def _check_acceptance(acceptance: dict | None) -> dict | None:
         raise BacklogError("acceptance needs test files and the pytest node ids to run")
     for node in nodes:
         if not NODE_ID.fullmatch(node) or node.split("::")[0] not in files:
-            raise BacklogError(f"acceptance node {node!r} must name a test in the acceptance files")
+            raise BacklogError(f"acceptance node {node!r} must name a test in the acceptance files, "
+                               "as path/to/test_file.py::test_name")
     return {"files": files, "nodes": nodes, "criteria": str(acceptance.get("criteria") or "")[:4000]}
 
 

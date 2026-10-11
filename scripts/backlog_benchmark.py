@@ -129,6 +129,11 @@ def peak_overlap(intervals):
     return peak, round(together / total, 3) if total else 0.0
 
 
+def nodes(path, content):
+    import re
+    return [f"{path}::{name}" for name in re.findall(r"^def (test_\w+)", content, re.M)]
+
+
 def git(path, *arguments):
     subprocess.run(["git", "-C", str(path), *arguments], check=True, capture_output=True)
 
@@ -177,11 +182,11 @@ def main():
     added = {}
     for title, goal, path, content in chosen:
         added[title] = backlog.add(goal, title=title, max_attempts=3,
-                                   acceptance={"files": {path: content}, "nodes": [f"{path}"]})["id"]
+                                   acceptance={"files": {path: content}, "nodes": nodes(path, content)})["id"]
     if args.accept and "slugify" in added:
         title, goal, path, content = DEPENDENT
         added[title] = backlog.add(goal, title=title, depends_on=[added["slugify"]], max_attempts=3,
-                                   acceptance={"files": {path: content}, "nodes": [path]})["id"]
+                                   acceptance={"files": {path: content}, "nodes": nodes(path, content)})["id"]
     resources = cli._backlog_resources(argparse.Namespace(max_agents=args.agents, remeasure=False), context, measure=True)
     executor = BrainExecutor(context.brain, project.name)
     conductor = Conductor(backlog, executor, auto_execute=True, stall_seconds=900, resources=resources)

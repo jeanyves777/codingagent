@@ -120,6 +120,9 @@ def test_backlog_validates_priorities_dependencies_and_acceptance(tmp_path):
         backlog.add("x", acceptance={"files": {"../escape.py": "x"}, "nodes": ["../escape.py::t"]})
     with pytest.raises(BacklogError):
         backlog.add("x", acceptance={"files": {"t.py": "x"}, "nodes": ["other.py::t"]})
+    for unrunnable in ("t.py", "t.py::C::test_x"):  # the sandbox would refuse to run these
+        with pytest.raises(BacklogError, match="test_name"):
+            backlog.add("x", acceptance={"files": {"t.py": "x"}, "nodes": [unrunnable]})
     first = backlog.add("first", priority="P2", acceptance=ACCEPTANCE)
     second = backlog.add("second", priority="P0", depends_on=[first["id"]], acceptance=ACCEPTANCE)
     assert second["state"] == "waiting" and first["state"] == "ready"
