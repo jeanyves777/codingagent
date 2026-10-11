@@ -35,6 +35,7 @@ Source: "..\..\dist\CodingBrainDesktop\*"; DestDir: "{app}"; Flags: ignoreversio
 Source: "{#EngineBundle}\*"; DestDir: "{app}\engine"; Flags: ignoreversion
 Source: "Setup-CodingBrain.ps1"; DestDir: "{app}\engine"; Flags: ignoreversion
 Source: "Verify-CodingBrainEngine.py"; DestDir: "{app}\engine"; Flags: ignoreversion
+Source: "Setup-CodingBrain.cmd"; DestDir: "{app}\engine"; Flags: ignoreversion
 #endif
 
 [Tasks]
@@ -49,7 +50,9 @@ Name: "{autodesktop}\Coding Brain Desktop"; Filename: "{app}\CodingBrainDesktop.
 ; Ticking this box opens the setup window; Coding Brain's own installer then shows its plan and asks
 ; before it changes anything (no -Yes: the box is not consent to an unseen plan). Windows still asks
 ; before administrator changes, and the desktop opens when it finishes.
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\engine\Setup-CodingBrain.ps1"" -Bundle ""{app}\engine"" -Desktop ""{app}\CodingBrainDesktop.exe"""; Description: "Set up Coding Brain engine and tools (recommended)"; Flags: postinstall skipifsilent nowait
+; Launched through Explorer, not as Setup's child: Setup runs with Windows redirection trust
+; enforced and its children inherit it, which hides tools installed behind junctions (Codex).
+Filename: "{win}\explorer.exe"; Parameters: """{app}\engine\Setup-CodingBrain.cmd"""; Description: "Set up Coding Brain engine and tools (recommended)"; Flags: postinstall skipifsilent nowait
 Filename: "{app}\CodingBrainDesktop.exe"; Description: "Launch Coding Brain Desktop now (without setup)"; Flags: nowait postinstall skipifsilent unchecked
 #else
 Filename: "{app}\CodingBrainDesktop.exe"; Description: "Launch Coding Brain Desktop"; Flags: nowait postinstall skipifsilent

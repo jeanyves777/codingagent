@@ -78,8 +78,13 @@ def test_desktop_installer_never_accepts_the_environment_plan_for_the_user():
     setup script itself was started unattended with -Yes, never by default."""
     root = Path(__file__).resolve().parents[1] / "installer" / "windows"
     iss = (root / "CodingBrainDesktop.iss").read_text(encoding="utf-8")
-    setup_line = next(line for line in iss.splitlines() if "Setup-CodingBrain.ps1" in line and line.startswith("Filename"))
+    # Setup starts through Explorer (outside the installer's redirection-trust restrictions) via
+    # Setup-CodingBrain.cmd, which runs Setup-CodingBrain.ps1: neither may add -Yes.
+    setup_line = next(line for line in iss.splitlines() if "Setup-CodingBrain" in line and line.startswith("Filename"))
+    assert "explorer.exe" in setup_line and "Setup-CodingBrain.cmd" in setup_line
     assert not re.search(r"(?i)\s-Yes\b", setup_line)
+    launcher = (root / "Setup-CodingBrain.cmd").read_text(encoding="utf-8")
+    assert "Setup-CodingBrain.ps1" in launcher and not re.search(r"(?i)\s-Yes\b", launcher)
     script = (root / "Setup-CodingBrain.ps1").read_text(encoding="utf-8")
     assert not re.search(r"(?i)-Full -Yes|install --full --yes", script)
     assert "$installYes = if ($Yes)" in script and "$cliYes = if ($Yes)" in script

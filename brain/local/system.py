@@ -88,6 +88,16 @@ def decode(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+
+def readable_file(path: Path) -> bool:
+    """is_file() that treats an unreadable location as absent. A PATH entry may be a junction this
+    process may not traverse (WinError 448, "untrusted mount point", e.g. under Windows redirection
+    protection) or a dead network share; one such folder must not break every program lookup."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
 class System:
     """The real machine."""
     simulated = False
@@ -115,12 +125,12 @@ class System:
             for extension in extensions:
                 candidate = Path(directory) / (name + extension)
                 checked.append(str(candidate))
-                if candidate.is_file():
+                if readable_file(candidate):
                     return str(candidate), checked
         for candidate in KNOWN_LOCATIONS.get(name, ()):  # installed, but this session's PATH predates it
             path = windows_path(candidate)
             checked.append(str(path))
-            if path.is_file():
+            if readable_file(path):
                 return str(path), checked
         return None, list(dict.fromkeys(checked))
 

@@ -136,7 +136,7 @@ jobs:
           if ($install.ExitCode -ne 0) { throw "Installer failed with code $($install.ExitCode)" }
           $app = Join-Path $dir 'CodingBrainDesktop.exe'
           if (-not (Test-Path -LiteralPath $app)) { throw 'Installer did not install the desktop executable' }
-          foreach ($name in @('release.json', 'SHA256SUMS', 'install.ps1', 'Setup-CodingBrain.ps1', 'Verify-CodingBrainEngine.py')) {
+          foreach ($name in @('release.json', 'SHA256SUMS', 'install.ps1', 'Setup-CodingBrain.ps1', 'Verify-CodingBrainEngine.py', 'Setup-CodingBrain.cmd')) {
             if (-not (Test-Path -LiteralPath (Join-Path $dir "engine\$name"))) { throw "Installer did not deliver engine\$name" }
           }
           $probe = Start-Process -FilePath $app -ArgumentList '--self-test' -Wait -PassThru -WindowStyle Hidden
