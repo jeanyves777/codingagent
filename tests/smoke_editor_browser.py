@@ -88,7 +88,9 @@ try:
 
         # 3. A change on disk after opening is never overwritten.
         (project / 'calc.py').write_text('# changed elsewhere\n', encoding='utf-8')
+        page.locator('#editor-host .monaco-editor textarea').focus()
         page.keyboard.type('# my edit\n')
+        page.locator('.editor-tab .dirty').wait_for()  # the edit reached the editor
         page.keyboard.press('Control+s')
         page.locator('#editor-state', has_text='changed on disk').wait_for()
         assert (project / 'calc.py').read_text(encoding='utf-8') == '# changed elsewhere\n'

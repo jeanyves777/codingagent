@@ -55,8 +55,11 @@ def _verify_asset(folder: Path, filename: str) -> subprocess.CompletedProcess:
                "$n.Name -in @('Expected-Sha256','Verify-Asset')}, $true)) { . ([scriptblock]::Create($f.Extent.Text)) };"
                f"Verify-Asset '{filename}' '{str(folder).replace(chr(39), chr(39) * 2)}' "
                f"'{str(folder / 'SHA256SUMS').replace(chr(39), chr(39) * 2)}'")
+    # Windows PowerShell must not inherit PowerShell 7's module path (CI runs pytest from pwsh), or it
+    # loads PS7's Microsoft.PowerShell.Utility and Get-FileHash is missing.
+    env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
     return subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, timeout=60, env=env)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="runs the updater's PowerShell checksum check")
