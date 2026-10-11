@@ -79,7 +79,14 @@ def test_real_agents_work_the_backlog_in_parallel_and_only_verified_work_counts(
     for attempt in attempts:
         first.setdefault(attempt["item_id"], attempt)
     a, b = (first.get(item["id"]) for item in items)
+    from brain.local.inference import overlap
+    from brain.telemetry import Telemetry
+    calls = [{"first": event["at"] - event["duration"], "last": event["at"]}
+             for event in Telemetry(context.data / "telemetry.sqlite3").journal(
+                 [attempt["task_id"] for attempt in attempts], limit=100000)
+             if event["event_type"] == "model_response" and event["duration"] and event["provider"] == "ollama"]
     capability = {"model": config["models"]["model"], "seconds": seconds, "stopped": status.get("stopped"),
+                  "model_calls": len(calls), "model_calls_overlap": overlap(calls),
                   "verified": sum(item["state"] == "verified" for item in items), "items": len(items),
                   "integration": status.get("integration"),
                   "per_item": [{"title": item["title"], "state": item["state"], "attempts": item["attempts"],
