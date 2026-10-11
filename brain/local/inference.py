@@ -72,11 +72,12 @@ async def probe(url: str, model: str, streams: int = 2, num_predict: int = 96, t
 
 
 def parallel_slots(results: list[dict]) -> int:
-    """The largest number of streams that really generated at the same time without losing total
-    throughput (at least 90% of one stream alone). Agents beyond it would only queue."""
+    """The largest number of streams that really generated at the same time while keeping most of
+    the total throughput (80% of one stream alone: a single short probe is noisy, and agents also
+    spend time in tests and tools, which overlap fully). Agents beyond it would only queue."""
     best = 1
     for result in sorted(results, key=lambda r: r["streams"]):
-        if result["concurrent"] and result["aggregate_tokens_per_second"] >= 0.9 * result["single_tokens_per_second"]:
+        if result["concurrent"] and result["aggregate_tokens_per_second"] >= 0.8 * result["single_tokens_per_second"]:
             best = result["streams"]
     return best
 

@@ -590,9 +590,9 @@ def _backlog_resources(args, context, measure=False):
     if models.get("provider", "ollama") != "ollama" or not models.get("model"):
         return resources
     cache, url = context.layout.data / "inference.json", models["url"]
+    hardware = resources.local_slots()  # what the machine allows, before the model server's limit
     resources.inference = None if measure and getattr(args, "remeasure", False) else \
         inference.cached_slots(cache, url, models["model"], check_server=measure)
-    hardware = resources.local_slots()
     if measure and resources.inference is None and hardware > 1:
         print(f"Measuring how many generations {models['model']} runs at once (once per model; about a minute)...")
         try:
@@ -605,9 +605,15 @@ def _backlog_resources(args, context, measure=False):
             resources.inference = 1
             print(f"  could not measure ({type(error).__name__}); running one agent")
     if measure and resources.inference == 1 and hardware > 1:
-        print(f"Note: the model server generates for one agent at a time, so one agent runs. This machine "
-              f"could run {hardware}: set OLLAMA_NUM_PARALLEL={hardware} for Ollama, restart it, then run "
-              f"`codingbrain backlog run --remeasure`.")
+        entry = (json.loads(cache.read_text(encoding="utf-8")) if cache.exists() else {}).get(
+            f"{url.rstrip('/')}|{models['model']}", {})
+        if (entry.get("result") or {}).get("concurrent"):
+            print(f"Note: the model server generates for several agents at once, but not faster in total on "
+                  f"this machine, so one agent runs. Measure again later with `codingbrain backlog run --remeasure`.")
+        else:
+            print(f"Note: the model server generates for one agent at a time, so one agent runs. This machine "
+                  f"could run {hardware}: set OLLAMA_NUM_PARALLEL={hardware} for Ollama, restart it, then run "
+                  f"`codingbrain backlog run --remeasure`.")
     return resources
 
 

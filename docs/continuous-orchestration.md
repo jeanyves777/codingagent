@@ -96,9 +96,10 @@ merge when ready. The ledger records each item's integration verdict and the acc
 Ollama queues requests beyond its `OLLAMA_NUM_PARALLEL` setting. Before the first run with more
 than one agent slot, `backlog run` measures it once per model and Ollama version. It sends
 simultaneous requests and checks whether their tokens arrive interleaved, which means they really
-generate at the same time. Agent slots never exceed what was measured. Coding Brain does not
-change Ollama's settings. When the server generates for one agent at a time, the run says so and
-names the setting. Measure again with `backlog run --remeasure`; results older than a week are
+generate at the same time. Agent slots never exceed what was measured. Streams count only if they generate at the same time
+and together keep at least 80% of one stream's speed. Coding Brain does not change Ollama's
+settings. When the server generates for one agent at a time, the run says so and names the
+setting. When it generates simultaneously but is not faster in total, the run says that instead. Measure again with `backlog run --remeasure`; results older than a week are
 measured again anyway.
 
 Measured on a 4-core, 15 GB machine (CPU only, a 3B model):

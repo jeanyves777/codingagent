@@ -132,6 +132,15 @@ def test_backlog_run_measures_once_and_explains_a_one_at_a_time_server(tmp_path,
     assert calls == [4, 4]
     assert cli._backlog_resources(args, context).local_slots() == 1  # status: read only, never measures
     assert calls == [4, 4]
+    # simultaneous, but slower in total: no OLLAMA_NUM_PARALLEL advice, which would not help
+    cache = layout.data / "inference.json"
+    data = json.loads(cache.read_text())
+    next(iter(data.values()))["result"]["concurrent"] = True
+    cache.write_text(json.dumps(data))
+    capsys.readouterr()
+    cli._backlog_resources(args, context, measure=True)
+    out = capsys.readouterr().out
+    assert "not faster in total" in out and "OLLAMA_NUM_PARALLEL" not in out
 
 
 @pytest.mark.skipif(not os.environ.get("CODINGBRAIN_TEST_CODING_MODEL"), reason="needs a real Ollama model")
