@@ -1203,6 +1203,7 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
             task["base_commit"] = self.store.get(task["parent_id"])["integration_head"]
         task["cancel_requested"] = False
         task["status"] = "queued"
+        self.store.save(task, clear_cancel=True)
         self.event(task, "retry", "Starting a fresh workspace from the current base")
         self.schedule(task_id, "create_task")
         return task
