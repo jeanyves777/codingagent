@@ -23,7 +23,7 @@ import sqlite3
 import stat as stat_module
 import subprocess
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -503,7 +503,7 @@ def parse_design_system(text: str, name: str, limit: int = 40) -> list[dict]:
 
 def _coding_brain_records(path: Path) -> list[dict]:
     try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as db:
             memories = db.execute("SELECT content FROM memories").fetchall()
             tasks = db.execute("SELECT body FROM tasks").fetchall()
     except sqlite3.Error:

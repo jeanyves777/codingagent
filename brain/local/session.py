@@ -4,7 +4,7 @@ import os
 import sqlite3
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 
 from .paths import Layout
 
@@ -64,7 +64,7 @@ def running_tasks(layout: Layout) -> list[dict]:
     found = []
     for database in sorted(layout.projects.glob("*/brain.sqlite3")) if layout.projects.exists() else []:
         try:
-            with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
+            with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as db:
                 rows = db.execute("SELECT body FROM tasks").fetchall()
         except sqlite3.Error:
             continue

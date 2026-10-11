@@ -88,6 +88,7 @@ class Backlog:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
+            db.execute("PRAGMA journal_mode=WAL")  # `backlog status` never waits for the agents' writes
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, title TEXT, goal TEXT, priority INTEGER,
                     depends_on TEXT, acceptance TEXT, state TEXT, reason TEXT, attempts INTEGER DEFAULT 0,
