@@ -10,7 +10,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from . import accounting
+from . import accounting, lessons
 from .approvals import ApprovalRequired
 from .capabilities import TASK_CAPABILITIES, TASK_QUERY
 from .brains import is_unavailable
@@ -106,6 +106,10 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
         self.requirement_checks = requirement_checks
         # Optional callable(goal) -> dict of durable project memory (set by the local CLI).
         self.project_knowledge = None
+        # Optional callable(kind, lesson, task): "change" when the user accepts a tested task,
+        # "repair" when an execution ends failed. The local CLI records them in project memory,
+        # so every way of accepting (CLI, backlog, engine API, desktop) records the same lesson.
+        self.lesson_sink = None
         # Optional callable(task) -> VisualVerifier | None for tasks with visual requirements (local CLI).
         self.visual_verifier = None
         self.queue = queue
@@ -833,6 +837,15 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
             self.event(current, "cancelled", "Stopped at a safe orchestration boundary")
             raise asyncio.CancelledError
 
+    def _record_lesson(self, kind: str, learned: dict, task: dict):
+        if self.lesson_sink is None:
+            return
+        try:
+            self.lesson_sink(kind, learned, task)
+            task["lesson_recorded"] = kind
+        except Exception as error:  # memory must never break a task
+            self.event(task, "memory_deferred", f"{type(error).__name__}: {str(error)[:300]}")
+
     async def execute(self, task_id: str, digest: str) -> dict:
         async with self.task_lock(task_id):
             task = self.store.get(task_id)
@@ -843,6 +856,8 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
             task["status"] = "running"
             self.event(task, "approved", "Human authorized review, implementation, and testing")
             await self._execute_loop(task)
+            if task["status"] in {"failed", "blocked"} and task.get("failure_log"):
+                self._record_lesson("repair", lessons.lesson(task), task)
             self.store.save(task)
             if task["status"] == "failed":
                 getattr(self.model, "record_outcome", lambda *args, **kwargs: None)(
@@ -1115,13 +1130,17 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                         self.event(group, "integration_conflict", f"{task['name']}: {error}"[:1000])
                         return task
                     self.event(group, "integrated", f"{task['name']} at {task['commit']}")
+            learned = lessons.lesson({**task, "status": "accepted"})
+            evidence = dict(task["test_evidence"] or {})
+            evidence["output"] = str(evidence.get("output") or "")[-2000:]  # the result, not the whole log
             self.store.remember(task_id, {
-                "repository": task["repository"], "content": summary, "evidence": task["test_evidence"],
-                "commit": task.get("commit"), "kind": kind,
+                "repository": task["repository"], "content": lessons.text(learned), "summary": summary,
+                "lesson": learned, "evidence": evidence, "commit": task.get("commit"), "kind": kind,
                 "verification": "tests_passed_and_human_accepted",
                 "supervision": [{"supervisor": item["supervisor"], "kind": item["kind"]}
                                 for item in task.get("supervision", [])],
             })
+            self._record_lesson("change", learned, task)
             task["status"] = "accepted"
             getattr(self.model, "record_outcome", lambda *args, **kwargs: None)(
                 task_id, True, task.get("model_route", {}).get("model"))

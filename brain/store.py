@@ -3,6 +3,8 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
+from . import lessons
+
 
 class Store:
     def __init__(self, path: Path):
@@ -52,9 +54,10 @@ class Store:
         with self.connect() as db:
             rows = db.execute("SELECT task_id, content FROM memories ORDER BY rowid DESC LIMIT 200").fetchall()
         candidates = [dict(task_id=task_id, **json.loads(content)) for task_id, content in rows]
-        words = set(goal.lower().split())
         candidates = [item for item in candidates if item["repository"] == repository]
-        candidates.sort(key=lambda item: len(words & set(item["content"].lower().split())), reverse=True)
+        if goal:  # only lessons that share real terms with the goal; unrelated work stays out of prompts
+            candidates = [item for item in candidates if lessons.relevant(goal, item["content"])]
+            candidates.sort(key=lambda item: lessons.score(goal, item["content"]), reverse=True)
         return candidates[:5]
 
     def remember(self, task_id: str, content: dict):

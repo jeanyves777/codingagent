@@ -265,7 +265,7 @@ def test_continuation_after_restart_and_survival_across_update_and_rollback(worl
     git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
     context = cli.Context(layout, repo)
     context.register()
-    context._brain = Brain(repo.parent, context.data, ScriptedModel(), "img")
+    context.attach(Brain(repo.parent, context.data, ScriptedModel(), "img"))
     cli.onboard(context, interactive=False)
     task = context._brain.submit("app", "Set x to 2", launch=False)
     task = asyncio.run(context._brain.create(task))
@@ -274,7 +274,7 @@ def test_continuation_after_restart_and_survival_across_update_and_rollback(worl
     # A new process: memory and the accepted change persist and feed the next task.
     restarted = cli.Context(layout, repo)
     knowledge = json.dumps(restarted.memory.profile())
-    assert "Accepted: Set x to 2" in knowledge and "Keep x small" in knowledge
+    assert "Problem: Set x to 2" in knowledge and "Verified: tests passed" in knowledge and "Keep x small" in knowledge
     before = sorted(texts(restarted.memory))
     # Updates run in their own process with no session open: release this process's databases.
     import gc
