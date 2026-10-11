@@ -57,8 +57,8 @@ def test_the_probe_tells_queued_from_simultaneous_generation(parallel, expected)
     assert result["concurrent"] is (parallel > 1)
     assert (result["overlap"] > 0.8) if parallel > 1 else (result["overlap"] < 0.2)
     assert inference.parallel_slots([result]) == expected
-    if parallel == 1:  # the second request waited for the first one to finish
-        assert result["first_token_seconds"][1] > 0.15
+    if parallel == 1:  # one request (either may be served first) waited for the other to finish
+        assert max(result["first_token_seconds"]) > 0.15
 
 
 def test_overlap_and_slots_from_recorded_results():
