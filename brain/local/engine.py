@@ -46,6 +46,8 @@ OPERATIONS = {
     "install.plan": ("read", {"profile": ("str", False)}, "each component's state and planned action"),
     "providers.list": ("read", {"deep": ("bool", False)}, "provider descriptors (brain.local.providers)"),
     "projects.list": ("read", {}, "registered projects with task counts"),
+    "models.list": ("read", {}, "the configured provider, URL, model and fast model, and the models the local "
+                                "Ollama server has installed (never downloads anything)"),
     "conversation.send": ("read", {"message": ("str", True), "project_id": ("str", False)},
                           "reply, intent, and a proposed action to confirm (never executed here)"),
     "conversation.history": ("read", {"project_id": ("str", False), "limit": ("int", False)}, "recent turns"),
@@ -75,6 +77,13 @@ OPERATIONS = {
                             "(pending_tool_approval); the task then continues or stops"),
     "tasks.stop": ("action", {"project_id": ("str", True), "task_id": ("str", True)}, "requests cancellation"),
     "tasks.resume": ("action", {"project_id": ("str", True), "task_id": ("str", True)}, "continues an unfinished task"),
+    "tasks.retry": ("action", {"project_id": ("str", True), "task_id": ("str", True)},
+                    "starts an interrupted, failed, blocked or cancelled task again in a fresh workspace from "
+                    "the current base, as `codingbrain resume` does; returns the new proposal and its digest "
+                    "(nothing is applied)"),
+    "models.set": ("action", {"model": ("str", True), "fast_model": ("str", False)},
+                   "uses an installed model (and optional fast model) for new work; refused while a task is "
+                   "running or when Ollama does not have the model (pulling it is the user's step)"),
     "backlog.add": ("action", {"project_id": ("str", True), "goal": ("str", True), "title": ("str", False),
                                "priority": ("str", False), "depends_on": ("list[str]", False),
                                "accept_files": ("list[str]", False), "accept_nodes": ("list[str]", False),
@@ -82,7 +91,7 @@ OPERATIONS = {
                     "adds a backlog item; acceptance files are read from the project and frozen now. "
                     "Nothing is started: the backlog is worked only by `codingbrain backlog run`"),
 }
-LONG = {"tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
+LONG = {"tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.retry", "tasks.tool_decision"}
 CHECK_TYPES = {"str": str, "bool": bool, "int": int, "list[str]": list}
 
 
@@ -227,6 +236,52 @@ class Engine:
     def op_projects_list(self):
         from .assistant import registry
         return registry(self.layout)
+
+    def _installed_models(self, models: dict):
+        """The names the configured Ollama server has installed, or None with the reason."""
+        if models.get("provider", "ollama") != "ollama":
+            return None, "the provider is not Ollama: its models are not listed"
+        try:
+            import httpx
+            response = httpx.get(str(models.get("url") or "").rstrip("/") + "/api/tags", timeout=5, trust_env=False)
+            response.raise_for_status()
+            return sorted(item["name"] for item in response.json().get("models", [])), None
+        except Exception as error:
+            return None, f"Ollama is not reachable at {models.get('url')}: {type(error).__name__}"
+
+    def op_models_list(self):
+        models = settings.load(self.layout)["models"]
+        installed, problem = self._installed_models(models)
+        return {"provider": models.get("provider"), "url": models.get("url"), "model": models.get("model"),
+                "fast_model": models.get("fast_model"), "installed": installed, "problem": problem}
+
+    def op_models_set(self, model: str, fast_model: str | None = None):
+        config = settings.load(self.layout)
+        models = config["models"]
+        wanted = [name for name in (model, fast_model) if name]
+        if any(not name.strip() or len(name) > 200 for name in wanted):
+            raise ApiError("bad_params", "model names must be non-empty and at most 200 characters")
+        installed, problem = self._installed_models(models)
+        if models.get("provider", "ollama") == "ollama":
+            if installed is None:
+                raise ApiError("refused", problem)
+            names = set(installed) | {name.removesuffix(":latest") for name in installed}
+            missing = [name for name in wanted if name not in names]
+            if missing:
+                raise ApiError("refused", f"Ollama does not have {', '.join(missing)}; install it first "
+                                          f"(ollama pull {missing[0]}) and try again")
+        busy = [project_id for project_id, context in self.contexts.items()
+                if context._brain is not None and context._brain.jobs]
+        if busy:
+            raise ApiError("refused", "a task is running; change the model when it has finished or stopped")
+        models["model"] = model
+        if fast_model is not None:
+            models["fast_model"] = fast_model
+        settings.save(self.layout, config)
+        # Services read the model when they are built: the next call builds them with the new one.
+        self.contexts = {}
+        self._assistant = None
+        return self.op_models_list()
 
     def assistant(self):
         if self._assistant is None:
@@ -476,6 +531,22 @@ class Engine:
         async def go():
             try:
                 await brain.resume(task_id)
+                await self._drain(brain)
+            except asyncio.CancelledError:  # tasks.stop: the task stopped at a safe boundary
+                pass
+            return brain.store.get(task_id)
+        try:
+            return task_summary(self.run(go()))
+        finally:
+            done()
+
+    def op_tasks_retry(self, project_id: str, task_id: str, emit=None):
+        brain = self.brain(project_id)
+        done = self.watching(project_id, emit, {task_id})
+
+        async def go():
+            brain.retry(task_id)  # refuses (ValueError) anything but an interrupted or failed coding task
+            try:
                 await self._drain(brain)
             except asyncio.CancelledError:  # tasks.stop: the task stopped at a safe boundary
                 pass

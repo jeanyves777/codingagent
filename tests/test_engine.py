@@ -88,7 +88,7 @@ def test_schema_and_info():
     assert schema["api_version"] == "1.0" and set(schema["operations"]) == set(OPERATIONS)
     assert {op for op, item in schema["operations"].items() if item["kind"] == "action"} == {
         "projects.register", "projects.create", "tasks.start", "tasks.approve", "tasks.accept", "tasks.stop",
-        "tasks.resume", "tasks.tool_decision", "backlog.add"}
+        "tasks.resume", "tasks.retry", "tasks.tool_decision", "models.set", "backlog.add"}
     assert schema["operations"]["conversation.send"]["kind"] == "read"
 
 
@@ -349,6 +349,42 @@ def test_restart_recovers_from_the_journal_without_duplicates(world, monkeypatch
         restarted.close()
 
 
+def test_an_interrupted_task_is_retried_only_when_asked_and_stops_at_a_new_proposal(world, monkeypatch):
+    """After a restart the desktop can continue an interrupted task as `codingbrain resume` does:
+    tasks.retry starts it again from the current base and returns a fresh proposal. Nothing runs
+    until that proposal is approved with its own digest; only interrupted or failed tasks qualify."""
+    engine, pid, layout = world["engine"], world["project"]["id"], world["layout"]
+    brain = with_fake_brain(world, monkeypatch)
+    task = engine.call("tasks.start", {"project_id": pid, "goal": "Fix x"})
+    with pytest.raises(ApiError) as error:  # a proposal waiting for approval is not retried
+        engine.call("tasks.retry", {"project_id": pid, "task_id": task["id"]})
+    assert error.value.code == "refused"
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    stored = brain.store.get(task["id"])
+    stored.update(status="testing", owner={**stored["owner"], "pid": dead.pid})
+    brain.store.save(stored)
+    engine.close()
+
+    restarted = Engine(layout, world["home"], system=FakeMachine(platform="linux", programs={"git"}))
+    try:
+        with_fake_brain({**world, "engine": restarted}, monkeypatch)
+        assert restarted.call("tasks.get", {"project_id": pid, "task_id": task["id"]})["status"] == "blocked"
+        retried = restarted.call("tasks.retry", {"project_id": pid, "task_id": task["id"]})
+        assert retried["id"] == task["id"] and retried["status"] == "proposed" and retried["digest"]
+        assert git(world["root"], "status", "--porcelain") == ""  # nothing was applied to the project
+        with pytest.raises(ApiError):  # the proposal from before the restart cannot be replayed
+            restarted.call("tasks.approve", {"project_id": pid, "task_id": task["id"], "digest": "0" * 64,
+                                             "decision": "approve"})
+        events = restarted.call("tasks.events", {"project_id": pid, "task_id": task["id"]})
+        assert any(event["data"].get("kind") == "retry" or "fresh workspace" in event["summary"] for event in events)
+        done = restarted.call("tasks.approve", {"project_id": pid, "task_id": task["id"], "digest": retried["digest"],
+                                                "decision": "approve"})
+        assert done["status"] == "passed"  # approved with its own digest, it runs and is tested as usual
+    finally:
+        restarted.close()
+
+
 def test_child_processes_never_touch_the_protocol_pipes(tmp_path):
     """While the reader waits on the request pipe, the engine starts a child process (as git and
     the sandbox are started). The child gets NUL as stdin and stderr as stdout: it is started at
@@ -408,3 +444,63 @@ def test_tool_decision_is_bound_to_the_pending_request(world, monkeypatch):
         engine.call("tasks.tool_decision", {"project_id": pid, "task_id": task["id"], "request_id": "r1",
                                             "decision": "maybe"})
     assert error.value.code == "bad_params"
+
+
+def tags_server(names):
+    """An Ollama-shaped /api/tags endpoint."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            body = json.dumps({"models": [{"name": name} for name in names]}).encode()
+            self.send_response(200 if self.path == "/api/tags" else 404)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_port}"
+
+
+def test_the_model_is_chosen_from_installed_models_and_used_by_new_work(world, monkeypatch):
+    engine, pid, layout = world["engine"], world["project"]["id"], world["layout"]
+    unreachable = engine.call("models.list")
+    assert unreachable["model"] == "qwen2.5-coder:7b" and unreachable["installed"] is None
+    assert "not reachable" in unreachable["problem"]
+    with pytest.raises(ApiError) as error:  # nothing can be checked, so nothing changes
+        engine.call("models.set", {"model": "qwen2.5-coder:3b"})
+    assert error.value.code == "refused"
+    server, url = tags_server(["qwen2.5-coder:7b", "qwen2.5-coder:3b", "llama3.2:latest"])
+    try:
+        config = settings.load(layout)
+        config["models"]["url"] = url
+        settings.save(layout, config)
+        listed = engine.call("models.list")
+        assert listed["installed"] == ["llama3.2:latest", "qwen2.5-coder:3b", "qwen2.5-coder:7b"]
+        assert listed["problem"] is None
+        with pytest.raises(ApiError) as error:  # never downloads: pulling a model is the user's step
+            engine.call("models.set", {"model": "qwen2.5-coder:14b"})
+        assert error.value.code == "refused" and "ollama pull qwen2.5-coder:14b" in str(error.value)
+        assert settings.load(layout)["models"]["model"] == "qwen2.5-coder:7b"
+        before = engine.context(pid)
+        brain = with_fake_brain(world, monkeypatch)
+        brain.jobs["busy"] = type("Job", (), {"done": lambda self: False})()
+        with pytest.raises(ApiError) as error:  # a running task keeps the model it started with
+            engine.call("models.set", {"model": "qwen2.5-coder:3b"})
+        assert "running" in str(error.value)
+        brain.jobs.clear()
+        changed = engine.call("models.set", {"model": "qwen2.5-coder:3b", "fast_model": "llama3.2"})
+        assert changed["model"] == "qwen2.5-coder:3b" and changed["fast_model"] == "llama3.2"
+        saved = settings.load(layout)["models"]
+        assert saved["model"] == "qwen2.5-coder:3b" and saved["fast_model"] == "llama3.2"
+        assert engine.context(pid) is not before  # new work builds its service with the new model
+        assert engine.context(pid).config["models"]["model"] == "qwen2.5-coder:3b"
+        engine.call("models.set", {"model": "qwen2.5-coder:3b", "fast_model": ""})
+        assert settings.load(layout)["models"]["fast_model"] == ""
+    finally:
+        server.shutdown()
