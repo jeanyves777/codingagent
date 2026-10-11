@@ -106,6 +106,7 @@ def test_two_agents_work_in_parallel_and_both_results_are_independently_verified
     status = asyncio.run(drive(world["conductor"]))
     assert {item["title"]: item["state"] for item in status["items"]} == {"alpha": "verified", "beta": "verified"}
     assert world["model"].peak == 2  # both agents' model calls really overlapped
+    assert all("def test_value" in goal and "run unchanged" in goal for goal in world["model"].calls)  # the spec
     assert status["waiting_on_people_only"]  # acceptance onto a branch stays with the user
     ledger = world["backlog"].ledger()
     assert [entry["verdict"] for entry in ledger if entry["kind"] == "verification"] == ["passed", "passed"]

@@ -589,8 +589,8 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
         if repaired:
             metrics = task.setdefault("metrics", {})
             metrics["mechanical_repairs"] = metrics.get("mechanical_repairs", 0) + len(repaired)
-            self.event(task, "mechanical_repair", "Converted literal \\n sequences to line breaks in " +
-                       ", ".join(repaired))
+            self.event(task, "mechanical_repair", "Repaired mechanical output defects (literal \\n sequences, "
+                       "a Markdown code fence) in " + ", ".join(repaired))
         cumulative = {item["path"]: item for item in task.get("proposal", {}).get("changes", [])}
         cumulative.update({change.path: change.model_dump() for change in proposal.changes})
         proposal = Proposal(plan=proposal.plan, changes=list(cumulative.values()))

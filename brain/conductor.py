@@ -658,9 +658,13 @@ class BrainExecutor:
 
     async def start(self, item: dict, strategy: str, feedback: str) -> str:
         goal = item["goal"]
-        criteria = (item.get("acceptance") or {}).get("criteria")
-        if criteria:
-            goal += "\n\nAcceptance criteria (checked independently after you finish):\n" + criteria
+        acceptance = item.get("acceptance") or {}
+        if acceptance.get("criteria"):
+            goal += "\n\nAcceptance criteria (checked independently after you finish):\n" + acceptance["criteria"]
+        if acceptance.get("files"):  # the specification: the verifier runs its own frozen copies anyway
+            tests = "".join(f"\n--- {path} ---\n{content}" for path, content in acceptance["files"].items())
+            goal += ("\n\nAfter you finish, these acceptance tests are run unchanged in a clean copy of your work "
+                     "(editing or adding test files does not change them). Make them pass:" + tests[:6000])
         if feedback and strategy != "local":
             goal += "\n\n" + feedback[-3000:]
         base = item.get("base_commit")

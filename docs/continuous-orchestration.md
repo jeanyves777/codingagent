@@ -52,7 +52,8 @@ the reason. An item is also blocked when it fails the same way twice in a row or
 
 ## When an item counts as verified
 
-The agent's own report is never trusted. When a task finishes, the conductor copies the task's
+The agent is given the acceptance tests as its specification, in the goal. They are not placed
+in its workspace, and its own copies never count. The agent's own report is never trusted. When a task finishes, the conductor copies the task's
 workspace and then:
 
 - writes back the acceptance files exactly as they were when you added the item, so the agent
