@@ -88,7 +88,7 @@ def test_schema_and_info():
     assert schema["api_version"] == "1.0" and set(schema["operations"]) == set(OPERATIONS)
     assert {op for op, item in schema["operations"].items() if item["kind"] == "action"} == {
         "projects.register", "projects.create", "tasks.start", "tasks.approve", "tasks.accept", "tasks.stop",
-        "tasks.resume", "tasks.tool_decision", "backlog.add"}
+        "tasks.resume", "tasks.retry", "tasks.tool_decision", "backlog.add"}
     assert schema["operations"]["conversation.send"]["kind"] == "read"
 
 
@@ -345,6 +345,42 @@ def test_restart_recovers_from_the_journal_without_duplicates(world, monkeypatch
         assert any(event["data"].get("kind") == "interrupted" or "interrupted" in event["summary"]
                    for event in restarted.call("tasks.events", {"project_id": pid, "task_id": task["id"]}))
         assert [item["id"] for item in restarted.call("tasks.list", {"project_id": pid})] == [task["id"]]
+    finally:
+        restarted.close()
+
+
+def test_an_interrupted_task_is_retried_only_when_asked_and_stops_at_a_new_proposal(world, monkeypatch):
+    """After a restart the desktop can continue an interrupted task as `codingbrain resume` does:
+    tasks.retry starts it again from the current base and returns a fresh proposal. Nothing runs
+    until that proposal is approved with its own digest; only interrupted or failed tasks qualify."""
+    engine, pid, layout = world["engine"], world["project"]["id"], world["layout"]
+    brain = with_fake_brain(world, monkeypatch)
+    task = engine.call("tasks.start", {"project_id": pid, "goal": "Fix x"})
+    with pytest.raises(ApiError) as error:  # a proposal waiting for approval is not retried
+        engine.call("tasks.retry", {"project_id": pid, "task_id": task["id"]})
+    assert error.value.code == "refused"
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    stored = brain.store.get(task["id"])
+    stored.update(status="testing", owner={**stored["owner"], "pid": dead.pid})
+    brain.store.save(stored)
+    engine.close()
+
+    restarted = Engine(layout, world["home"], system=FakeMachine(platform="linux", programs={"git"}))
+    try:
+        with_fake_brain({**world, "engine": restarted}, monkeypatch)
+        assert restarted.call("tasks.get", {"project_id": pid, "task_id": task["id"]})["status"] == "blocked"
+        retried = restarted.call("tasks.retry", {"project_id": pid, "task_id": task["id"]})
+        assert retried["id"] == task["id"] and retried["status"] == "proposed" and retried["digest"]
+        assert git(world["root"], "status", "--porcelain") == ""  # nothing was applied to the project
+        with pytest.raises(ApiError):  # the proposal from before the restart cannot be replayed
+            restarted.call("tasks.approve", {"project_id": pid, "task_id": task["id"], "digest": "0" * 64,
+                                             "decision": "approve"})
+        events = restarted.call("tasks.events", {"project_id": pid, "task_id": task["id"]})
+        assert any(event["data"].get("kind") == "retry" or "fresh workspace" in event["summary"] for event in events)
+        done = restarted.call("tasks.approve", {"project_id": pid, "task_id": task["id"], "digest": retried["digest"],
+                                                "decision": "approve"})
+        assert done["status"] == "passed"  # approved with its own digest, it runs and is tested as usual
     finally:
         restarted.close()
 

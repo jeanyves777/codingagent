@@ -75,6 +75,10 @@ OPERATIONS = {
                             "(pending_tool_approval); the task then continues or stops"),
     "tasks.stop": ("action", {"project_id": ("str", True), "task_id": ("str", True)}, "requests cancellation"),
     "tasks.resume": ("action", {"project_id": ("str", True), "task_id": ("str", True)}, "continues an unfinished task"),
+    "tasks.retry": ("action", {"project_id": ("str", True), "task_id": ("str", True)},
+                    "starts an interrupted, failed, blocked or cancelled task again in a fresh workspace from "
+                    "the current base, as `codingbrain resume` does; returns the new proposal and its digest "
+                    "(nothing is applied)"),
     "backlog.add": ("action", {"project_id": ("str", True), "goal": ("str", True), "title": ("str", False),
                                "priority": ("str", False), "depends_on": ("list[str]", False),
                                "accept_files": ("list[str]", False), "accept_nodes": ("list[str]", False),
@@ -82,7 +86,7 @@ OPERATIONS = {
                     "adds a backlog item; acceptance files are read from the project and frozen now. "
                     "Nothing is started: the backlog is worked only by `codingbrain backlog run`"),
 }
-LONG = {"tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
+LONG = {"tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.retry", "tasks.tool_decision"}
 CHECK_TYPES = {"str": str, "bool": bool, "int": int, "list[str]": list}
 
 
@@ -476,6 +480,22 @@ class Engine:
         async def go():
             try:
                 await brain.resume(task_id)
+                await self._drain(brain)
+            except asyncio.CancelledError:  # tasks.stop: the task stopped at a safe boundary
+                pass
+            return brain.store.get(task_id)
+        try:
+            return task_summary(self.run(go()))
+        finally:
+            done()
+
+    def op_tasks_retry(self, project_id: str, task_id: str, emit=None):
+        brain = self.brain(project_id)
+        done = self.watching(project_id, emit, {task_id})
+
+        async def go():
+            brain.retry(task_id)  # refuses (ValueError) anything but an interrupted or failed coding task
+            try:
                 await self._drain(brain)
             except asyncio.CancelledError:  # tasks.stop: the task stopped at a safe boundary
                 pass
