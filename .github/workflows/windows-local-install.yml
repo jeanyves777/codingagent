@@ -241,7 +241,7 @@ jobs:
     # disposable end-to-end task (real model fixes a real bug, tests run in the real sandbox).
     name: real installer readiness and end-to-end task (ubuntu)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CODINGBRAIN_TEST_CODING_MODEL: qwen2.5-coder:7b
       CODINGBRAIN_TEST_DOCKER: "1"
@@ -289,7 +289,8 @@ jobs:
         shell: bash
         env:
           CODINGBRAIN_CAPABILITY_REPORT: ${{ github.workspace }}/goal-first-capability.json
-        run: python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py tests/test_new.py -k real 2>&1 | tee installer-real.log
+          CODINGBRAIN_SWARM_REPORT: ${{ github.workspace }}/swarm-capability.json
+        run: python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py tests/test_new.py tests/test_conductor_real.py -k real 2>&1 | tee installer-real.log
       - name: Engine API with a real task (real stdio client, real model, real sandbox)
         if: always()
         shell: bash
@@ -327,6 +328,29 @@ jobs:
               print(f"::warning::Real-model goal-first build {verdict.lower()} ({report['status']}); see the job summary")
               sys.exit(1)
           PY
+      - name: Real-agent backlog capability (reported, not a merge gate)
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          path = "swarm-capability.json"
+          if not os.path.exists(path):
+              print("::warning::No swarm report: the real-agent backlog run did not complete")
+              sys.exit(1)
+          report = json.load(open(path))
+          lines = [f"### Real-agent backlog: {report['verified']} of {report['items']} items verified", "",
+                   f"Model `{report['model']}`, {report['seconds']} s, two local agents in parallel. "
+                   "Verified means the frozen acceptance tests passed when re-run independently in the sandbox.", ""]
+          lines += [f"- {item['title']}: {item['state']} after {item['attempts']} attempt(s)"
+                    + (f" ({item['reason'][:160]})" if item["reason"] else "") for item in report["per_item"]]
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a").write("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          if report["verified"] < report["items"]:
+              print("::warning::The real model did not complete every backlog item; see the job summary")
+              sys.exit(1)
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -337,6 +361,7 @@ jobs:
             doctor-full.json
             installer-real.log
             goal-first-capability.json
+            swarm-capability.json
             engine-client.log
             ollama.log
 

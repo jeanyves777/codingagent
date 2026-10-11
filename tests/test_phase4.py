@@ -107,3 +107,17 @@ def test_executable_benchmark_scores_paths_review_and_tests():
     assert result["score"] == 1.0 and result["cases"][0]["status"] == "passed"
     with pytest.raises(ValueError):
         validate_suite({"name": "empty", "cases": []})
+
+
+def test_every_action_the_brain_dispatches_can_be_queued(tmp_path):
+    """Human-granted escalation schedules supervise_task; with the durable queue on, refusing it left
+    the task stuck in 'queued' (the event was saved before the enqueue failed)."""
+    import inspect
+    from brain.service import Brain
+    queue = DurableQueue(tmp_path / "queue.sqlite3")
+    handled = [action for action in ("create_task", "plan_group", "execute_task", "resume_task",
+                                     "supervise_task", "advance_group")
+               if f'"{action}"' in inspect.getsource(Brain.dispatch_job)]
+    assert "supervise_task" in handled
+    for action in handled:
+        assert queue.enqueue(f"task-{action}", action, {"digest": "d"})
