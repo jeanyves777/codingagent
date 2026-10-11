@@ -479,8 +479,16 @@
       busy.map(agent => `\n  ${agent.item} · ${agent.strategy} · task ${String(agent.task || '').slice(0, 8)}`).join('');
     agents.style.whiteSpace = 'pre-wrap';
     body.append(agents);
+    const combined = status.integration;
+    if (combined) {
+      const redo = Object.keys(combined.excluded || {});
+      body.append(backlogNote(`Combined: ${combined.included.length} item(s) pass together (integration ${combined.id}, ` +
+        `${String(combined.head || '').slice(0, 10)})` + (redo.length ? `; being redone on top of it: ${redo.join(', ')}` : '')));
+    }
     if (status.waiting_on_people_only) {
-      body.append(backlogNote('Waiting for you: approve proposals (codingbrain resume) or accept verified results (codingbrain accept).'));
+      body.append(backlogNote(combined
+        ? 'Waiting for you: accept the combined result with codingbrain backlog accept.'
+        : 'Waiting for you: approve proposals (codingbrain resume).'));
     }
     body.append(status.ledger_intact
       ? backlogNote('Evidence ledger intact.')

@@ -95,3 +95,33 @@ def test_backlog_run_works_through_the_items_and_stops_for_the_user(project, mon
     assert "verified" in out and "Waiting for you" in out
     assert {item["title"]: item["state"] for item in backlog.list()} == {"alpha": "verified", "beta": "verified"}
     assert not (context.data / "backlog.lock").exists()
+
+
+def test_accepting_the_combined_result_makes_one_branch_and_dependents_start_from_it(project, monkeypatch, capsys):
+    monkeypatch.setattr(brain.service, "run_tests", local_pytest)
+    monkeypatch.setattr(brain.sandbox, "run_tests", local_pytest)
+    context = cli.Context(project["layout"], project["repo"])
+    context.data.mkdir(parents=True, exist_ok=True)
+    context._brain = Brain(project["repo"].parent, context.data, StandIn(), "img", workers=2)
+    backlog = Backlog(context.data / "backlog.sqlite3")
+    first = backlog.add("Create alpha.py with VALUE = 'alpha'", title="alpha", acceptance=acceptance("alpha"))
+    backlog.add("Create beta.py with VALUE = 'beta'", title="beta", acceptance=acceptance("beta"))
+    head = subprocess.run(["git", "-C", str(project["repo"]), "rev-parse", "HEAD"], capture_output=True, text=True).stdout
+    assert cli.backlog_run(args("run"), context, backlog) == 0
+    assert "backlog accept" in capsys.readouterr().out
+    candidate = backlog.integration()
+    assert cli.backlog_accept(context, backlog) == 0
+    out = capsys.readouterr().out
+    branch = backlog.integration(candidate["id"])["branch"]
+    assert branch in out and {item["state"] for item in backlog.list()} == {"done"}
+    git = lambda *a: subprocess.run(["git", "-C", str(project["repo"]), *a], capture_output=True, text=True).stdout  # noqa: E731
+    assert git("rev-parse", branch) == candidate["head"] + "\n" and git("rev-parse", "HEAD") == head  # current branch unchanged
+    assert "VALUE = 'alpha'" in git("show", f"{branch}:alpha.py") and "VALUE = 'beta'" in git("show", f"{branch}:beta.py")
+    assert [entry["verdict"] for entry in backlog.ledger() if entry["kind"] == "acceptance"] == ["accepted", "accepted"]
+    with pytest.raises(SystemExit, match="Nothing to accept"):
+        cli.backlog_accept(context, backlog)
+    # a dependent added now builds on the accepted, combined work
+    backlog.add("Create gamma.py", title="gamma", depends_on=[first["id"]], acceptance=acceptance("alpha"))
+    assert cli.backlog_run(args("run", once=True), context, backlog) == 0
+    task_id = backlog.list({"running", "verifying", "verified", "awaiting_approval"})[0]["task_id"]
+    assert context.brain.store.get(task_id)["base_commit"] == candidate["head"]

@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -47,6 +48,14 @@ class StandIn:
                        {"path": "conftest.py", "content": "import pytest\n\n\ndef pytest_collection_modifyitems(items):\n"
                                                           "    for item in items:\n"
                                                           "        item.add_marker(pytest.mark.skip(reason='done'))\n"}]
+        elif "append" in goal:  # edits the same lines of main.py as the other 'append' item
+            current = (Path(root) / "main.py").read_text()
+            changes = [{"path": f"{name}.py", "content": f"VALUE = '{name}'\n"},
+                       {"path": "main.py", "content": current + f"{name.upper()} = True\n"}]
+        elif "guard" in goal and "Previous attempt" not in goal:  # passes alone, breaks alpha's work
+            changes = [{"path": f"{name}.py", "content": f"VALUE = '{name}'\n"},
+                       {"path": "test_guard.py", "content": "import os\n\n\ndef test_guard():\n"
+                                                            "    assert not os.path.exists('alpha.py')\n"}]
         elif "shadow" in goal and "Previous attempt" not in goal:  # replaces pytest itself
             changes = [{"path": f"{name}.py", "content": "VALUE = 'wrong'\n"},
                        {"path": "pytest.py", "content": "print('1 passed')\n"}]
@@ -141,3 +150,34 @@ def test_an_agent_that_replaces_the_test_runner_is_never_verified(world):
     assert attempts[0]["outcome"] == "verification_failed"
     assert "replace the test runner" in world["backlog"].ledger()[0]["evidence"]["output_tail"]
     assert status["items"][0]["state"] == "verified" and len(attempts) == 2
+
+
+def test_verified_items_that_edit_the_same_lines_are_combined_after_one_is_redone_on_top(world):
+    world["backlog"].add("Create alpha.py with VALUE = 'alpha' (append)", title="alpha", acceptance=acceptance("alpha"))
+    world["backlog"].add("Create beta.py with VALUE = 'beta' (append)", title="beta", priority="P2",
+                         acceptance=acceptance("beta"))
+    status = asyncio.run(drive(world["conductor"]))
+    backlog, brain = world["backlog"], world["brain"]
+    kinds = [(entry["kind"], entry["verdict"]) for entry in backlog.ledger()]
+    assert ("integration", "integration_conflict") in kinds  # both changed the end of main.py
+    beta = [attempt for attempt in backlog.attempts() if attempt["item_id"] == status["items"][1]["id"]]
+    assert beta[0]["outcome"] == "integration_conflict" and beta[1]["strategy"] == "local_with_feedback"
+    combined = status["integration"]
+    assert combined["state"] == "candidate" and len(combined["included"]) == 2 and not combined["excluded"]
+    assert brain.store.get(beta[1]["task_id"])["base_commit"] == backlog.integrations()[0]["head"]  # redone on top
+    show = lambda path: subprocess.run(["git", "-C", str(world["repo"]), "show", f"{combined['head']}:{path}"],  # noqa: E731
+                                       capture_output=True, text=True).stdout
+    assert "ALPHA = True" in show("main.py") and "BETA = True" in show("main.py")
+    assert subprocess.run(["git", "-C", str(world["repo"]), "status", "--porcelain"], capture_output=True,
+                          text=True).stdout == ""  # the user's checkout is untouched
+
+
+def test_items_that_pass_alone_but_break_the_project_together_are_not_combined(world):
+    world["backlog"].add("Create alpha.py with VALUE = 'alpha'", title="alpha", acceptance=acceptance("alpha"))
+    world["backlog"].add("Create beta.py with VALUE = 'beta' (guard)", title="beta", priority="P2",
+                         acceptance=acceptance("beta"))
+    status = asyncio.run(drive(world["conductor"]))
+    failed = [entry for entry in world["backlog"].ledger() if entry["verdict"] == "integration_failed"]
+    assert len(failed) == 1 and "project's own tests failed" in world["backlog"].attempts()[1]["detail"]
+    assert {item["title"]: item["state"] for item in status["items"]} == {"alpha": "verified", "beta": "verified"}
+    assert len(status["integration"]["included"]) == 2  # the redone beta no longer breaks alpha
