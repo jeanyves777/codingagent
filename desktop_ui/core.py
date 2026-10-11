@@ -9,6 +9,7 @@ and bound to the task and to the digest of the proposal that was shown. There is
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 import uuid
@@ -284,12 +285,18 @@ def chat(job):
     job.status = "running"
     try:
         client = client_for(job)
+        if hasattr(client, "ensure"):
+            client.ensure()
+        features = set((getattr(client, "info", None) or {}).get("features") or [])
         params = {"message": job.goal}
         if job.project:  # read-only lookup: a conversation never registers or changes anything
             selected = Path(job.project).resolve()
             for item in client.call("projects.list", {}, None, 60):
                 if Path(item["root"]).resolve() == selected:
                     params["project_id"] = item["id"]
+        if "conversation.scope" in features:
+            # Say which project is selected, or that none is: the engine never keeps an old focus.
+            params["scope"] = "project" if params.get("project_id") else "global"
         def streamed(event):  # engines with conversation.stream send steps, then the reply as it is written
             if event.get("event_type") == "reply_delta" and event.get("text"):
                 job.emit("delta", str(event["text"])[:4000])
@@ -298,8 +305,14 @@ def chat(job):
         answer = client.call("conversation.send", params, streamed, 300)
         if answer.get("reply"):
             job.emit("output", answer["reply"])
+        if answer.get("context"):
+            job.emit("context", json.dumps(answer["context"])[:2000])  # what the model saw this turn
         action = answer.get("action")
-        if action:
+        if action and action.get("kind") in {"create_project", "task"}:
+            # Shown as a button; starting it still goes through the normal reviewed and approved flow.
+            job.emit("action", json.dumps({"kind": action["kind"], "goal": str(action.get("goal") or job.goal)[:2000],
+                                           "project": action.get("project"), "root": action.get("root")}))
+        elif action:
             where = "New project" if action.get("kind") == "create_project" else "Run task"
             job.emit("output", f"To do this, use {where} to review and authorize it. Nothing was changed.")
         job.status = "completed"

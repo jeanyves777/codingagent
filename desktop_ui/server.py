@@ -488,7 +488,42 @@ class Workspace:
         if not path.is_dir():
             raise ValueError("Choose a directory")
         self.project = path
+        if self.git_branch(path):
+            # Make the conversation know this project: registering is read-only to the folder.
+            threading.Thread(target=self._register, args=(path,), daemon=True).start()
         return {"name": path.name, "path": str(path), "git": self.git_branch(path)}
+
+    def _register(self, path: Path):
+        try:
+            if self.engine_status()["engine"].get("typed_api"):
+                self.engine_client().call("projects.register", {"path": str(path)}, None, 120)
+        except Exception:
+            pass  # chat then answers without project context, as before
+
+    def _project_id(self, client) -> str | None:
+        if not self.project:
+            return None
+        for item in client.call("projects.list", {}, None, 60):
+            if Path(item["root"]).resolve() == self.project:
+                return item["id"]
+        return None
+
+    def conversation(self, limit: int = 60) -> dict:
+        """The conversation of the selected project (or global chat), as the engine stored it."""
+        if not self.engine_status()["engine"].get("typed_api"):
+            return {"project": None, "turns": [], "available": False}
+        client = self.engine_client()
+        project_id = self._project_id(client)
+        params = {"limit": limit, **({"project_id": project_id} if project_id else {})}
+        turns = client.call("conversation.history", params, None, 60)
+        return {"project": self.project.name if project_id else None, "turns": turns, "available": True}
+
+    def reset_conversation(self) -> dict:
+        client = self.engine_client()
+        if "conversation.reset" not in set(client.call("engine.info", {}, None, 60).get("features") or []):
+            raise ValueError("Update Coding Brain to start a new conversation from the desktop")
+        project_id = self._project_id(client)
+        return client.call("conversation.reset", {"project_id": project_id} if project_id else {}, None, 60)
 
     @staticmethod
     def git_branch(root: Path) -> str | None:
@@ -1007,6 +1042,22 @@ def create_app(state: Workspace | None = None) -> FastAPI:
             return {"entries": state.tree(path)}
         except (ValueError, OSError) as e:
             raise HTTPException(400, str(e)) from e
+
+    @app.get("/api/conversation", dependencies=[Depends(auth)])
+    def conversation():
+        from .engine_client import EngineError
+        try:
+            return state.conversation()
+        except (EngineError, ValueError, OSError) as error:
+            raise HTTPException(503, f"Conversation history unavailable: {str(error)[:200]}") from error
+
+    @app.post("/api/conversation/reset", dependencies=[Depends(auth)])
+    def conversation_reset():
+        from .engine_client import EngineError
+        try:
+            return state.reset_conversation()
+        except (EngineError, ValueError, OSError) as error:
+            raise HTTPException(409, str(error)[:300]) from error
 
     @app.post("/api/file", dependencies=[Depends(auth)])
     def save_file(body: SaveFile):

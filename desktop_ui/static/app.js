@@ -33,7 +33,10 @@
   let heartbeatTimer = null;
   let attachments = [];
   let streaming = null;
-  let chatStep = '';  // the latest step the engine reported for this chat turn  // the reply bubble being written live: {content, copy, text}
+  let chatStep = '';
+  let lastAction = null;          // work the last reply proposed (shown as a button)
+  let conversationKey = null;     // which conversation the thread shows (project path, or '' for general)
+  const AFFIRM = /^\s*(y|yes|yeah|yep|sure|ok(ay)?|do\s+it|go\s+ahead|run\s+it|proceed|please\s+do|let'?s\s+do\s+it)\s*[!.]*\s*$/i;  // the latest step the engine reported for this chat turn  // the reply bubble being written live: {content, copy, text}
   // The task's stages and agents, rebuilt only from the engine's structured events.
   let flow = {kind: null, stages: {}, agents: {}, progress: 0, current: null, status: null};
   const busyButtons = new WeakMap();
@@ -339,7 +342,7 @@
     if (last < text.length) inlineText(parent, text.slice(last).replace(/^\n+/, ''));
   }
 
-  function message(author, text, variant = 'assistant') {
+  function message(author, text, variant = 'assistant', at) {
     $('welcome').hidden = true;
     const row = document.createElement('article');
     row.className = 'message ' + variant;
@@ -354,9 +357,11 @@
     name.textContent = variant === 'user' ? 'You' : author.replace(/^CODING BRAIN\s*·\s*/, 'Coding Brain · ').replace(/^CODING BRAIN$/, 'Coding Brain');
     const when = document.createElement('time');
     when.className = 'message-time';
-    const now = new Date();
-    when.dateTime = now.toISOString();
-    when.textContent = now.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
+    const now = arguments.length > 3 ? at : new Date();  // null: a saved turn without its own time
+    if (now) {
+      when.dateTime = now.toISOString();
+      when.textContent = now.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
+    } else when.textContent = 'earlier';
     const metadata = document.createElement('span');
     metadata.className = 'message-meta';
     metadata.append(name, when);
@@ -589,6 +594,74 @@
       loadTree();
       refreshGit(true);
     } else renderEmptyExplorer();
+    if (switched) loadConversation();
+  }
+
+  // ---- Conversation: the engine keeps one conversation per project (and one for general chat).
+  // The thread shows it, task milestones included, so work can be directed from the conversation.
+  function setContext(text, trimmed = false) {
+    $('context-text').textContent = text;
+    $('context-text').classList.toggle('trimmed', trimmed);
+  }
+
+  function describeContext(used) {
+    const parts = [used.project ? used.project : 'no project (general chat)'];
+    parts.push(`${used.history_turns} earlier message${used.history_turns === 1 ? '' : 's'}` +
+      (used.history_left_out ? ` (${used.history_left_out} older left out)` : ''));
+    if (used.project_context) parts.push('project files' + (used.project_context_trimmed ? ' (shortened)' : ''));
+    parts.push(`${Math.round(used.window / 1024)}K window`);
+    setContext('Context: ' + parts.join(' · '), Boolean(used.history_left_out || used.project_context_trimmed));
+  }
+
+  async function loadConversation(force = false) {
+    const key = currentProject?.path || '';
+    if (activeJob || (!force && key === conversationKey)) return;  // never wipe a live reply
+    conversationKey = key;
+    setContext(currentProject ? `Context: ${currentProject.name}` : 'Context: general chat (no project selected)');
+    let data;
+    try { data = await api('/api/conversation'); } catch { return; }
+    if (key !== (currentProject?.path || '') || activeJob) return;  // the selection changed meanwhile
+    for (const node of $('thread').querySelectorAll('.message')) node.remove();
+    hideTyping(); streaming = null; lastAction = null;
+    if (!data.available || !data.turns.length) { $('welcome').hidden = false; return; }
+    for (const turn of data.turns) {
+      if (turn.role === 'user') message('YOU', turn.content, 'user', null);
+      else if (turn.content.startsWith('[Task] ')) message('CODING BRAIN · TASK', turn.content.slice(7), 'system', null);
+      else message('CODING BRAIN', turn.content, 'assistant', null);
+    }
+    for (const node of $('thread').querySelectorAll('.message')) node.classList.add('history');
+    setContext(`Context: ${data.project || 'general chat'} · ${data.turns.length} saved message${data.turns.length === 1 ? '' : 's'}`);
+  }
+
+  function showAction(action) {
+    lastAction = action;
+    const bubbles = $('thread').querySelectorAll('.message.assistant .message-bubble');
+    const host = bubbles[bubbles.length - 1];
+    if (!host) return;
+    const row = document.createElement('div');
+    row.className = 'action-buttons';
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.textContent = action.kind === 'create_project' ? 'Create as new project' :
+      `Run as task in ${action.project || currentProject?.name || 'this project'}`;
+    go.addEventListener('click', () => { row.remove(); startAction(action); });
+    const note = document.createElement('span');
+    note.className = 'note';
+    note.textContent = 'You review and approve the plan before anything changes · or reply “yes”';
+    row.append(go, note);
+    host.append(row);
+  }
+
+  async function startAction(action) {
+    lastAction = null;
+    try {
+      if (action.kind === 'task' && action.root && currentProject?.path !== action.root) {
+        updateProject(await api('/api/project', 'POST', {path: action.root}));
+      }
+      setMode(action.kind === 'create_project' ? 'new' : 'run');
+      $('prompt').value = action.goal;
+      await submit();
+    } catch (e) { toast(e.message); }
   }
 
   function renderEmptyExplorer() {
@@ -974,6 +1047,8 @@
         displayedEvents.add(event.seq);
         if (event.kind === 'delta') { streamDelta(event.message); continue; }  // not an activity line
         if (event.kind === 'step') typingStep(event.message);
+        if (event.kind === 'context') { try { describeContext(JSON.parse(event.message)); } catch { /* older engine */ } continue; }
+        if (event.kind === 'action') { try { showAction(JSON.parse(event.message)); } catch { /* malformed */ } continue; }
         activityEntry(event);
         flowEvent(event);
         if (event.kind === 'approval') approval(job.id, job.approval || {summary: event.message});
@@ -1094,6 +1169,12 @@
       openDialog();
       return;
     }
+    if (mode === 'chat' && lastAction && AFFIRM.test(text)) {
+      $('prompt').value = '';
+      message('YOU', text, 'user');
+      await startAction(lastAction);
+      return;
+    }
     if (attachments.length && mode === 'chat') {
       toast('Attachments are read by Run task and New project. Switch mode to send these files.');
       return;
@@ -1153,6 +1234,7 @@
       knownProjects = data.projects;
       if (data.project) updateProject(data.project);
       await refreshEngine({force:true});
+      if (!data.active) await loadConversation();
       if (data.active && ['starting','running','approval_required'].includes(data.active.status)) {
         activeJob = data.active.id;
         startedAt = data.active.started;
@@ -1207,6 +1289,15 @@
     });
   }
   $('git-refresh').addEventListener('click', () => refreshGit(true));
+  $('new-conversation').addEventListener('click', async () => {
+    if (activeJob) { toast('Wait for the current reply or task to finish.'); return; }
+    if (!await confirmAction('Start a new conversation?', `Earlier messages${currentProject ? ' about ' + currentProject.name : ''} stay saved but are no longer sent to the model.`, 'New conversation')) return;
+    try {
+      await api('/api/conversation/reset', 'POST');
+      await loadConversation(true);
+      toast('New conversation started');
+    } catch (e) { toast(e.message); }
+  });
 
   // ---- Code editor: Monaco (the editor inside VS Code), bundled with the desktop and loaded on first
   // use. Files open read-only; Edit unlocks a file, and Save writes it only if it is still the version

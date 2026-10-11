@@ -276,3 +276,22 @@ premium supervisors, and recovery after upgrading an older engine.
   the request, reading a project, writing the answer) and then `reply_delta` events while the local model
   writes. The window shows the step in the *Thinking* bubble, grows the reply live, and replaces it with the
   formatted reply when it is complete. Steps are observable actions; private model reasoning is never shown.
+
+## Directing work from the conversation, and context control
+
+- **One conversation per project** (and one for general chat), owned by the engine. The window loads it when the
+  app opens and whenever the selected project changes. Task milestones (planned, tested, accepted on a branch) are
+  written into that project's conversation, so follow-ups such as "now add tests for it" are understood. Selecting
+  a Git folder registers it (read-only to the folder) so chat knows it.
+- **Explicit scope.** Every message says which project is selected, or that none is (`conversation.send` scope
+  `global`); the engine never keeps an earlier project in focus.
+- **Context budget.** The local models get a window sized to the computer (`models.context`, set by the installer:
+  4K/8K on a processor, 16K/32K with a GPU). Each turn is filled in priority order: instructions and your message
+  always, then the project context, then the newest earlier messages. What does not fit is left out visibly. The
+  context bar above the message box says what the model saw ("calc · 6 earlier messages (2 older left out) ·
+  project files · 8K window"). Secret file names (`.env`, keys, credentials) are never part of the project context.
+- **New conversation** starts fresh for the selected project; earlier messages stay saved but are no longer sent.
+- **Doing the work from chat.** When a reply proposes work, it shows **Run as task in <project>** or **Create as new
+  project**; clicking it, or replying "yes" / "do it" / "go ahead", starts it in the normal flow: you still review
+  and approve the plan before anything changes. Requests phrased as questions or with typos ("can u creat ...") are
+  recognized as requests.

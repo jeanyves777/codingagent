@@ -353,3 +353,15 @@ button.is-loading::before { content:'';display:inline-block;width:12px;height:12
 .diff-entry .badge.added{color:#9fe0b7}.diff-entry .badge.deleted{color:#f3b6b6}.diff-entry .badge.modified{color:#8ec5ff}
 .diff-entry .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .review-side{margin-top:8px}
+
+/* Conversation context */
+.context-bar{display:flex;align-items:center;gap:10px;margin:0 2px 7px;font-size:10.5px;color:#7f9792}
+.context-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.context-text.trimmed{color:#d8b47e}
+.context-new{margin-left:auto;border:1px solid #33463f;background:transparent;color:#a9cfc2;border-radius:8px;font-size:10.5px;padding:3px 9px;white-space:nowrap}
+.context-new:hover{border-color:#6d9c90;color:#e6f5f0}
+.message.history{opacity:.92}
+.action-buttons{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.action-buttons button{padding:7px 13px;border:1px solid #4e8c79;border-radius:8px;background:#2f5a4d;color:#effff9;font-size:12px}
+.action-buttons button:hover{background:#3a6c5d}
+.action-buttons .note{font-size:10.5px;color:#7f9792;align-self:center}

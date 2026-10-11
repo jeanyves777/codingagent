@@ -44,8 +44,12 @@ OPERATIONS = {
     "install.plan": ("read", {"profile": ("str", False)}, "each component's state and planned action"),
     "providers.list": ("read", {"deep": ("bool", False)}, "provider descriptors (brain.local.providers)"),
     "projects.list": ("read", {}, "registered projects with task counts"),
-    "conversation.send": ("read", {"message": ("str", True), "project_id": ("str", False)},
-                          "reply, intent, and a proposed action to confirm (never executed here)"),
+    "conversation.send": ("read", {"message": ("str", True), "project_id": ("str", False), "scope": ("str", False)},
+                          "reply, intent, a proposed action to confirm (never executed here) and the context the "
+                          "model saw; scope 'global' means no project is selected (feature conversation.scope)"),
+    "conversation.reset": ("action", {"project_id": ("str", False)},
+                           "starts a new conversation for this project (or global chat); earlier turns are kept "
+                           "on disk but no longer sent to the model"),
     "conversation.history": ("read", {"project_id": ("str", False), "limit": ("int", False)}, "recent turns"),
     "tasks.list": ("read", {"project_id": ("str", True)}, "the project's tasks (summaries)"),
     "tasks.get": ("read", {"project_id": ("str", True), "task_id": ("str", True)}, "one task (summary)"),
@@ -73,7 +77,8 @@ OPERATIONS = {
     "tasks.resume": ("action", {"project_id": ("str", True), "task_id": ("str", True)}, "continues an unfinished task"),
 }
 # Additive capabilities within API 1.x that clients detect here rather than from a version number.
-FEATURES = {"tasks.start.attachments", "conversation.stream"}
+FEATURES = {"tasks.start.attachments", "conversation.stream", "conversation.scope", "conversation.reset"}
+TASK_MILESTONES = {"tasks.start", "tasks.approve", "tasks.accept"}
 LONG = {"conversation.send", "tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
 CHECK_TYPES = {"str": str, "bool": bool, "int": int, "list": list}
 
@@ -152,7 +157,10 @@ class Engine:
             raise ApiError("bad_params", f"{op}: unknown parameter(s) {', '.join(sorted(unknown))}")
         handler = getattr(self, "op_" + op.replace(".", "_"))
         try:
-            return handler(emit=emit, **params) if op in LONG else handler(**params)
+            result = handler(emit=emit, **params) if op in LONG else handler(**params)
+            if op in TASK_MILESTONES and isinstance(result, dict):
+                self.remember_task(op, params.get("project_id"), result)
+            return result
         except ApiError:
             raise
         except SystemExit as error:
@@ -227,7 +235,36 @@ class Engine:
                                         read=lambda prompt="": "", interactive=False)
         return self._assistant
 
-    def op_conversation_send(self, message: str, project_id: str | None = None, emit=None):
+    def remember_task(self, op: str, project_id: str | None, task: dict):
+        """Task milestones become part of the project's conversation, so a follow-up ("now add tests
+        for it") is understood. Facts from the task record only; never the diff or file contents."""
+        from .assistant import ConversationLog
+        goal = str(task.get("goal") or "")[:300]
+        status = task.get("status")
+        files = ", ".join((task.get("files") or [])[:12])
+        if op == "tasks.start":
+            text = (f"[Task] Planned \"{goal}\": proposes changes to {files or 'no files'}; waiting for approval."
+                    if status == "proposed" else f"[Task] \"{goal}\": {status}.")
+        elif op == "tasks.approve":
+            tests = task.get("tests") or {}
+            text = f"[Task] Applied \"{goal}\" in an isolated workspace; tests " + (
+                "passed" if tests.get("passed") else "did not pass" if tests.get("passed") is False else "not run") + f" ({status})."
+        else:
+            text = f"[Task] Accepted \"{goal}\" on branch {task.get('branch') or '?'}."
+        try:
+            ConversationLog(self.layout).add("assistant", text, project_id, {"kind": "task", "task_id": task.get("id")})
+        except OSError:
+            pass  # the conversation log never breaks a task
+
+    def op_conversation_reset(self, project_id: str | None = None):
+        from .assistant import ConversationLog
+        with self.lock:
+            ConversationLog(self.layout).reset(project_id)
+            if self._assistant is not None and project_id is None:
+                self._assistant.focus = None
+        return {"reset": True, "project_id": project_id}
+
+    def op_conversation_send(self, message: str, project_id: str | None = None, scope: str | None = None, emit=None):
         """The reply also streams as {"event_type": "reply_delta", "text": ...} events while the
         local model writes it, after {"event_type": "reply_step", "text": ...} events naming each
         observable step (feature conversation.stream); the result still carries the full reply."""
@@ -236,7 +273,9 @@ class Engine:
             assistant.on_token = (lambda text: emit({"event_type": "reply_delta", "text": text})) if emit else None
             assistant.on_step = (lambda text: emit({"event_type": "reply_step", "text": text})) if emit else None
             try:
-                return assistant.respond(message, project_id)
+                if scope not in (None, "global", "project"):
+                    raise ApiError("bad_params", "scope must be 'global' or 'project'")
+                return assistant.respond(message, project_id, scope)
             finally:
                 assistant.on_token = assistant.on_step = None
 

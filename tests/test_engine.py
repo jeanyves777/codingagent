@@ -88,7 +88,7 @@ def test_schema_and_info():
     assert schema["api_version"] == "1.0" and set(schema["operations"]) == set(OPERATIONS)
     assert {op for op, item in schema["operations"].items() if item["kind"] == "action"} == {
         "projects.register", "projects.create", "tasks.start", "tasks.approve", "tasks.accept", "tasks.stop",
-        "tasks.resume", "tasks.tool_decision"}
+        "tasks.resume", "tasks.tool_decision", "conversation.reset"}
     assert schema["operations"]["conversation.send"]["kind"] == "read"
 
 
@@ -486,3 +486,51 @@ def test_conversation_send_streams_reply_deltas(world, monkeypatch):
     kinds = [event["event_type"] for event in events]
     assert kinds.index("reply_step") < kinds.index("reply_delta")  # steps come before the answer
     assert assistant.on_token is None and assistant.on_step is None  # never left attached after the turn
+
+
+def test_global_scope_drops_an_earlier_project_focus_and_reset_starts_fresh(world, monkeypatch):
+    engine, pid = world["engine"], world["project"]["id"]
+    assistant = engine.assistant()
+    seen = []
+
+    def chat(messages, schema=None, max_tokens=600, on_token=None):
+        if schema:
+            return '{"intent": "question", "goal": "q", "project": null, "clarification": null}'
+        seen.append(messages)
+        return "ok"
+    monkeypatch.setattr(assistant.model, "chat", chat)
+    engine.call("conversation.send", {"message": "tell me something about the calculator code", "project_id": pid})
+    assert assistant.focus_id() == pid
+    answer = engine.call("conversation.send", {"message": "tell me a fun fact", "scope": "global"})
+    assert assistant.focus_id() is None and answer["context"]["project"] is None
+    assert answer["context"]["window"] >= 4096 and "history_turns" in answer["context"]
+    engine.call("conversation.reset", {})
+    engine.call("conversation.send", {"message": "tell me another fun fact", "scope": "global"})
+    assert [m["role"] for m in seen[-1]] == ["system", "user"]  # nothing from before the reset
+    with pytest.raises(ApiError):
+        engine.call("conversation.send", {"message": "hi", "scope": "everything"})
+
+
+def test_budget_keeps_instructions_and_newest_turns_and_says_what_it_left_out():
+    from brain.local.assistant import budget_messages
+    earlier = [{"role": "user", "content": f"turn {index} " + "x" * 3000} for index in range(12)]
+    messages, used = budget_messages("RULES", "question?", "README " + "y" * 50000, earlier, 8192)
+    assert messages[0]["content"].startswith("RULES") and messages[-1]["content"] == "question?"
+    assert used["project_context_trimmed"] and used["history_left_out"] > 0
+    kept = [m["content"].split()[1] for m in messages[1:-1]]
+    assert kept == [str(index) for index in range(12 - used["history_turns"], 12)]  # the newest turns
+    assert sum(len(m["content"]) for m in messages) // 3 < 8192 - 800
+
+
+def test_task_milestones_join_the_project_conversation(world, monkeypatch):
+    engine, pid = world["engine"], world["project"]["id"]
+    with_fake_brain(world, monkeypatch)
+    task = engine.call("tasks.start", {"project_id": pid, "goal": "Fix x"})
+    engine.call("tasks.approve", {"project_id": pid, "task_id": task["id"], "digest": task["digest"], "decision": "approve"})
+    engine.call("tasks.accept", {"project_id": pid, "task_id": task["id"]})
+    history = [turn["content"] for turn in engine.call("conversation.history", {"project_id": pid})]
+    assert any(text.startswith('[Task] Planned "Fix x"') and "main.py" in text for text in history)
+    assert any("tests passed" in text for text in history)
+    assert any(text.startswith('[Task] Accepted "Fix x" on branch') for text in history)
+    other = engine.call("conversation.history", {"project_id": "someone-else"})
+    assert not any("[Task]" in turn["content"] for turn in other)  # never in another project's conversation
