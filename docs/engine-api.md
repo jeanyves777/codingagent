@@ -61,6 +61,8 @@ The same operations are available in-process as `brain.local.engine.Engine(...).
 | `conversation.history {project_id, limit}` | recent turns, global ones plus that project's only |
 | `tasks.list {project_id}`, `tasks.get {project_id, task_id}` | task summaries |
 | `tasks.events {project_id, task_id, after_seq}` | journal events after a sequence number |
+| `backlog.status {project_id, max_agents}` | the [continuous-orchestration](continuous-orchestration.md) backlog, exactly as `codingbrain backlog status --json` prints it (see below). Never starts the Brain service or a run, and never creates a backlog. |
+| `backlog.ledger {project_id, item_id}` | `{intact, entries}`: the verification evidence (all of it, or one item's, by id prefix) and whether its hash chain is intact. An unknown item is `not_found`. |
 
 **Actions** do exactly what their name says, and only when called:
 
@@ -74,9 +76,44 @@ The same operations are available in-process as `brain.local.engine.Engine(...).
 | `tasks.tool_decision {project_id, task_id, request_id, decision}` | Approves or declines the protected tool request the task is waiting on (`pending_tool_approval`); any other request id is refused. The task then continues or stops. |
 | `tasks.stop {project_id, task_id}` | Requests cancellation; returns at once. A running task stops at its next safe boundary. |
 | `tasks.resume {project_id, task_id}` | Continues an unfinished task. |
+| `backlog.add {project_id, goal, title, priority, depends_on, accept_files, accept_nodes, criteria, max_attempts}` | Adds a backlog item with the same checks as `codingbrain backlog add`: `accept_files` must be files inside the project and are frozen (read) now; every `accept_nodes` entry must name a test in them; `depends_on` takes item ids or unique prefixes; `priority` is `P0` to `P3` (default `P1`). Returns the item (`id`, `title`, `priority`, `state`, `attempts`, `reason`, `depends_on`, `acceptance` with file names, nodes and criteria, or `null`). **Nothing is started.** |
+
+The backlog is worked only by `codingbrain backlog run`, in a terminal the user started; the API
+has no operation that runs it, cancels its items or accepts their work. An item added while a run
+is going is picked up by that run, exactly as with `codingbrain backlog add`, and its approvals
+stay with the user.
 
 There is no `--yes`, and the API adds no shortcuts. Every action goes through the same authority
 checks as the CLI: path safety, the offline sandbox, review, premium budgets and digest binding.
+
+## Parameter types and versions
+
+Parameters are `str`, `bool`, `int` or `list[str]` (a JSON array of strings). New operations are
+added within API 1.0: a client checks `engine.info`'s `operations` list for what the installed
+engine supports (the desktop does), never the engine version. A change that breaks an existing
+operation would change the major version.
+
+## Backlog status
+
+`backlog.status` returns:
+
+```json
+{"counts": {"ready": 1, "running": 1},
+ "agents": {"local_slots": 2, "busy": [{"item": "3f2a...", "strategy": "local", "task": "9c1e..."}]},
+ "items": [{"id": "3f2a...", "title": "...", "priority": "P0", "state": "running", "attempts": 1, "reason": ""}],
+ "finished": false, "waiting_on_people_only": false, "ledger_intact": true}
+```
+
+- `counts` lists only states with items. The states are `ready`, `waiting`, `running`,
+  `awaiting_approval`, `verifying`, `verified`, `done`, `blocked` and `cancelled`.
+- `agents.local_slots` is what this machine runs (one per 6 GB of memory and two cores, at most
+  `max_agents`, default 4); `busy` lists the attempts that hold an agent now.
+- `finished`: every item is done, blocked or cancelled (an empty backlog is finished).
+- `waiting_on_people_only`: nothing runs or is ready, and something waits for a person (an
+  approval, or acceptance of verified work).
+- `ledger_intact`: the evidence ledger's hash chain is unbroken.
+
+It is computed by the same function as `Conductor.status()` (`brain.conductor.backlog_status`).
 
 ## Provider descriptors
 
@@ -110,6 +147,9 @@ installed does not mean a provider is ready.
 - `python -m pytest tests/test_engine.py`: the contract in-process, with fakes (validation,
   conversation that never executes, digest-bound single-use approval, two simultaneous tasks with
   separate live feeds, stop during a running sandbox over one stdio session, restart recovery).
+- `python -m pytest tests/test_engine_backlog.py`: the backlog operations (status writes nothing,
+  builds no service and equals `Conductor.status()`; ledger tampering is reported; `backlog.add`
+  freezes acceptance files and refuses what the CLI refuses).
 - `python scripts/engine_client_check.py`: a real client that starts `codingbrain api --stdio` as a
   separate process with the installed Python and checks the protocol from outside, including a
   killed engine restarted from its persisted state. CI runs it on Windows (Windows PowerShell 5.1

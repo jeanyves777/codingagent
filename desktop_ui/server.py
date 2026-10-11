@@ -114,6 +114,7 @@ REQUIRED_OPERATIONS = {
     "chat": ("conversation.send",),
     "run": ("projects.register", "tasks.start", "tasks.approve", "tasks.accept", "tasks.stop"),
     "new": ("conversation.send", "projects.create", "tasks.start", "tasks.approve", "tasks.accept"),
+    "backlog": ("projects.list", "backlog.status"),  # read-only: the window never works the backlog
 }
 
 
@@ -248,6 +249,34 @@ class Workspace:
             report["providers"] = typed["providers"]
         self._engine_status_cache = (now, report)
         return report
+
+    def backlog(self) -> dict:
+        """The selected project's continuous-orchestration backlog, as the installed engine reports
+        it (backlog.status). Read-only: this window shows the backlog and never works it; running
+        it stays `codingbrain backlog run`, and every approval and acceptance stays with the user."""
+        if not self.project:
+            return {"available": False, "status": None, "detail": "Select a project to see its backlog."}
+        engine = self.engine_status()["engine"] if self.use_core else {}
+        missing = [op for op in REQUIRED_OPERATIONS["backlog"] if op not in (engine.get("operations") or [])]
+        if not engine.get("typed_api") or missing:
+            return {"available": False, "status": None,
+                    "detail": f"The installed engine (v{engine.get('version') or '?'}) does not report a backlog "
+                              f"({', '.join(missing or REQUIRED_OPERATIONS['backlog'])} missing). Update Coding Brain."}
+        from .engine_client import EngineError
+        try:
+            client = self.engine_client()
+            selected = self.project.resolve()
+            # A read-only lookup: viewing the backlog never registers or changes a project.
+            match = next((item for item in client.call("projects.list", {}, None, 60)
+                          if Path(item["root"]).resolve() == selected), None)
+            if match is None:
+                return {"available": True, "status": None,
+                        "detail": "Coding Brain has not worked on this project yet, so it has no backlog."}
+            status = client.call("backlog.status", {"project_id": match["id"]}, None, 60)
+        except EngineError as error:
+            return {"available": False, "status": None, "detail": f"{error.code}: {str(error)[:300]}"}
+        return {"available": True, "project_id": match["id"], "status": status,
+                "detail": "Read from the installed engine. Work it with `codingbrain backlog run`."}
 
     def installation_status(self) -> dict:
         try:
@@ -652,6 +681,10 @@ def create_app(state: Workspace | None = None) -> FastAPI:
     @app.get("/api/engine/status", dependencies=[Depends(auth)])
     def engine_status(refresh: bool = False):
         return state.engine_status(refresh=refresh)
+
+    @app.get("/api/backlog", dependencies=[Depends(auth)])
+    def backlog():
+        return state.backlog()
 
     @app.get("/api/setup", dependencies=[Depends(auth)])
     def setup_status():

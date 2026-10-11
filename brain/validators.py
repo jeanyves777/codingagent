@@ -86,15 +86,25 @@ def validate_change(path: str, content: str, before: str | None = None) -> list[
     return validator(path, content) if validator else []
 
 
+FENCED = re.compile(r"\A\s*```[\w+-]*[ \t]*\r?\n(.*?)\r?\n```\s*\Z", re.S)
+
+
 def mechanical_repair(path: str, content: str) -> str | None:
-    """Fix double-escaped line breaks, the most common small-model output defect.
+    """Fix the most common small-model output defects: double-escaped line breaks, and a whole
+    file wrapped in one Markdown code fence.
 
     Used only when the file does not compile; the repaired text is returned only if it compiles.
     Tests remain the authority on whether the result is correct."""
-    if not path.endswith(".py") or "\\n" not in content or not _python(path, content):
+    if not path.endswith(".py") or not _python(path, content):
         return None
-    candidate = content.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "    ")
-    return candidate if not _python(path, candidate) else None
+    candidates = []
+    fenced = FENCED.match(content)
+    if fenced:
+        candidates.append(fenced.group(1) + "\n")
+    for text in [content, *candidates]:
+        if "\\n" in text:
+            candidates.append(text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "    "))
+    return next((candidate for candidate in candidates if not _python(path, candidate)), None)
 
 
 def format_diagnostics(diagnostics: list[Diagnostic]) -> str:

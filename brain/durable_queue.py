@@ -24,7 +24,7 @@ class DurableQueue:
 
     def enqueue(self, task_id: str, action: str, payload: dict | None = None) -> str:
         if action not in {"create_task", "plan_group", "execute_task", "resume_task",
-                          "advance_group"}:
+                          "supervise_task", "advance_group"}:  # every action Brain.dispatch_job handles
             raise ValueError("Unknown durable job action")
         now, dedupe = time.time(), f"{task_id}:{action}"
         with self.connect() as db:

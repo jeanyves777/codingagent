@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -8,17 +9,32 @@ class Store:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         with self.connect() as db:
+            # Readers in other processes (status, desktop, engine API) never wait for a writer.
+            db.execute("PRAGMA journal_mode=WAL")
             db.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS memories (task_id TEXT PRIMARY KEY, content TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS repository_indexes (repository TEXT PRIMARY KEY, content TEXT NOT NULL)")
 
+    @contextmanager
     def connect(self):
-        return sqlite3.connect(self.path, timeout=10)
+        # Closed on exit: an unclosed connection stays open until the garbage collector runs, which
+        # keeps the WAL files in use (updates cannot release the database; Windows cannot delete it).
+        db = sqlite3.connect(self.path, timeout=10)
+        try:
+            yield db
+            db.commit()
+        finally:
+            db.close()
 
-    def save(self, task: dict):
+    def save(self, task: dict, clear_cancel: bool = False):
+        """Write the whole task. A stored cancel request is kept (atomically) when the body being
+        written predates it, e.g. the execution loop's own copy; only `clear_cancel` withdraws it."""
         with self.connect() as db:
-            db.execute("INSERT INTO tasks VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
-                       (task["id"], json.dumps(task)))
+            db.execute("INSERT INTO tasks VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET body="
+                       "CASE WHEN ? = 0 AND json_extract(tasks.body, '$.cancel_requested') = 1 "
+                       "AND COALESCE(json_extract(excluded.body, '$.cancel_requested'), 0) = 0 "
+                       "THEN json_set(excluded.body, '$.cancel_requested', json('true')) ELSE excluded.body END",
+                       (task["id"], json.dumps(task), int(clear_cancel)))
 
     def get(self, task_id: str) -> dict:
         with self.connect() as db:

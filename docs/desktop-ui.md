@@ -144,6 +144,7 @@ The desktop owns no orchestration. `desktop_ui/engine_client.py` starts one engi
 | Accept | `tasks.accept` (a new branch; the checked-out branch is unchanged) |
 | Stop | `tasks.stop` over the same engine session; the running step ends `cancelled` |
 | Activity | the task's live journal events (`op_id`-scoped), heartbeats when quiet |
+| Backlog tab (`GET /api/backlog`) | `projects.list`, `backlog.status`: read-only. Counts, busy agents, items with their state and reason, "waiting for you", ledger intact or broken. The window never works the backlog; that stays `codingbrain backlog run` |
 
 Readiness (`GET /api/engine/status`) comes from the installed engine: with API 1.0 installed, the
 version comes from `engine.info` and Claude/Codex readiness from `providers.list`, run by the

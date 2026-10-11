@@ -125,6 +125,12 @@ def test_double_escaped_newlines_are_repaired_deterministically(tmp_path):
     assert mechanical_repair("ok.py", 'x = "a\\nb"\n') is None
     assert mechanical_repair("broken.py", 'x = (\\n') is None
     assert mechanical_repair("data.json", '{"a": 1}\\n') is None
+    # a whole file wrapped in a Markdown fence: unwrapped only when the result compiles
+    assert mechanical_repair("slug.py", "```python\ndef f():\n    return 1\n```") == "def f():\n    return 1\n"
+    assert mechanical_repair("slug.py", "  ```\nx = 1\n```\n") == "x = 1\n"
+    assert mechanical_repair("slug.py", "```python\ndef f(:\n```") is None  # still broken: left to the model
+    assert mechanical_repair("slug.py", "Here it is:\n```python\nx = 1\n```") is None  # prose is not a fence
+    assert mechanical_repair("ok.py", "x = 1\n") is None
 
 
 MIT = "MIT License\n\nPermission is hereby granted, free of charge, to any person obtaining a copy"

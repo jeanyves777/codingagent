@@ -120,7 +120,7 @@ def build_brain_model(spec: dict, options: dict, gateway=None):
     provider = spec["provider"]
     if provider == "ollama":
         from .model import OllamaModel
-        return OllamaModel(spec["url"], spec["model"], mcp_gateway=gateway, **options)
+        return OllamaModel(spec["url"], spec["model"], mcp_gateway=gateway, timeout=spec.get("timeout", 600), **options)
     if provider == "openai":
         from .openai_compatible import OpenAICompatibleModel
         key = os.environ.get(spec["api_key_env"]) if spec.get("api_key_env") else None
@@ -144,8 +144,11 @@ def load_brains(path: Path) -> dict:
     for name, spec in payload["brains"].items():
         if not NAME.fullmatch(name) or not isinstance(spec, dict):
             raise ValueError("Invalid brain name or configuration")
-        if set(spec) - {"provider", "url", "model", "api_key_env", "effort", "fallbacks"}:
+        if set(spec) - {"provider", "url", "model", "api_key_env", "effort", "fallbacks", "timeout"}:
             raise ValueError(f"Unknown key in brain {name}")
+        if "timeout" in spec and (spec.get("provider") != "ollama" or not isinstance(spec["timeout"], int)
+                                  or not 60 <= spec["timeout"] <= 7200):
+            raise ValueError(f"Brain {name} timeout must be 60 to 7200 seconds (Ollama brains only)")
         provider = spec.get("provider")
         if provider not in PROVIDERS or not isinstance(spec.get("model"), str) or not spec["model"]:
             raise ValueError(f"Brain {name} needs a provider ({', '.join(sorted(PROVIDERS))}) and model")

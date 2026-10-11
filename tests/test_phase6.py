@@ -367,3 +367,20 @@ def test_ollama_prose_answer_is_finalized_with_structured_output(tmp_path, monke
     assert json.loads(result) == {"plan": "p", "changes": []}
     assert sent[-1]["format"]["required"] == ["plan", "changes"] and "tools" not in sent[-1]
     assert json_object('note {not json} then {"plan": "a", "changes": []} {"x": 1}')["plan"] == "a"
+
+
+def test_a_slow_machine_can_give_local_model_calls_more_time(tmp_path):
+    from brain.brains import build_brain_model, load_brains
+    from brain.local.config import DEFAULTS, brains_config
+    config = {**DEFAULTS, "models": {**DEFAULTS["models"], "model": "qwen", "timeout": 1800}}
+    path = tmp_path / "brains.json"
+    path.write_text(json.dumps(brains_config(config)))
+    spec = load_brains(path)["brains"]["main"]
+    assert spec["timeout"] == 1800 and build_brain_model(spec, {}).timeout == 1800
+    default = {**DEFAULTS, "models": {**DEFAULTS["models"], "model": "qwen"}}
+    path.write_text(json.dumps(brains_config(default)))
+    assert "timeout" not in load_brains(path)["brains"]["main"]  # unchanged brains file by default
+    for bad in (5, "600", 99999):
+        path.write_text(json.dumps({"brains": {"main": {"provider": "ollama", "model": "q", "timeout": bad}}}))
+        with pytest.raises(ValueError, match="timeout"):
+            load_brains(path)

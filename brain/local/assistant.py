@@ -111,8 +111,9 @@ def task_counts(data: Path) -> dict:
     if not database.exists():
         return {}
     import sqlite3
+    from contextlib import closing
     try:
-        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
+        with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as db:
             rows = db.execute("SELECT data FROM tasks").fetchall()
     except sqlite3.Error:
         return {}

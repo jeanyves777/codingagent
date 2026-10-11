@@ -17,6 +17,9 @@ See docs/engine-api.md.
   - `tasks.stop` during a running task over the same session, ending in `cancelled`;
   - after a restart, tasks whose engine process is gone are reported as `interrupted`, never as
     passed or restarted on their own.
+- **Backlog operations:** `backlog.status` and `backlog.ledger` (read-only) and `backlog.add`
+  expose the continuous-orchestration backlog; the desktop shows it in a read-only Backlog tab.
+  Running the backlog stays `codingbrain backlog run`.
 - **`scripts/engine_client_check.py`:** a real out-of-process client, run in CI on Windows and,
   with a real model and sandbox, on Ubuntu.
 - **Provider registry (issue #14):** each provider reports separately whether it is installed,

@@ -241,7 +241,7 @@ jobs:
     # disposable end-to-end task (real model fixes a real bug, tests run in the real sandbox).
     name: real installer readiness and end-to-end task (ubuntu)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CODINGBRAIN_TEST_CODING_MODEL: qwen2.5-coder:7b
       CODINGBRAIN_TEST_DOCKER: "1"
@@ -262,7 +262,10 @@ jobs:
           done
           python -m pip install --disable-pip-version-check -e ".[dev]"
           curl -fsSL https://ollama.com/install.sh | sh
-          (ollama serve > ollama.log 2>&1 &)
+          # Our own server with two generation slots, so the real-agent backlog test measures (and
+          # gets) simultaneous inference; the installer's service, if it started one, is stopped.
+          sudo systemctl stop ollama 2>/dev/null || true
+          (OLLAMA_NUM_PARALLEL=2 ollama serve > ollama.log 2>&1 &)
           sleep 5
       - name: codingbrain install --profile local (real; downloads the model through Ollama)
         shell: bash
@@ -289,7 +292,8 @@ jobs:
         shell: bash
         env:
           CODINGBRAIN_CAPABILITY_REPORT: ${{ github.workspace }}/goal-first-capability.json
-        run: python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py tests/test_new.py -k real 2>&1 | tee installer-real.log
+          CODINGBRAIN_SWARM_REPORT: ${{ github.workspace }}/swarm-capability.json
+        run: python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py tests/test_new.py tests/test_conductor_real.py tests/test_inference.py -k real 2>&1 | tee installer-real.log
       - name: Engine API with a real task (real stdio client, real model, real sandbox)
         if: always()
         shell: bash
@@ -327,6 +331,31 @@ jobs:
               print(f"::warning::Real-model goal-first build {verdict.lower()} ({report['status']}); see the job summary")
               sys.exit(1)
           PY
+      - name: Real-agent backlog capability (reported, not a merge gate)
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          path = "swarm-capability.json"
+          if not os.path.exists(path):
+              print("::warning::No swarm report: the real-agent backlog run did not complete")
+              sys.exit(1)
+          report = json.load(open(path))
+          lines = [f"### Real-agent backlog: {report['verified']} of {report['items']} items verified", "",
+                   f"Model `{report['model']}`, {report['seconds']} s, two local agents in parallel; "
+                   f"{report.get('model_calls')} model calls, share of their time with two in flight: "
+                   f"{report.get('model_calls_overlap')}. "
+                   "Verified means the frozen acceptance tests passed when re-run independently in the sandbox.", ""]
+          lines += [f"- {item['title']}: {item['state']} after {item['attempts']} attempt(s)"
+                    + (f" ({item['reason'][:160]})" if item["reason"] else "") for item in report["per_item"]]
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a").write("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          if report["verified"] < report["items"]:
+              print("::warning::The real model did not complete every backlog item; see the job summary")
+              sys.exit(1)
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -337,6 +366,7 @@ jobs:
             doctor-full.json
             installer-real.log
             goal-first-capability.json
+            swarm-capability.json
             engine-client.log
             ollama.log
 
