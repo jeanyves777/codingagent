@@ -341,3 +341,31 @@ def test_messages_about_local_work_still_go_through_routing(world, message):
     model = FakeModel()
     assistant(world, model).respond(message)
     assert model.calls and model.calls[0]["schema"] is not None
+
+
+def test_a_vague_request_gets_scoping_questions_then_a_spec_built_from_the_answers(world):
+    model = FakeModel()
+    bot = assistant(world, model)
+    first = bot.respond("can you generate a pdf ?")
+    assert first["action"] is None and first["needs"] == "scope"
+    assert "What should it contain" in first["reply"] and not model.calls  # no model call, nothing proposed
+    second = bot.respond("a monthly sales report from sales.csv with a bar chart, A4, generated on demand")
+    assert second["action"]["kind"] == "create_project"
+    assert "sales.csv" in second["action"]["goal"] and "generate a pdf" in second["action"]["goal"].lower()
+    assert "Here is what I will build" in second["reply"]
+    assert no_tasks_anywhere(world)  # proposing is never starting
+
+
+def test_scoping_can_be_cancelled_and_a_new_request_replaces_it(world):
+    bot = assistant(world, FakeModel())
+    bot.respond("make an app")
+    assert bot.respond("cancel")["action"] is None and bot.scoping is None
+    bot.respond("make an app")
+    replaced = bot.respond("create a recipe search website with filters by ingredient")
+    assert bot.scoping is None and replaced.get("needs") != "scope"
+
+
+def test_a_specific_request_is_not_held_up(world):
+    bot = assistant(world, FakeModel(routes={"create a task manager app with due dates": {"intent": "create_project", "goal": "Task manager with due dates"}}))
+    answer = bot.respond("create a task manager app with due dates")
+    assert answer["action"] == {"kind": "create_project", "goal": "Task manager with due dates"}

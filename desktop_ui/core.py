@@ -38,8 +38,8 @@ def _summary(task: dict, kind: str) -> dict:
     """What the user approves, from the engine's task summary (or the goal, for a new project)."""
     if kind == "new":
         return {"kind": kind, "task_id": task["id"],
-                "summary": "Create a NEW local project from this goal and begin work? "
-                           "Coding Brain will initialize Git and propose the implementation. "
+                "summary": "Create a NEW local project for:\n\n" + str(task.get("goal", ""))[:1500] + "\n\n"
+                           "Coding Brain will initialize Git and propose the implementation for your review. "
                            "It will not reuse or overwrite an existing directory.",
                 "goal": task.get("goal", "")[:2000]}
     if kind == "proposal":
@@ -237,6 +237,10 @@ def create_new(job):
         if action.get("kind") != "create_project":
             if answer.get("reply"):
                 job.emit("output", answer["reply"])
+            if answer.get("needs") in {"scope", "clarification"}:
+                job.status = "completed"
+                job.emit("finish", "Waiting for your answers; nothing was created")
+                return
             job.emit("output", "That is not a request to create a new project, so nothing was created.")
             job.status = "completed"
             job.emit("finish", "No project created")

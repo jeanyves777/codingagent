@@ -59,6 +59,34 @@ CREATE = re.compile(ASKING + r"(create|creat|crate|craete|build|buid|bulid|biuld
                     r"program|script|cli|dashboard|bot|project|page|pdf|report|document|component|module|extension)s?\b")
 CHANGE = re.compile(ASKING + r"(fix|fx|add|implement|refactor|update|change|remove|"
                     r"rename|delete|optimi[sz]e|migrate|upgrade|write\s+tests|debug|repair|improve)\b")
+# Requests too vague to build or change anything yet: an object with nothing about what it should be
+# ("generate a PDF", "make an app") or a bare instruction ("fix it"). These get scoping questions first.
+VAGUE_CREATE = re.compile(ASKING + r"(create|creat|build|buid|make|generate|write|develop|start|do)?\s*(me\s+)?"
+                          r"(a|an|the|some|my)?\s*(new\s+|simple\s+|basic\s+|small\s+)?(?P<thing>pdf|app|application|"
+                          r"website|web\s*site|site|web\s*page|page|tool|program|script|game|bot|dashboard|api|project|"
+                          r"report|document|cli|software)s?(\s+file)?\s*(for\s+me)?\s*[?.!]*\s*$")
+VAGUE_CHANGE = re.compile(ASKING + r"(fix|fx|add|change|update|improve|do)\s*(it|this|that|something|the\s+bug|"
+                          r"a\s+feature|a\s+bug|everything|the\s+code|my\s+code)?\s*[?.!]*\s*$")
+SCOPE_QUESTIONS = {
+    "document": ["What should it contain: the topic, the sections, or the data it shows?",
+                 "Where does the content come from: text you give me, a file (CSV, Excel), a database or a website?",
+                 "Any format needs: page size, a logo, tables, charts, and should it be generated once or on demand?"],
+    "app": ["What should it do? Name the two or three main things someone does with it.",
+            "Who uses it, and where: in a browser, on the desktop, or on the command line?",
+            "Any must-haves: login, saving data, a particular language or framework?"],
+    "change": ["What exactly should change, and in which part of the project (file, function or feature)?",
+               "How will we know it works: what should happen afterwards that does not happen now?"],
+}
+
+
+def scope_kind(text: str) -> str | None:
+    """'document' / 'app' / 'change' when the request is too vague to act on, else None."""
+    match = VAGUE_CREATE.match(text)
+    if match:
+        return "document" if match.group("thing").lower() in {"pdf", "report", "document"} else "app"
+    return "change" if VAGUE_CHANGE.match(text) else None
+
+
 AFFIRM = re.compile(r"(?i)^\s*(y|yes|yeah|yep|sure|ok(ay)?|do\s+it|go\s+ahead|run\s+it|proceed|please\s+do)\s*[!.]*\s*$")
 DENY = re.compile(r"(?i)^\s*(n|no|nope|cancel|stop|never\s*mind|not\s+now)\s*[!.]*\s*$")
 STOPWORDS = {"the", "and", "for", "that", "this", "with", "from", "into", "please", "could", "would", "should",
@@ -274,6 +302,7 @@ class Assistant:
         self.interactive = sys.stdin.isatty() if interactive is None else interactive
         self.verbose = verbose
         self.pending: Pending | None = None
+        self.scoping: dict | None = None  # a vague request waiting for the user's answers to scoping questions
         self.focus: dict | None = None  # the project the conversation is about
         self.history = ConversationLog(self.layout)
         self.repository = current_repository(self.cwd)
@@ -507,7 +536,12 @@ class Assistant:
         speak, self.out = self.out, (lambda line="": captured.append(str(line)))
         result = {"action": None, "needs": None, "options": [], "project_id": self.focus_id()}
         try:
-            route = self.route(text)
+            if self.scoping and not (CREATE.match(text) or CHANGE.match(text)) or self.scoping and DENY.match(text):
+                return self.answer_scoping(text, result, captured)
+            self.scoping = None
+            kind = scope_kind(text)  # vague requests get scoping questions, whatever the model would route
+            route = (Route("create_project" if kind in ("document", "app") else "implement", "rule", goal=text)
+                     if kind else self.route(text))
             result.update(intent=route.intent, source=route.source)
             self.history.add("user", text, self.focus_id(), {"intent": route.intent, "source": route.source})
             if route.reply:
@@ -519,6 +553,8 @@ class Assistant:
                 result["needs"] = "clarification"
             elif route.intent in {"chat", "question"}:
                 self.converse(text)
+            elif route.intent in {"create_project", "implement"} and scope_kind(text):
+                self.ask_scope(route, text, result)
             elif route.intent == "create_project":
                 result["action"] = {"kind": "create_project", "goal": route.goal or text}
                 self.say(f"That sounds like a new application: \"{route.goal or text}\". Confirm to create it.")
@@ -552,6 +588,44 @@ class Assistant:
         result["reply"] = "\n".join(line for line in captured if not line.startswith("Say \"do it\""))
         result["context"] = self.last_context  # what the model saw this turn (None when it was not called)
         return result
+
+    def ask_scope(self, route: Route, text: str, result: dict):
+        """A request too vague to build ("generate a PDF") gets a few questions instead of a project."""
+        kind = scope_kind(text)
+        self.scoping = {"intent": route.intent, "goal": route.goal or text, "kind": kind, "project": self.focus}
+        questions = SCOPE_QUESTIONS[kind]
+        what = {"document": "the document", "app": "it", "change": "the change"}[kind]
+        self.say(f"Before I build {what}, a few quick questions so it is what you want:\n"
+                 + "\n".join(f"{index}. {question}" for index, question in enumerate(questions, 1))
+                 + "\nAnswer in one message (or say \"cancel\").")
+        result.update(intent=route.intent, needs="scope", source="rule")
+
+    def answer_scoping(self, text: str, result: dict, captured: list) -> dict:
+        scoping, self.scoping = self.scoping, None
+        self.history.add("user", text, self.focus_id(), {"intent": "scope_answer"})
+        try:
+            if DENY.match(text):
+                self.say("OK, nothing was started.")
+                result.update(intent="chat", source="rule")
+                return result
+            goal = f"{scoping['goal'].rstrip('.?! ')}. Details from the user: {text.strip()}"[:2000]
+            result.update(intent=scoping["intent"], source="rule", needs="confirmation")
+            project = scoping.get("project")
+            if scoping["intent"] == "create_project" or not project:
+                result["action"] = {"kind": "create_project", "goal": goal}
+                self.say(f"Here is what I will build:\n{goal}\nConfirm to create it; you review the plan before any code is written.")
+            else:
+                result["project_id"] = project["id"]
+                result["action"] = {"kind": "task", "project_id": project["id"], "project": project["name"],
+                                    "root": project["root"], "goal": goal}
+                self.say(f"Task for {project['name']}:\n{goal}\nConfirm to start it; nothing changes before you approve the plan.")
+            return result
+        finally:
+            self.out_restore(result, captured)
+
+    def out_restore(self, result: dict, captured: list):
+        result["reply"] = "\n".join(captured)
+        result["context"] = None
 
     def project_for(self, root: Path) -> dict:
         from .project import project_id
