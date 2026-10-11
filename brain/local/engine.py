@@ -47,6 +47,10 @@ OPERATIONS = {
     "conversation.send": ("read", {"message": ("str", True), "project_id": ("str", False), "scope": ("str", False)},
                           "reply, intent, a proposed action to confirm (never executed here) and the context the "
                           "model saw; scope 'global' means no project is selected (feature conversation.scope)"),
+    "documents.create": ("action", {"request": ("str", True), "details": ("str", False), "format": ("str", False),
+                                    "language": ("str", False)},
+                         "writes a document (PDF, HTML or Markdown) with the local model into Documents\\Coding Brain; "
+                         "streams reply_step / reply_delta events; never a project, never overwrites"),
     "conversation.reset": ("action", {"project_id": ("str", False)},
                            "starts a new conversation for this project (or global chat); earlier turns are kept "
                            "on disk but no longer sent to the model"),
@@ -77,9 +81,10 @@ OPERATIONS = {
     "tasks.resume": ("action", {"project_id": ("str", True), "task_id": ("str", True)}, "continues an unfinished task"),
 }
 # Additive capabilities within API 1.x that clients detect here rather than from a version number.
-FEATURES = {"tasks.start.attachments", "conversation.stream", "conversation.scope", "conversation.reset"}
+FEATURES = {"tasks.start.attachments", "conversation.stream", "conversation.scope", "conversation.reset",
+            "documents.create"}
 TASK_MILESTONES = {"tasks.start", "tasks.approve", "tasks.accept"}
-LONG = {"conversation.send", "tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
+LONG = {"documents.create", "conversation.send", "tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
 CHECK_TYPES = {"str": str, "bool": bool, "int": int, "list": list}
 
 
@@ -255,6 +260,30 @@ class Engine:
             ConversationLog(self.layout).add("assistant", text, project_id, {"kind": "task", "task_id": task.get("id")})
         except OSError:
             pass  # the conversation log never breaks a task
+
+    def op_documents_create(self, request: str, details: str = "", format: str | None = None,
+                            language: str | None = None, emit=None):
+        from ..documents import DocumentError, create
+        from ..visual import browser_launch_options
+        from .assistant import ConversationLog, ModelUnavailable
+        assistant = self.assistant()
+        step = (lambda text: emit({"event_type": "reply_step", "text": text})) if emit else (lambda text: None)
+        token = (lambda text: emit({"event_type": "reply_delta", "text": text})) if emit else None
+        visual = settings.load(self.layout).get("visual") or {}
+        try:
+            result = create(assistant.model, request, details, format, language, browser_launch_options(visual),
+                            step, token)
+        except (DocumentError, ModelUnavailable) as error:
+            raise ApiError("refused", str(error)) from error
+        except Exception as error:  # e.g. no browser for PDF printing
+            raise ApiError("unavailable", f"the document could not be created: {type(error).__name__}: {str(error)[:300]}") from error
+        try:
+            ConversationLog(self.layout).add("assistant", f"[Document] Created {result['format'].upper()} "
+                                             f"\"{result['title']}\": {result['path']}", assistant.focus_id(),
+                                             {"kind": "document"})
+        except OSError:
+            pass
+        return result
 
     def op_conversation_reset(self, project_id: str | None = None):
         from .assistant import ConversationLog

@@ -518,6 +518,23 @@ class Workspace:
         turns = client.call("conversation.history", params, None, 60)
         return {"project": self.project.name if project_id else None, "turns": turns, "available": True}
 
+    def documents_folder(self) -> Path:
+        from brain.documents import output_folder
+        return output_folder().resolve()
+
+    def open_document(self, raw: str, reveal: bool = False) -> dict:
+        """Open (or show in Explorer) a file Coding Brain wrote into its documents folder; nothing else."""
+        path = Path(raw).resolve(strict=True)
+        if not path.is_file() or not path.is_relative_to(self.documents_folder()):
+            raise ValueError("Only documents Coding Brain created can be opened from here")
+        if os.name != "nt":
+            raise ValueError("Opening files is supported on Windows")
+        if reveal:
+            subprocess.Popen(["explorer.exe", "/select,", str(path)])
+        else:
+            os.startfile(str(path))  # noqa: S606 - a file in the Coding Brain documents folder
+        return {"opened": str(path)}
+
     def reset_conversation(self) -> dict:
         client = self.engine_client()
         if "conversation.reset" not in set(client.call("engine.info", {}, None, 60).get("features") or []):
@@ -1050,6 +1067,13 @@ def create_app(state: Workspace | None = None) -> FastAPI:
             return state.conversation()
         except (EngineError, ValueError, OSError) as error:
             raise HTTPException(503, f"Conversation history unavailable: {str(error)[:200]}") from error
+
+    @app.post("/api/documents/open", dependencies=[Depends(auth)])
+    def open_document(body: OpenFile, reveal: bool = False):
+        try:
+            return state.open_document(body.path, reveal)
+        except (ValueError, OSError) as error:
+            raise HTTPException(400, str(error)) from error
 
     @app.post("/api/conversation/reset", dependencies=[Depends(auth)])
     def conversation_reset():

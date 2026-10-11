@@ -312,6 +312,14 @@ def chat(job):
         if answer.get("context"):
             job.emit("context", json.dumps(answer["context"])[:2000])  # what the model saw this turn
         action = answer.get("action")
+        if action and action.get("kind") == "document" and "documents.create" in features:
+            job.emit("step", "Writing the document")
+            made = client.call("documents.create", {key: action[key] for key in ("request", "details", "format", "language")
+                                                    if action.get(key)}, streamed, 1800)
+            pages = f", {made['pages']} page{'s' if made['pages'] != 1 else ''}" if made.get("pages") else ""
+            job.emit("output", f"Created {made['format'].upper()} \"{made['title']}\"{pages}:\n{made['path']}")
+            job.emit("file", json.dumps({"path": made["path"], "format": made["format"], "title": made["title"]}))
+            action = None
         if action and action.get("kind") in {"create_project", "task"}:
             # Shown as a button; starting it still goes through the normal reviewed and approved flow.
             job.emit("action", json.dumps({"kind": action["kind"], "goal": str(action.get("goal") or job.goal)[:2000],

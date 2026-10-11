@@ -295,3 +295,19 @@ premium supervisors, and recovery after upgrading an older engine.
   project**; clicking it, or replying "yes" / "do it" / "go ahead", starts it in the normal flow: you still review
   and approve the plan before anything changes. Requests phrased as questions or with typos ("can u creat ...") are
   recognized as requests.
+
+## Documents on request (not coding projects)
+
+"Make me a PDF / Word file / spreadsheet / letter / email about …" is a deliverable, not software. Coding Brain
+asks only what is missing (what it is about, the format, the language and length), then writes it in the
+background with the local model and returns the file in the chat with **Open** and **Show in folder**. No
+project, no Git, no code review. Engine operation `documents.create` (feature `documents.create`).
+
+- Formats: PDF (printed offline by the system Edge/Chromium with JavaScript disabled), Word `.docx` (plain
+  WordprocessingML, no macros), Excel `.xlsx` (values only — a model "formula" stays text), CSV, plain text
+  (emails), Markdown and HTML. A presentation becomes a PDF handout. Images, logos, slide decks, audio and
+  video are refused with an explanation: the local models cannot produce them.
+- The model's text is converted by Coding Brain itself and escaped: it can never become markup or script.
+- Files go to `Documents\Coding Brain` (`CODINGBRAIN_DOCUMENTS` overrides) and are never overwritten. The
+  desktop opens only files in that folder. Each document is recorded in the conversation.
+- Requests that ask for code ("a script that generates a PDF") are still coding tasks.

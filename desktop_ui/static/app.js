@@ -652,6 +652,25 @@
     host.append(row);
   }
 
+  // A document Coding Brain wrote: open it, or show it in Explorer.
+  function showFile(file) {
+    const bubbles = $('thread').querySelectorAll('.message .message-bubble');
+    const host = bubbles[bubbles.length - 1];
+    if (!host) return;
+    const row = document.createElement('div');
+    row.className = 'action-buttons';
+    for (const [label, reveal] of [[`Open ${file.format.toUpperCase()}`, false], ['Show in folder', true]]) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.textContent = label;
+      button.addEventListener('click', async () => {
+        try { await api('/api/documents/open' + (reveal ? '?reveal=true' : ''), 'POST', {path: file.path}); }
+        catch (e) { toast(e.message); }
+      });
+      row.append(button);
+    }
+    host.append(row);
+  }
+
   async function startAction(action) {
     lastAction = null;
     try {
@@ -1049,6 +1068,7 @@
         if (event.kind === 'step') typingStep(event.message);
         if (event.kind === 'context') { try { describeContext(JSON.parse(event.message)); } catch { /* older engine */ } continue; }
         if (event.kind === 'action') { try { showAction(JSON.parse(event.message)); } catch { /* malformed */ } continue; }
+        if (event.kind === 'file') { try { showFile(JSON.parse(event.message)); } catch { /* malformed */ } continue; }
         activityEntry(event);
         flowEvent(event);
         if (event.kind === 'approval') approval(job.id, job.approval || {summary: event.message});

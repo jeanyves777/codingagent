@@ -44,10 +44,16 @@ with sync_playwright() as p:
         if (path === '/api/conversation') return response({project: 'calc', turns: demo.turns, available: true});
         if (path === '/api/conversation/reset') { demo.resets++; demo.turns = []; return response({reset: true}); }
         if (path === '/api/project') return response(project);
+        if (path.startsWith('/api/documents/open')) { demo.opened = [JSON.parse(opts.body).path, path.includes('reveal')]; return response({opened: true}); }
         if (path === '/api/start') {
           const body = JSON.parse(opts.body); demo.starts.push(body);
           const id = 'j' + demo.starts.length;
           const ev = (seq, kind, message) => ({seq, kind, message, at: at + seq, job_id: id});
+          if (body.mode === 'chat' && body.message.includes('pdf')) {
+            demo.jobs[id] = [ev(1, 'step', 'Writing the document'), ev(2, 'output', 'Created PDF "Rome": C:/Users/me/Documents/Coding Brain/rome.pdf'),
+              ev(3, 'file', JSON.stringify({path: 'C:/Users/me/Documents/Coding Brain/rome.pdf', format: 'pdf', title: 'Rome'})), ev(4, 'finish', 'Chat completed')];
+            return response({id, kind: 'chat', status: 'running', started: at});
+          }
           demo.jobs[id] = body.mode === 'chat' ? [
             ev(1, 'output', 'Yes — I can add that as a task in calc.'),
             ev(2, 'context', JSON.stringify({project: 'calc', history_turns: 3, history_left_out: 2, project_context: 900, project_context_trimmed: false, window: 8192})),
@@ -90,6 +96,15 @@ with sync_playwright() as p:
     page.wait_for_function("window.__demo.resets === 1")
     page.locator('#welcome:not([hidden])').wait_for()
 
+    # 5. A document request returns the file, with Open and Show in folder.
+    page.click('#mode-chat')
+    page.fill('#prompt', 'make me a pdf about the history of Rome in two pages')
+    page.click('#send')
+    page.locator('.action-buttons button', has_text='Open PDF').click()
+    page.wait_for_function("window.__demo.opened && window.__demo.opened[1] === false")
+    page.locator('.action-buttons button', has_text='Show in folder').click()
+    page.wait_for_function("window.__demo.opened[1] === true")
+
     assert not errors, errors
     browser.close()
-print("Conversation browser PASS: saved conversation + task milestones load, context bar, action button, 'yes' starts the task, new conversation")
+print("Conversation browser PASS: saved conversation + task milestones load, context bar, action button, 'yes' starts the task, new conversation, document Open / Show in folder")

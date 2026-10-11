@@ -68,15 +68,38 @@ VAGUE_CREATE = re.compile(ASKING + r"(create|creat|build|buid|make|generate|writ
 VAGUE_CHANGE = re.compile(ASKING + r"(fix|fx|add|change|update|improve|do)\s*(it|this|that|something|the\s+bug|"
                           r"a\s+feature|a\s+bug|everything|the\s+code|my\s+code)?\s*[?.!]*\s*$")
 SCOPE_QUESTIONS = {
-    "document": ["What should it contain: the topic, the sections, or the data it shows?",
-                 "Where does the content come from: text you give me, a file (CSV, Excel), a database or a website?",
-                 "Any format needs: page size, a logo, tables, charts, and should it be generated once or on demand?"],
+    "document": ["What is it about, and what should it contain (sections, key points, any figures)?",
+                 "Which format: PDF (default), Word, Excel/CSV, plain text, Markdown or HTML?",
+                 "Which language, and roughly how long (one page, a few pages)?"],
     "app": ["What should it do? Name the two or three main things someone does with it.",
             "Who uses it, and where: in a browser, on the desktop, or on the command line?",
             "Any must-haves: login, saving data, a particular language or framework?"],
     "change": ["What exactly should change, and in which part of the project (file, function or feature)?",
                "How will we know it works: what should happen afterwards that does not happen now?"],
 }
+
+
+# "Make me a PDF / report / letter about ..." is a document to write, not software to build.
+DOCUMENT_REQUEST = re.compile(ASKING + r"(create|creat|generate|make|mak|write|produce|prepare|draft|give\s+me)\s+"
+                              r"(me\s+)?.{0,40}?\b(pdf|document|report|letter|cv|resume|résumé|brochure|flyer|essay|"
+                              r"article|summary|memo|proposal|guide|handout|cover\s+letter|word\s+(file|doc)|docx|"
+                              r"spreadsheet|excel|xlsx|workbook|csv|table|budget|invoice|timesheet|schedule|"
+                              r"e-?mail|newsletter|presentation|slides?)s?\b", re.S)
+CODE_WORDS = re.compile(r"(?i)\b(script|program|code|function|app|application|api|website|project|class|module|"
+                        r"generator|tool|cli|repository|repo|test|endpoint)s?\b")
+DOC_NOISE = {"create", "creat", "generate", "make", "write", "produce", "prepare", "draft", "give", "me", "a", "an",
+             "the", "some", "my", "please", "can", "could", "would", "you", "u", "pdf", "document", "report", "file",
+             "new", "simple", "about", "on", "for", "of", "in", "to", "it", "i", "want", "need", "word", "excel",
+             "spreadsheet", "docx", "xlsx", "csv", "table", "email", "e-mail", "doc", "workbook"}
+
+
+def document_request(text: str) -> bool:
+    return bool(DOCUMENT_REQUEST.match(text)) and not CODE_WORDS.search(text)
+
+
+def document_is_specific(text: str) -> bool:
+    words = [word for word in re.findall(r"[\w'-]+", text.lower()) if word not in DOC_NOISE]
+    return len(words) >= 3
 
 
 def scope_kind(text: str) -> str | None:
@@ -539,6 +562,8 @@ class Assistant:
             if self.scoping and not (CREATE.match(text) or CHANGE.match(text)) or self.scoping and DENY.match(text):
                 return self.answer_scoping(text, result, captured)
             self.scoping = None
+            if document_request(text):
+                return self.document(text, result, captured)
             kind = scope_kind(text)  # vague requests get scoping questions, whatever the model would route
             route = (Route("create_project" if kind in ("document", "app") else "implement", "rule", goal=text)
                      if kind else self.route(text))
@@ -600,6 +625,26 @@ class Assistant:
                  + "\nAnswer in one message (or say \"cancel\").")
         result.update(intent=route.intent, needs="scope", source="rule")
 
+    def document(self, text: str, result: dict, captured: list) -> dict:
+        """A document request: written now if it says enough, otherwise three quick questions first."""
+        from ..documents import detect_format, detect_language
+        self.history.add("user", text, self.focus_id(), {"intent": "document"})
+        try:
+            result.update(intent="document", source="rule")
+            if not document_is_specific(text):
+                self.scoping = {"intent": "document", "goal": text, "kind": "document", "project": self.focus}
+                self.say("Happy to write it. A few quick questions first:\n"
+                         + "\n".join(f"{index}. {question}" for index, question in enumerate(SCOPE_QUESTIONS["document"], 1))
+                         + "\nAnswer in one message (or say \"cancel\").")
+                result["needs"] = "scope"
+                return result
+            result["action"] = {"kind": "document", "request": text, "details": "",
+                                "format": detect_format(text), "language": detect_language(text)}
+            self.say("Writing it now; the file will appear here when it is ready.")
+            return result
+        finally:
+            self.out_restore(result, captured)
+
     def answer_scoping(self, text: str, result: dict, captured: list) -> dict:
         scoping, self.scoping = self.scoping, None
         self.history.add("user", text, self.focus_id(), {"intent": "scope_answer"})
@@ -607,6 +652,14 @@ class Assistant:
             if DENY.match(text):
                 self.say("OK, nothing was started.")
                 result.update(intent="chat", source="rule")
+                return result
+            if scoping["kind"] == "document":
+                from ..documents import detect_format, detect_language
+                both = f"{scoping['goal']}\n{text}"
+                result.update(intent="document", source="rule")
+                result["action"] = {"kind": "document", "request": scoping["goal"], "details": text.strip()[:2000],
+                                    "format": detect_format(both), "language": detect_language(both)}
+                self.say("Thanks. Writing it now; the file will appear here when it is ready.")
                 return result
             goal = f"{scoping['goal'].rstrip('.?! ')}. Details from the user: {text.strip()}"[:2000]
             result.update(intent=scoping["intent"], source="rule", needs="confirmation")

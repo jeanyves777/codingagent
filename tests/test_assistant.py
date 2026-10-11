@@ -343,17 +343,36 @@ def test_messages_about_local_work_still_go_through_routing(world, message):
     assert model.calls and model.calls[0]["schema"] is not None
 
 
-def test_a_vague_request_gets_scoping_questions_then_a_spec_built_from_the_answers(world):
+def test_a_document_request_is_a_deliverable_not_a_project(world):
     model = FakeModel()
     bot = assistant(world, model)
     first = bot.respond("can you generate a pdf ?")
     assert first["action"] is None and first["needs"] == "scope"
-    assert "What should it contain" in first["reply"] and not model.calls  # no model call, nothing proposed
-    second = bot.respond("a monthly sales report from sales.csv with a bar chart, A4, generated on demand")
-    assert second["action"]["kind"] == "create_project"
-    assert "sales.csv" in second["action"]["goal"] and "generate a pdf" in second["action"]["goal"].lower()
+    assert "What is it about" in first["reply"] and "Which format" in first["reply"] and not model.calls
+    second = bot.respond("a one page summary of the history of Rome, in French")
+    assert second["action"]["kind"] == "document" and second["action"]["language"] == "French"
+    assert second["action"]["request"] == "can you generate a pdf ?" and "Rome" in second["action"]["details"]
+    assert no_tasks_anywhere(world)
+
+
+def test_specific_documents_are_written_at_once_and_code_requests_stay_code(world):
+    bot = assistant(world, FakeModel())
+    letter = bot.respond("write a cover letter for a junior Python developer job in French")
+    assert letter["action"]["kind"] == "document" and letter["needs"] is None
+    budget = bot.respond("make me an excel budget for a wedding with 80 guests")
+    assert budget["action"]["format"] == "xlsx"
+    code = bot.respond("write a script that generates a pdf report")
+    assert (code.get("action") or {}).get("kind") != "document"
+
+
+def test_a_vague_app_request_gets_scoping_questions_then_a_spec(world):
+    model = FakeModel()
+    bot = assistant(world, model)
+    first = bot.respond("make an app")
+    assert first["action"] is None and first["needs"] == "scope" and "What should it do" in first["reply"]
+    second = bot.respond("track my daily water intake in the browser, with reminders")
+    assert second["action"]["kind"] == "create_project" and "water intake" in second["action"]["goal"]
     assert "Here is what I will build" in second["reply"]
-    assert no_tasks_anywhere(world)  # proposing is never starting
 
 
 def test_scoping_can_be_cancelled_and_a_new_request_replaces_it(world):
