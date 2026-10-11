@@ -119,7 +119,7 @@ def test_supervised_sandbox_stops_on_cancellation_and_timeout(tmp_path, monkeypa
     assert removed[-1][1:3] == ["rm", "-f"]
     monkeypatch.setattr(sandbox, "TIMEOUT", 0)
     result = sandbox.run_tests(tmp_path, "image", should_cancel=lambda: False)
-    assert result["output"] == "Sandbox timed out" and len(removed) == 2
+    assert result["output"].startswith("Sandbox timed out") and len(removed) == 2
 
 
 def test_cancellation_during_tests_stops_task(brain, monkeypatch):
@@ -367,3 +367,17 @@ def test_ollama_prose_answer_is_finalized_with_structured_output(tmp_path, monke
     assert json.loads(result) == {"plan": "p", "changes": []}
     assert sent[-1]["format"]["required"] == ["plan", "changes"] and "tools" not in sent[-1]
     assert json_object('note {not json} then {"plan": "a", "changes": []} {"x": 1}')["plan"] == "a"
+
+
+def test_a_slow_docker_cleanup_never_fails_the_task(tmp_path, monkeypatch):
+    calls = []
+
+    def slow_rm(command, **kwargs):
+        calls.append(command)
+        raise subprocess.TimeoutExpired(command, 15)
+    monkeypatch.setattr(subprocess, "Popen", Process)
+    monkeypatch.setattr(subprocess, "run", slow_rm)
+    monkeypatch.setattr(sandbox, "TIMEOUT", 0)
+    result = sandbox.run_tests(tmp_path, "image", should_cancel=lambda: False)
+    assert result["passed"] is False and result["output"].startswith("Sandbox timed out")  # a result, not an error
+    assert calls and calls[0][1:3] == ["rm", "-f"]

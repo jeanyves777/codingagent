@@ -33,11 +33,34 @@ def profile(workspace: Path) -> dict:
     return {"name": name, "command": command}
 
 
-TIMEOUT = 120
+import os
+
+# Seconds a test run may take; slow machines (no GPU, little free memory, Docker starting containers
+# slowly) can raise it with CODINGBRAIN_SANDBOX_TIMEOUT.
+TIMEOUT = max(30, int(os.environ.get("CODINGBRAIN_SANDBOX_TIMEOUT", "120") or 120))
 
 
 def _remove(name: str):
-    subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15)
+    """Remove a container, best effort. A slow Docker must never turn cleanup into a task failure:
+    if removal does not finish quickly it continues in the background (docker run --rm also removes
+    the container once it exits)."""
+    try:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        try:
+            subprocess.Popen(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
+    except OSError:
+        pass
+
+
+def _stop(process):
+    process.kill()
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        pass  # the docker client is gone or stuck; the container was already asked to go
 
 
 def _supervise(command: list[str], name: str, output, should_cancel) -> int | str:
@@ -54,8 +77,7 @@ def _supervise(command: list[str], name: str, output, should_cancel) -> int | st
                        "timeout" if time.monotonic() >= deadline else None)
             if outcome:
                 _remove(name)
-                process.kill()
-                process.wait(timeout=15)
+                _stop(process)
                 return outcome
     except BaseException:
         _remove(name)
@@ -104,7 +126,7 @@ def run_tests(workspace: Path, images: str | dict, should_cancel=None, only=None
                 code = "timeout"
         if code == "timeout":
             return {"passed": False, "exit_code": None, "profile": selected["name"],
-                    "output": "Sandbox timed out"}
+                    "output": f"Sandbox timed out after {TIMEOUT} s (on a slow machine, set CODINGBRAIN_SANDBOX_TIMEOUT)"}
         if code == "cancelled":
             return {"passed": False, "exit_code": None, "profile": selected["name"],
                     "cancelled": True, "output": "Sandbox stopped by cancellation"}
