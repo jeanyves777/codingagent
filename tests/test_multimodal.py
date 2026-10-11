@@ -783,7 +783,7 @@ def test_real_coding_model_repairs_a_ui_defect_within_the_visual_budget(tmp_path
     print("REAL REPAIR diff:", task.get("diff", "")[:3000])
     assert task["status"] == "passed"
     assert task["visual_log"][-1]["status"] == "passed", task["visual_log"]
-    assert task["visual_repairs"] <= 2
+    assert task.get("visual_repairs", 0) <= 2  # absent when the first change already passed
 
 
 def test_contradictory_comparison_verdicts_follow_the_listed_differences(files):
