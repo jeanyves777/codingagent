@@ -505,3 +505,40 @@ def test_no_sign_in_flow_without_a_terminal(layout):
     state = json.loads((layout.home / "install" / "state.json").read_text())
     assert "sign in from a terminal" in state["steps"]["claude"]["detail"]
     assert report["components"]["claude"]["state"] == "needs_sign_in"
+
+
+@pytest.mark.parametrize("facts,gpu,main,fast", [
+    ({"ram": 16 * GB, "cores": 8}, None, "qwen2.5-coder:7b", "qwen2.5-coder:3b"),          # laptop, processor only
+    ({"ram": 8 * GB, "cores": 4}, None, "qwen2.5-coder:3b", "qwen2.5-coder:1.5b"),
+    ({"ram": 4 * GB, "cores": 2}, None, "qwen2.5-coder:1.5b", "qwen2.5-coder:1.5b"),
+    ({"ram": 32 * GB, "cores": 16}, {"name": "RTX 4060", "vram": 8 * GB}, "qwen2.5-coder:7b", "qwen2.5-coder:7b"),
+    ({"ram": 64 * GB, "cores": 24}, {"name": "RTX 4090", "vram": 24 * GB}, "qwen2.5-coder:14b", "qwen2.5-coder:7b"),
+    ({"ram": 36 * GB, "cores": 12, "platform": "darwin", "arch": "arm64"}, None, "qwen2.5-coder:14b", "qwen2.5-coder:7b"),
+])
+def test_models_are_sized_to_the_computer_not_only_its_memory(facts, gpu, main, fast):
+    from brain.local.components import hardware_plan
+    plan = hardware_plan(facts, gpu)
+    assert (plan["main"], plan["fast"]) == (main, fast), plan
+    assert plan["reason"]
+
+
+def test_full_install_on_a_processor_only_laptop_adds_a_fast_chat_model(layout):
+    machine = FakeMachine(programs={"git", "ollama"}, ollama_running=True, models={"qwen2.5-coder:7b"})
+    config = settings.load(layout)
+    config["models"].update(model="qwen2.5-coder:7b", fast_model="qwen2.5-coder:7b")  # an older setup copied it
+    settings.save(layout, config)
+    installer = make(layout, machine, yes=True)
+    installer.install("local", only=["fast_model"])
+    assert "qwen2.5-coder:3b" in machine.models
+    models = settings.load(layout)["models"]
+    assert models["model"] == "qwen2.5-coder:7b" and models["fast_model"] == "qwen2.5-coder:3b"
+
+
+def test_a_fast_model_the_user_chose_is_kept(layout):
+    machine = FakeMachine(programs={"git", "ollama"}, ollama_running=True, models={"qwen2.5-coder:7b", "qwen2.5-coder:1.5b"})
+    config = settings.load(layout)
+    config["models"].update(model="qwen2.5-coder:7b", fast_model="qwen2.5-coder:1.5b")
+    settings.save(layout, config)
+    make(layout, machine, yes=True).install("local", only=["fast_model"])
+    assert settings.load(layout)["models"]["fast_model"] == "qwen2.5-coder:1.5b"
+    assert "qwen2.5-coder:3b" not in machine.models

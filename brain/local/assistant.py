@@ -39,6 +39,15 @@ GREETING = re.compile(r"(?i)^\s*(hi|hello|hey|hiya|howdy|yo|greetings|good\s+(mo
 THANKS = re.compile(r"(?i)^\s*(thanks|thank\s+you|thx|merci|cheers|ok(ay)?|great|cool|nice|perfect)"
                     r"(\s+(so\s+much|a\s+lot|very\s+much))?\s*[!.]*\s*$")
 FAREWELL = re.compile(r"(?i)^\s*(bye|goodbye|see\s+you|exit|quit|q)\s*[!.]*\s*$")
+# Messages answered without the routing model call (one model call instead of two). Small talk and
+# general questions only; anything naming a project, a file or work to do still goes through routing.
+SMALL_TALK = re.compile(r"(?i)^\s*(how\s+are\s+you(\s+doing)?(\s+today)?|how('?s|\s+is)\s+it\s+going|what'?s\s+up|"
+                        r"how\s+have\s+you\s+been|good\s*(night|bye)|bye|see\s+you(\s+later)?|nice\s+to\s+meet\s+you|"
+                        r"who\s+are\s+you|are\s+you\s+there)\s*[?!.]*\s*$")
+QUESTION = re.compile(r"(?i)^\s*(what\s+(is|are)|what'?s\s+(a|an|the)\b|why\s+(is|are|do|does)|explain|define|"
+                      r"how\s+(does|do)\s+(a|an|the)?\s*\w+\s+work|what'?s\s+the\s+difference|difference\s+between)\b")
+LOCAL_REFERENCE = re.compile(r"(?i)\b(my|this|our|the)\s+(project|repo|repository|code|codebase|app|file|folder|function|"
+                             r"class|module|tests?)\b|\.(py|js|ts|tsx|jsx|json|md|java|go|rs|cs|cpp|c|h|html|css)\b|[/\\]")
 HELP = re.compile(r"(?i)^\s*(help|\?|what\s+can\s+you\s+do\??|how\s+do\s+(i|you)\s+use\s+(this|you)\??)\s*$")
 PROJECTS = re.compile(r"(?i)\b(what|which|list|show|my|all)\b[^?]*\bprojects?\b|^\s*projects?\s*\??\s*$"
                       r"|\bany\s+projects?\b|\bprojects?\s+(exists?|are\s+there)\b"
@@ -267,6 +276,10 @@ class Assistant:
             return f"{self.cwd} (inside the Git project {self.repository.name})"
         return f"{self.cwd} (not a project)"
 
+    def mentions_project(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(item["name"].lower() in lowered for item in self.projects() if len(item["name"]) > 2)
+
     def project_names(self) -> str:
         names = [item["name"] for item in self.projects() if item["exists"]][:30]
         return ", ".join(names) or "none yet"
@@ -285,6 +298,11 @@ class Assistant:
             return Route("chat", "rule", reply="You're welcome. What next?")
         if HELP.match(text):
             return Route("chat", "rule", reply=HELP_TEXT)
+        if SMALL_TALK.match(text):
+            return Route("chat", "rule")  # answered by the model directly, no routing call
+        if QUESTION.match(text) and not (CREATE.match(text) or CHANGE.match(text) or LOCAL_REFERENCE.search(text)
+                                         or self.mentions_project(text)):
+            return Route("question", "rule", goal=text)
         if PROJECTS.search(text) and not CREATE.match(text) and not CHANGE.match(text):
             return Route("projects", "rule")
         try:

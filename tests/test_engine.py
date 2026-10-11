@@ -477,7 +477,8 @@ def test_conversation_send_streams_reply_deltas(world, monkeypatch):
         return "A decorator wraps a function."
     monkeypatch.setattr(assistant.model, "chat", chat)
     events = []
-    answer = engine.call("conversation.send", {"message": "what is a python decorator?"}, emit=events.append)
+    # A message the routing rules do not answer directly, so both steps run.
+    answer = engine.call("conversation.send", {"message": "tell me something useful about python decorators"}, emit=events.append)
     assert answer["reply"] == "A decorator wraps a function."
     assert [event["text"] for event in events if event["event_type"] == "reply_delta"] == ["A decorator ", "wraps a function."]
     steps = [event["text"] for event in events if event["event_type"] == "reply_step"]
