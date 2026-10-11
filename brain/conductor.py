@@ -415,27 +415,30 @@ class Conductor:
         return actions
 
     async def _integrate(self, actions):
-        """When no agent is working, combine every verified item into one candidate on top of the
-        accepted work: each item is applied in turn and must keep every included item's frozen
-        acceptance tests and the project's own tests passing together. An item that conflicts or
-        breaks the combination goes back to an agent, to be redone on top of the others. Nothing
-        reaches the user's branches: the candidate waits for `codingbrain backlog accept`."""
+        """Combine verified items into one candidate on top of the accepted work, as soon as they
+        are verified (agents may still be working on other items): each item is applied in turn
+        and must keep every included item's frozen acceptance tests and the project's own tests
+        passing together. New items are added on top of the current candidate; an item that
+        conflicts or breaks the combination goes back to an agent, to be redone on top of the
+        others. Nothing reaches the user's branches: the candidate waits for
+        `codingbrain backlog accept`."""
         if not hasattr(self.executor, "integrate"):
             return
-        items = self.backlog.list()
-        if any(item["state"] in {"running", "verifying"} for item in items):
-            return
-        verified = [item for item in items if item["state"] == "verified"]
+        verified = self.backlog.list({"verified"})
         current = self.backlog.integration()
-        if not verified or (current and set(current["included"]) == {item["id"] for item in verified}):
+        verified_ids = {item["id"] for item in verified}
+        if not verified or (current and set(current["included"]) == verified_ids):
             return
-        first = set(current["included"]) if current else set()  # keep what already combined first
-        ordered = [item for item in verified if item["id"] in first] + [item for item in verified if item["id"] not in first]
         attempts = {attempt["item_id"]: attempt for attempt in self.backlog.open_attempts()}
-        ordered = [{**item, "task_id": attempts[item["id"]]["task_id"]} for item in ordered if item["id"] in attempts]
+        verified = [{**item, "task_id": attempts[item["id"]]["task_id"]} for item in verified if item["id"] in attempts]
+        if current and set(current["included"]) <= verified_ids:  # still valid: add the new items on top
+            applied = [item for item in verified if item["id"] in current["included"]]
+            ordered, base = [item for item in verified if item["id"] not in current["included"]], current["head"]
+        else:
+            applied, ordered, base = [], verified, self.backlog.accepted_head()
         if not ordered:
             return
-        result = await self.executor.integrate(ordered, self.backlog.accepted_head())
+        result = await self.executor.integrate(ordered, base, applied)
         if current:
             self.backlog.set_integration(current["id"], state="superseded")
         for item in ordered:
@@ -745,20 +748,21 @@ class BrainExecutor:
         return None
 
     # integration --------------------------------------------------------------------------------
-    async def integrate(self, items: list[dict], base: str | None) -> dict:
-        return await asyncio.to_thread(self._integrate, items, base)
+    async def integrate(self, items: list[dict], base: str | None, applied: list[dict] = ()) -> dict:
+        return await asyncio.to_thread(self._integrate, items, base, applied)
 
-    def _integrate(self, items: list[dict], base: str | None) -> dict:
+    def _integrate(self, items: list[dict], base: str | None, applied: list[dict] = ()) -> dict:
         """Apply each item's change in turn on a private worktree at `base` (the project's HEAD
         when None), keeping it only if every included item's frozen acceptance tests and the
-        project's own tests still pass together. The user's branches are not touched."""
+        project's own tests still pass together. `applied` items are already in `base` (an
+        earlier candidate) and stay included. The user's branches are not touched."""
         manager = self.brain.manager
         source = self.brain.repository(self.repository)
         base = base or manager._git(source, "rev-parse", "HEAD")
         record_id = uuid.uuid4().hex[:12]
         workspace = Path(self.brain.data) / "backlog-integrations" / record_id
         manager.integration(source, workspace, base)
-        included, excluded, head, checks = [], {}, base, None
+        included, excluded, head, checks = list(applied), {}, base, None
         for item in items:
             files = {}
             for other in [*included, item]:

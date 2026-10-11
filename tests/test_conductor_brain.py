@@ -38,7 +38,7 @@ class StandIn:
         self.active += 1
         self.peak = max(self.peak, self.active)
         try:
-            await asyncio.sleep(self.latency)
+            await asyncio.sleep(self.latency * (8 if "slow" in goal else 1))
         finally:
             self.active -= 1
         self.calls.append(goal)
@@ -192,3 +192,27 @@ def test_a_blocked_task_reports_why_so_the_retry_and_the_user_see_it(world):
     world["brain"].store.save(task)
     polled = asyncio.run(BrainExecutor(world["brain"], "demo").poll(task["id"]))
     assert polled["failure"] == "blocked: Workspace, index, or model planning failed; ReadTimeout"
+
+
+def test_verified_work_is_combined_while_other_agents_are_still_working(world):
+    world["backlog"].add("Create alpha.py with VALUE = 'alpha'", title="alpha", acceptance=acceptance("alpha"))
+    world["backlog"].add("Create beta.py with VALUE = 'beta' (slow)", title="beta", acceptance=acceptance("beta"))
+
+    async def run():
+        seen = None
+        end = time.monotonic() + 60
+        while time.monotonic() < end:
+            await world["conductor"].tick()
+            status = world["conductor"].status()
+            states = {item["title"]: item["state"] for item in status["items"]}
+            if seen is None and status["integration"] and states["beta"] in {"running", "verifying"}:
+                seen = status["integration"]  # alpha combined before beta finished
+            if status["waiting_on_people_only"]:
+                return seen, status
+            await asyncio.sleep(0.05)
+        raise AssertionError("did not settle")
+    early, status = asyncio.run(run())
+    assert early and len(early["included"]) == 1
+    final = world["backlog"].integration()
+    assert len(final["included"]) == 2 and final["base"] == early["head"]  # beta added on top, not rebuilt
+    assert [record["state"] for record in world["backlog"].integrations()] == ["superseded", "candidate"]

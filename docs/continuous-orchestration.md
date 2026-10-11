@@ -27,7 +27,8 @@ Every few seconds the conductor:
 2. **Checks every running attempt.** If an agent finished, the result is verified (see below).
    If the agent has shown no progress for `--stall-minutes` (default 15), the task is stopped
    and retried. If the task disappeared, the attempt is retried.
-3. **Combines verified work** when no agent is working (see *Integration* below).
+3. **Combines verified work** as soon as it is verified, while other agents keep working (see
+   *Integration* below).
 4. **Dispatches.** Free agent slots get the next ready item: highest priority first, then oldest.
    Slots are worked out on every tick: one local agent per 6 GB of memory and two cores, never
    more than `--max-agents` (default 4), and never more than the model server generates for at
@@ -75,9 +76,10 @@ security boundary: code under test runs in the same process as the tests, in the
 
 ## Integration: verified items, tested together
 
-Each item is verified on its own worktree, which says nothing about the items together. So when
-no agent is working, the conductor builds one combined candidate on a private worktree, starting
-from the work you last accepted (or your project's HEAD):
+Each item is verified on its own worktree, which says nothing about the items together. So as
+soon as items are verified, the conductor builds one combined candidate on a private worktree,
+starting from the work you last accepted (or your project's HEAD). Items verified later are added
+on top of the current candidate. Other agents keep working meanwhile.
 
 - the verified items are applied one at a time (a cherry-pick of each task's change);
 - after each one, every included item's frozen acceptance tests and the project's own tests run
