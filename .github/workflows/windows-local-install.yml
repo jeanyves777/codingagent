@@ -290,7 +290,7 @@ jobs:
         env:
           CODINGBRAIN_CAPABILITY_REPORT: ${{ github.workspace }}/goal-first-capability.json
           CODINGBRAIN_SWARM_REPORT: ${{ github.workspace }}/swarm-capability.json
-        run: python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py tests/test_new.py tests/test_conductor_real.py -k real 2>&1 | tee installer-real.log
+        run: python -m pytest -q -p no:cacheprovider -rs -s tests/test_installer.py tests/test_new.py tests/test_conductor_real.py tests/test_inference.py -k real 2>&1 | tee installer-real.log
       - name: Engine API with a real task (real stdio client, real model, real sandbox)
         if: always()
         shell: bash

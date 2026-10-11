@@ -81,6 +81,7 @@ def test_real_agents_work_the_backlog_in_parallel_and_only_verified_work_counts(
     a, b = (first.get(item["id"]) for item in items)
     capability = {"model": config["models"]["model"], "seconds": seconds, "stopped": status.get("stopped"),
                   "verified": sum(item["state"] == "verified" for item in items), "items": len(items),
+                  "integration": status.get("integration"),
                   "per_item": [{"title": item["title"], "state": item["state"], "attempts": item["attempts"],
                                 "reason": (item["reason"] or "")[:300]} for item in items],
                   "attempts": [{key: attempt[key] for key in ("item_id", "number", "strategy", "outcome")}
@@ -100,7 +101,9 @@ def test_real_agents_work_the_backlog_in_parallel_and_only_verified_work_counts(
         assert item["state"] in {"verified", "blocked"}, item  # never accepted for the user
         entries = [entry for entry in ledger if entry["item_id"] == item["id"]]
         if item["state"] == "verified":
-            assert entries and entries[-1]["kind"] == "verification" and entries[-1]["verdict"] == "passed", entries
+            checks = [entry for entry in entries if entry["kind"] == "verification"]
+            assert checks and checks[-1]["verdict"] == "passed", entries
+            assert [entry["verdict"] for entry in entries if entry["kind"] == "integration"][-1:] == ["included"], entries
             assert acceptance_passed(rechecked[item["id"]], item["acceptance"]["nodes"]), \
                 rechecked[item["id"]].get("output", "")[-800:]
             assert context.brain.store.get(item["task_id"])["status"] == "passed"
@@ -109,4 +112,8 @@ def test_real_agents_work_the_backlog_in_parallel_and_only_verified_work_counts(
             assert item["attempts"] <= 2
         retries = [attempt for attempt in attempts if attempt["item_id"] == item["id"] and attempt["number"] > 1]
         assert all(attempt["strategy"] != "local" for attempt in retries)  # a retry carries the failure as feedback
+    verified = {item["id"] for item in items if item["state"] == "verified"}
+    if verified:  # every verified item is also combined with the others, and the combination passed
+        assert status["integration"] and set(status["integration"]["included"]) == verified, status["integration"]
+        assert git(repository, "merge-base", "--is-ancestor", head, status["integration"]["head"]) == ""
     assert git(repository, "rev-parse", "HEAD") == head and git(repository, "status", "--porcelain") == ""
