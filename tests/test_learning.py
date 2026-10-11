@@ -98,7 +98,7 @@ def test_a_later_task_receives_the_verified_fix_of_an_earlier_accepted_task_and_
     related = model.context_for("parse_duration must also accept seconds")
     assert "Problem: Fix parse_duration so minutes are counted" in related
     assert "Failed before: test_failure" in related and "Fix: count the minutes after the hours" in related
-    assert "(files: duration.py)" in related and "Verified: tests passed (1 passed)" in related
+    assert "(files: duration.py)" in related and "Verified fix: tests passed (1 passed)" in related
 
     run(later, "Add a README notes section describing the deployment checklist")
     unrelated = model.context_for("Add a README notes section")
@@ -113,7 +113,7 @@ def test_cli_backlog_and_engine_acceptance_record_the_same_structured_lesson_onc
     context = project["context"]
     task = asyncio.run(cli.accept(context, run(context, "Fix parse_duration so minutes are counted")))
     cli_records = [r for r in context.memory.store.records() if r["category"] == "change"]
-    assert len(cli_records) == 1 and cli_records[0]["text"].startswith("Problem: Fix parse_duration")
+    assert len(cli_records) == 1 and cli_records[0]["text"].startswith("Verified fix: tests passed") and "Problem: Fix parse_duration" in cli_records[0]["text"]
     assert cli_records[0]["verification"] == "verified"
 
     # backlog: two items accepted together through `backlog accept` (the project's tests pass first)
@@ -130,9 +130,9 @@ def test_cli_backlog_and_engine_acceptance_record_the_same_structured_lesson_onc
     assert cli.backlog_run(args("run"), context, backlog) == 0
     assert cli.backlog_accept(context, backlog) == 0
     changes = [r for r in context.memory.store.records() if r["category"] == "change"]
-    assert len(changes) == 3 and {r["text"].split(".")[0] for r in changes} >= {
+    assert len(changes) == 3 and {r["text"].split(". ")[1].split(".")[0] for r in changes} >= {
         "Problem: Create alpha", "Problem: Create beta"}
-    assert all(r["text"].startswith("Problem: ") and "Verified: tests passed" in r["text"] for r in changes)
+    assert all(r["text"].startswith("Verified fix: tests passed") and "Problem: " in r["text"] for r in changes)
     # accepting is not repeatable, and recording the same task's lesson again changes nothing
     context.memory.learn("change", lessons.lesson({**task, "status": "accepted"}), task)
     assert len([r for r in context.memory.store.records() if r["category"] == "change"]) == 3
@@ -154,8 +154,8 @@ def test_engine_api_acceptance_records_the_lesson(tmp_path, monkeypatch):
                                   "decision": "approve"})
     engine.call("tasks.accept", {"project_id": project["id"], "task_id": task["id"]})
     changes = [r for r in context.memory.store.records() if r["category"] == "change"]
-    assert len(changes) == 1 and changes[0]["text"].startswith("Problem: Fix x in main.py")
-    assert "Verified: tests passed (1 passed)" in changes[0]["text"]
+    assert len(changes) == 1 and changes[0]["text"].startswith("Verified fix") and "Problem: Fix x in main.py" in changes[0]["text"]
+    assert "Verified fix: tests passed (1 passed)" in changes[0]["text"]
     assert engine_git(world["root"], "status", "--porcelain") == ""
 
 
@@ -196,6 +196,18 @@ def test_lessons_keep_secrets_and_raw_logs_out():
     assert unaccepted["solution"] is None and unaccepted["verified"] is False  # only accepted work is a fix
 
 
+def test_a_shortened_lesson_still_says_whether_it_was_verified():
+    """The engineering packet keeps 400 characters of each lesson (brain/knowledge.py): the real
+    run showed a long lesson losing its verification there, so it comes first."""
+    task = {"id": "t", "goal": "Add parse_minutes(text) to duration.py " + "with details " * 40, "status": "accepted",
+            "failure_log": [{"category": "collection", "summary": "E   ImportError: cannot import parse_minutes"}] * 3,
+            "proposal": {"plan": "Add the function " + "carefully " * 30, "changes": [{"path": "duration.py"}]},
+            "test_evidence": {"passed": True, "exit_code": 0, "output": "1 passed in 0.1s"}}
+    shortened = lessons.text(lessons.lesson(task))[:400]
+    assert shortened.startswith("Verified fix: tests passed (1 passed). Problem: Add parse_minutes")
+    assert lessons.text(lessons.lesson({**task, "status": "blocked"}))[:400].startswith("Not solved yet (blocked)")
+
+
 def test_relevance_keeps_unrelated_lessons_out_of_both_memories(project):
     assert lessons.relevant("parse_duration should accept seconds", "Problem: Fix parse_duration minutes")
     assert not lessons.relevant("Add a logging section to the README", "Problem: Fix parse_duration minutes")
@@ -208,7 +220,7 @@ def test_relevance_keeps_unrelated_lessons_out_of_both_memories(project):
     assert {m["task_id"] for m in brain.store.memories("app")} == {"a", "b"}  # listing without a goal is unchanged
     memory = project["context"].memory
     memory.remember("rule", "Always run the linter before committing", verified=True, ref="user")
-    memory.remember("change", "Problem: Render the invoice PDF header. Verified: tests passed", verified=True,
+    memory.remember("change", "Problem: Render the invoice PDF header. Verified fix: tests passed", verified=True,
                     ref="task:x", key="change:x")
     context = memory.context_for("Configure the nginx reverse proxy")
     assert "invoice" not in json.dumps(context)  # unrelated lesson left out

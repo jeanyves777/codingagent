@@ -274,7 +274,7 @@ def test_continuation_after_restart_and_survival_across_update_and_rollback(worl
     # A new process: memory and the accepted change persist and feed the next task.
     restarted = cli.Context(layout, repo)
     knowledge = json.dumps(restarted.memory.profile())
-    assert "Problem: Set x to 2" in knowledge and "Verified: tests passed" in knowledge and "Keep x small" in knowledge
+    assert "Problem: Set x to 2" in knowledge and "Verified fix: tests passed" in knowledge and "Keep x small" in knowledge
     before = sorted(texts(restarted.memory))
     # Updates run in their own process with no session open: release this process's databases.
     import gc

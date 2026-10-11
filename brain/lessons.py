@@ -81,18 +81,19 @@ def lesson(task: dict) -> dict:
 
 
 def text(item: dict) -> str:
-    """One compact paragraph: what later prompts and keyword retrieval use."""
-    parts = [f"Problem: {item['problem']}"]
+    """One compact paragraph: what later prompts and keyword retrieval use. Whether it was verified
+    comes first and earlier failed attempts last, so a prompt that shortens it keeps what matters."""
+    verification = item.get("verification") or {}
+    if item.get("verified"):
+        parts = ["Verified fix: tests passed" + (f" ({verification['result']})" if verification.get("result") else "")]
+    else:
+        parts = [f"Not solved yet ({item.get('status')})"]
+    parts.append(f"Problem: {item['problem']}")
+    if item.get("solution"):
+        files = ", ".join(item["solution"]["files"])
+        parts.append(f"Fix: {item['solution']['plan']}" + (f" (files: {files})" if files else ""))
     if item.get("root_cause"):
         parts.append("Cause found: " + ", ".join(item["root_cause"]))
     if item.get("failed_approaches"):
         parts.append("Failed before: " + " | ".join(item["failed_approaches"]))
-    if item.get("solution"):
-        files = ", ".join(item["solution"]["files"])
-        parts.append(f"Fix: {item['solution']['plan']}" + (f" (files: {files})" if files else ""))
-    verification = item.get("verification") or {}
-    if item.get("verified"):
-        parts.append("Verified: tests passed" + (f" ({verification['result']})" if verification.get("result") else ""))
-    else:
-        parts.append(f"Not solved yet ({item.get('status')})")
     return ". ".join(parts)[:1500]

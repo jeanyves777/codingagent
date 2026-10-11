@@ -76,15 +76,16 @@ When records disagree, the lower authority level wins:
 
 When you accept a tested task, Coding Brain records one lesson in project memory. That happens
 whether you accept with `codingbrain accept`, `codingbrain backlog accept`, the engine API or the
-desktop. A lesson records:
+desktop. A lesson records, in this order:
 
+- **Verified fix:** the test result, for example "1 passed". It comes first so that a prompt that
+  shortens a lesson still shows it was verified.
 - **Problem:** the goal.
+- **Fix:** the plan and the files of the accepted change.
 - **Cause found:** only Coding Brain's own deterministic diagnoses, for example that tests share
   state. A model's opinion is never recorded as a cause.
 - **Failed before:** for each earlier failed attempt, its category and the one most telling line
   of the test output.
-- **Fix:** the plan and the files of the accepted change.
-- **Verified:** the test result, for example "1 passed".
 
 When a run ends failed, Coding Brain records the observed failure as unverified, "Not solved yet".
 It keeps one record per goal, and the newest failure replaces the older one. When the goal is
