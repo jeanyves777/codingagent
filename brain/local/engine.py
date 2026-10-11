@@ -271,8 +271,14 @@ class Engine:
         if self._machine is None:  # facts are cached by the System object: one probe per engine
             from .system import System
             self._machine = self.system or System()
+        from . import inference
         backlog = self.backlog(project_id)
-        return backlog_status(backlog, Resources(self._machine.facts, max_local=max_agents or 4).local_slots())
+        models = self.context(project_id).config["models"]
+        measured = inference.cached_slots(self.context(project_id).layout.data / "inference.json", models["url"],
+                                          models["model"], check_server=False) \
+            if models.get("provider", "ollama") == "ollama" and models.get("model") else None
+        return backlog_status(backlog, Resources(self._machine.facts, max_local=max_agents or 4,
+                                                 inference=measured).local_slots())
 
     def op_backlog_ledger(self, project_id: str, item_id: str | None = None):
         from ..conductor import ledger_report

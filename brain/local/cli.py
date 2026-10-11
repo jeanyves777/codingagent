@@ -570,16 +570,45 @@ def cmd_backlog(args, layout):
             print(f"Cancelled {item['id']}.")
         elif args.action == "run":
             return backlog_run(args, context, backlog)
+        elif args.action == "accept":
+            return backlog_accept(context, backlog, args.goal[0] if args.goal else None)
     except (BacklogError, KeyError) as error:
         raise SystemExit(str(error))
     return 0
 
 
-def _backlog_resources(args, context):
+def _backlog_resources(args, context, measure=False):
+    """Agent slots from the machine and, for Ollama, from how many generations the server was
+    measured to run at once. `measure` (backlog run) measures once per model and server version
+    when more than one agent could run; status views only read the remembered result."""
     from ..conductor import Resources
+    from . import inference
     from .system import System
     system = System()
-    return Resources(system.facts, max_local=args.max_agents or 4)
+    resources = Resources(system.facts, max_local=args.max_agents or 4)
+    models = context.config["models"]
+    if models.get("provider", "ollama") != "ollama" or not models.get("model"):
+        return resources
+    cache, url = context.layout.data / "inference.json", models["url"]
+    resources.inference = None if measure and getattr(args, "remeasure", False) else \
+        inference.cached_slots(cache, url, models["model"], check_server=measure)
+    hardware = resources.local_slots()
+    if measure and resources.inference is None and hardware > 1:
+        print(f"Measuring how many generations {models['model']} runs at once (once per model; about a minute)...")
+        try:
+            entry = inference.calibrate(cache, url, models["model"], streams=hardware)
+            resources.inference = entry["slots"]
+            print(f"  {entry['slots']} at once (overlap {entry['result']['overlap']}, "
+                  f"{entry['result']['aggregate_tokens_per_second']} tokens/s together, "
+                  f"{entry['result']['single_tokens_per_second']} alone)")
+        except Exception as error:  # the run continues with one agent rather than guessing
+            resources.inference = 1
+            print(f"  could not measure ({type(error).__name__}); running one agent")
+    if measure and resources.inference == 1 and hardware > 1:
+        print(f"Note: the model server generates for one agent at a time, so one agent runs. This machine "
+              f"could run {hardware}: set OLLAMA_NUM_PARALLEL={hardware} for Ollama, restart it, then run "
+              f"`codingbrain backlog run --remeasure`.")
+    return resources
 
 
 def print_backlog_status(status: dict):
@@ -591,26 +620,77 @@ def print_backlog_status(status: dict):
     for item in status["items"]:
         print(f"  {item['id']}  {item['priority']}  {item['state']:<17} {item['attempts']} tries  {item['title'][:60]}" +
               (f"\n      {item['reason'][:160]}" if item["reason"] else ""))
+    combined = status.get("integration")
+    if combined:
+        print(f"Combined: integration {combined['id']} at {combined['head'][:10]} with {len(combined['included'])} "
+              f"item(s) passing together" + (f"; redone on top of it: {', '.join(combined['excluded'])}"
+                                             if combined["excluded"] else ""))
     if not status["ledger_intact"]:
         print("WARNING: the evidence ledger was changed or truncated.")
+
+
+def _backlog_runner(context) -> int:
+    """The process working on this project's backlog, or 0."""
+    from .session import pid_alive
+    lock = context.data / "backlog.lock"
+    try:
+        other = int(lock.read_text().strip() or 0) if lock.exists() else 0
+    except (OSError, ValueError):
+        other = 0
+    return other if other and other != os.getpid() and pid_alive(other) else 0  # a stale lock is ignored
+
+
+def backlog_accept(context, backlog, integration_id=None):
+    """The user accepts the combined result: every included task is accepted (memory, evidence)
+    and one new branch points at the integration. The current branch is unchanged."""
+    if _backlog_runner(context):
+        raise SystemExit("The backlog is being worked on; accept when `codingbrain backlog run` has stopped.")
+    record = backlog.integration(integration_id)
+    if not record or record["state"] != "candidate":
+        raise SystemExit("Nothing to accept: no combined result is waiting (see `codingbrain backlog status`).")
+    attempts = {attempt["item_id"]: attempt for attempt in backlog.open_attempts()}
+    items = [backlog.get(item_id) for item_id in record["included"]]
+    stale = [item["id"] for item in items if item["state"] != "verified" or item["id"] not in attempts]
+    if stale:
+        raise SystemExit(f"Integration {record['id']} is out of date ({', '.join(stale)} changed); "
+                         "run `codingbrain backlog run` to combine again.")
+    for item in items:
+        if context.brain.store.get(attempts[item["id"]]["task_id"])["status"] != "passed":
+            raise SystemExit(f"The task for {item['id']} is no longer waiting for acceptance.")
+
+    async def accept_all():
+        for item in items:
+            await context.brain.accept(attempts[item["id"]]["task_id"],
+                                       f"Accepted with backlog integration {record['id']}: {item['goal'][:200]}")
+    asyncio.run(accept_all())
+    branch = branch_for(context, record["head"], f"backlog-{record['id'][:8]}")
+    backlog.set_integration(record["id"], state="accepted", branch=branch)
+    for item in items:
+        attempt = attempts[item["id"]]
+        backlog.end_attempt(attempt["id"], "done")
+        backlog.update(item["id"], state="done", reason=f"accepted on branch {branch}")
+        backlog.record(item["id"], attempt["id"], "acceptance", "accepted",
+                       {"task_id": attempt["task_id"], "by": "user", "integration": record["id"], "branch": branch,
+                        "head": record["head"]})
+        backlog.decide(item["id"], "done", f"accepted by the user with integration {record['id']}")
+    print(f"Accepted {len(items)} item(s). New branch {branch} (your current branch is unchanged). Items that "
+          f"depend on them now start from it. Review with `git log {branch}` and merge when ready.")
+    return 0
 
 
 def backlog_run(args, context, backlog):
     """Work through the backlog until every item is verified, done or blocked, or only you can move
     it on. Proposals run without asking only if autonomy.execution is auto; acceptance is yours."""
     from ..conductor import BrainExecutor, Conductor
-    from .session import pid_alive, session
+    from .session import session
     lock = context.data / "backlog.lock"
-    try:
-        other = int(lock.read_text().strip() or 0) if lock.exists() else 0
-    except (OSError, ValueError):
-        other = 0
-    if other and other != os.getpid() and pid_alive(other):  # a stale lock from an ended process is ignored
+    other = _backlog_runner(context)
+    if other:
         raise SystemExit(f"The backlog is already being worked on (process {other}).")
     lock.write_text(str(os.getpid()))
     auto = context.config["autonomy"]["execution"] == "auto"
     conductor = Conductor(backlog, BrainExecutor(context.brain, context.root.name), auto_execute=auto,
-                          stall_seconds=args.stall_minutes * 60, resources=_backlog_resources(args, context))
+                          stall_seconds=args.stall_minutes * 60, resources=_backlog_resources(args, context, measure=True))
     print("Working through the backlog" + ("" if auto else " (proposals wait for your approval: "
                                                            "autonomy.execution is propose)") + ".")
 
@@ -638,7 +718,10 @@ def backlog_run(args, context, backlog):
         lock.unlink(missing_ok=True)
     print_backlog_status(status)
     if status["waiting_on_people_only"]:
-        print("Waiting for you: approve proposals (codingbrain resume) or accept verified results (codingbrain accept).")
+        combined = status.get("integration")
+        print("Waiting for you: " + (f"accept the combined result with `codingbrain backlog accept` "
+                                     f"({len(combined['included'])} item(s) pass together)" if combined else
+                                     "approve proposals (codingbrain resume)") + ".")
     return 0
 
 
@@ -1680,8 +1763,9 @@ def main(argv=None) -> int:
     snapshot_parser.add_argument("--task", help="purge: only this task's snapshots")
     snapshot_parser.add_argument("--older-than-days", type=float, default=30)
     backlog_parser = commands.add_parser("backlog", help="the capability backlog: add, list, status, run, cancel, ledger")
-    backlog_parser.add_argument("action", choices=["add", "list", "status", "run", "cancel", "ledger"])
-    backlog_parser.add_argument("goal", nargs="*", help="add: the goal; cancel/ledger: the item id")
+    backlog_parser.add_argument("action", choices=["add", "list", "status", "run", "cancel", "ledger", "accept"])
+    backlog_parser.add_argument("goal", nargs="*", help="add: the goal; cancel/ledger: the item id; "
+                                                        "accept: the integration id (default: the waiting one)")
     backlog_parser.add_argument("--title")
     backlog_parser.add_argument("--priority", choices=["P0", "P1", "P2", "P3"], default="P1")
     backlog_parser.add_argument("--depends", action="append", help="an item this one needs first (repeatable)")
@@ -1695,6 +1779,8 @@ def main(argv=None) -> int:
     backlog_parser.add_argument("--stall-minutes", type=float, default=15)
     backlog_parser.add_argument("--poll", type=float, default=5)
     backlog_parser.add_argument("--once", action="store_true", help="run: one scheduling pass only")
+    backlog_parser.add_argument("--remeasure", action="store_true",
+                                help="run: measure again how many generations the model server runs at once")
     backlog_parser.add_argument("--json", action="store_true")
     migrate_parser = commands.add_parser("migrate", help=argparse.SUPPRESS)
     migrate_parser.add_argument("--json", action="store_true")

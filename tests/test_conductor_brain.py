@@ -3,6 +3,7 @@ and the independent verifier running real pytest on frozen acceptance tests. Onl
 scripted stand-in and the sandbox runs pytest locally instead of in Docker."""
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import time
@@ -18,7 +19,8 @@ from test_brain import make_repository
 
 def local_pytest(workspace, image, should_cancel=None, only=None):
     result = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *(only or [])],
-                            cwd=workspace, capture_output=True, text=True, timeout=120)
+                            cwd=workspace, capture_output=True, text=True, timeout=120,
+                            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})  # as the real sandbox
     return {"passed": result.returncode == 0, "exit_code": result.returncode,
             "output": result.stdout + result.stderr, "profile": "python"}
 
@@ -96,7 +98,10 @@ def test_two_agents_work_in_parallel_and_both_results_are_independently_verified
     assert {item["title"]: item["state"] for item in status["items"]} == {"alpha": "verified", "beta": "verified"}
     assert world["model"].peak == 2  # both agents' model calls really overlapped
     assert status["waiting_on_people_only"]  # acceptance onto a branch stays with the user
-    assert all(entry["verdict"] == "passed" for entry in world["backlog"].ledger()) and status["ledger_intact"]
+    ledger = world["backlog"].ledger()
+    assert [entry["verdict"] for entry in ledger if entry["kind"] == "verification"] == ["passed", "passed"]
+    assert [entry["verdict"] for entry in ledger if entry["kind"] == "integration"] == ["included", "included"]
+    assert status["ledger_intact"] and len(status["integration"]["included"]) == 2  # both pass together
     tasks = [world["brain"].store.get(item["task_id"]) for item in world["backlog"].list()]
     assert all(task["status"] == "passed" for task in tasks)  # executed under autonomy=auto, never accepted for the user
     assert len({world["brain"].workspace(task["id"]) for task in tasks}) == 2  # isolated worktrees
@@ -112,7 +117,7 @@ def test_an_agent_that_skips_the_tests_is_caught_and_its_retry_verified(world):
     assert world["brain"].store.get(attempts[0]["task_id"])["status"] == "passed"
     assert attempts[1]["strategy"] == "local_with_feedback" and "Previous attempt" in world["model"].calls[-1]
     assert status["items"][0]["state"] == "verified"
-    assert [entry["verdict"] for entry in world["backlog"].ledger()] == ["failed", "passed"]
+    assert [entry["verdict"] for entry in world["backlog"].ledger()] == ["failed", "passed", "included"]
 
 
 def test_user_acceptance_completes_the_item_and_releases_its_dependent(world):

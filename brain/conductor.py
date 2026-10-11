@@ -100,7 +100,12 @@ class Backlog:
                     attempt_id TEXT, at REAL, kind TEXT, verdict TEXT, evidence TEXT, digest TEXT);
                 CREATE TABLE IF NOT EXISTS decisions (seq INTEGER PRIMARY KEY AUTOINCREMENT, at REAL,
                     item_id TEXT, decision TEXT, detail TEXT);
+                CREATE TABLE IF NOT EXISTS integrations (id TEXT PRIMARY KEY, base TEXT, head TEXT, workspace TEXT,
+                    included TEXT, excluded TEXT, state TEXT, branch TEXT, created REAL, updated REAL);
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(items)")}
+            if "base_commit" not in columns:  # backlogs created before integration existed
+                db.execute("ALTER TABLE items ADD COLUMN base_commit TEXT")
 
     @contextmanager
     def connect(self):
@@ -235,6 +240,43 @@ class Backlog:
                               " ORDER BY seq DESC LIMIT ?", ((item_id, limit) if item_id else (limit,))).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    # integrations -----------------------------------------------------------------------------
+    def save_integration(self, record: dict) -> dict:
+        now = time.time()
+        with self.connect() as db:
+            db.execute("INSERT INTO integrations (id, base, head, workspace, included, excluded, state, created, updated) "
+                       "VALUES (?,?,?,?,?,?,?,?,?)",
+                       (record["id"], record["base"], record["head"], record["workspace"], json.dumps(record["included"]),
+                        json.dumps(record["excluded"]), record.get("state", "candidate"), now, now))
+        return self.integration(record["id"])
+
+    def integrations(self, states=None) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM integrations ORDER BY created").fetchall()
+        records = [{**dict(row), "included": json.loads(row["included"]), "excluded": json.loads(row["excluded"])}
+                   for row in rows]
+        return [record for record in records if not states or record["state"] in states]
+
+    def integration(self, integration_id: str | None = None) -> dict | None:
+        """One integration by id prefix, or (without an id) the candidate waiting for the user."""
+        records = self.integrations() if integration_id else self.integrations({"candidate"})
+        if integration_id:
+            records = [record for record in records if record["id"].startswith(integration_id)]
+            if len(records) != 1:
+                raise KeyError(f"no single integration matches {integration_id!r}")
+        return records[-1] if records else None
+
+    def set_integration(self, integration_id: str, **fields):
+        fields["updated"] = time.time()
+        with self.connect() as db:
+            db.execute(f"UPDATE integrations SET {', '.join(f'{key}=?' for key in fields)} WHERE id=?",
+                       (*fields.values(), integration_id))
+
+    def accepted_head(self) -> str | None:
+        """Where new work starts: the latest integration the user accepted (None: the project's HEAD)."""
+        accepted = self.integrations({"accepted"})
+        return accepted[-1]["head"] if accepted else None
+
 
 def backlog_status(backlog: Backlog | None, local_slots: int) -> dict:
     """The backlog as people and programs see it: Conductor.status, `codingbrain backlog status`
@@ -260,7 +302,15 @@ def backlog_status(backlog: Backlog | None, local_slots: int) -> dict:
                                   not any(item["state"] in {"ready", "running", "verifying"} for item in items) and
                                   any(item["state"] in people for item in items),
         "ledger_intact": backlog.verify_ledger() if backlog else True,
+        "integration": _integration_summary(backlog.integration() if backlog else None),
     }
+
+
+def _integration_summary(record: dict | None) -> dict | None:
+    if not record:
+        return None
+    return {"id": record["id"], "state": record["state"], "base": record["base"], "head": record["head"],
+            "included": record["included"], "excluded": {key: value.get("reason") for key, value in record["excluded"].items()}}
 
 
 def ledger_report(backlog: Backlog | None, item: str | None = None) -> dict:
@@ -297,17 +347,19 @@ def add_from_project(backlog: Backlog, root: Path, goal: str, *, title: str | No
 
 class Resources:
     """How many local agents this machine runs efficiently: one per `per_agent_gb` of memory and
-    two cores, never more than `max_local`, at least one. Read again on every tick."""
+    two cores, never more than `max_local` or than the generations the model server was measured
+    to run at once (more agents would only queue for it), at least one. Read again on every tick."""
 
-    def __init__(self, facts=None, per_agent_gb: float = 6.0, max_local: int = 4):
+    def __init__(self, facts=None, per_agent_gb: float = 6.0, max_local: int = 4, inference: int | None = None):
         self.facts, self.per_agent_gb, self.max_local = facts, per_agent_gb, max(1, int(max_local))
+        self.inference = inference  # generations the model server was measured to run at once
 
     def local_slots(self) -> int:
         try:
             facts = self.facts() if self.facts else {}
         except Exception:
             facts = {}
-        limits = [self.max_local]
+        limits = [self.max_local] + ([max(1, int(self.inference))] if self.inference else [])
         if self.facts and not facts:
             return 1  # the machine could not be read: run one agent, not the maximum
         if facts.get("ram"):
@@ -351,13 +403,60 @@ class Conductor:
 
     # one scheduling pass ----------------------------------------------------------------------
     async def tick(self) -> dict:
-        actions = {"started": [], "verified": [], "requeued": [], "blocked": [], "stalled": [], "waiting": []}
+        actions = {"started": [], "verified": [], "requeued": [], "blocked": [], "stalled": [], "waiting": [],
+                   "integrated": []}
         self._premium = await self.executor.premium_available()  # budgets can change between ticks
         self._dependencies(actions)
         for attempt in self.backlog.open_attempts():
             await self._reconcile(attempt, actions)
+        await self._integrate(actions)
         await self._dispatch(actions)
         return actions
+
+    async def _integrate(self, actions):
+        """When no agent is working, combine every verified item into one candidate on top of the
+        accepted work: each item is applied in turn and must keep every included item's frozen
+        acceptance tests and the project's own tests passing together. An item that conflicts or
+        breaks the combination goes back to an agent, to be redone on top of the others. Nothing
+        reaches the user's branches: the candidate waits for `codingbrain backlog accept`."""
+        if not hasattr(self.executor, "integrate"):
+            return
+        items = self.backlog.list()
+        if any(item["state"] in {"running", "verifying"} for item in items):
+            return
+        verified = [item for item in items if item["state"] == "verified"]
+        current = self.backlog.integration()
+        if not verified or (current and set(current["included"]) == {item["id"] for item in verified}):
+            return
+        first = set(current["included"]) if current else set()  # keep what already combined first
+        ordered = [item for item in verified if item["id"] in first] + [item for item in verified if item["id"] not in first]
+        attempts = {attempt["item_id"]: attempt for attempt in self.backlog.open_attempts()}
+        ordered = [{**item, "task_id": attempts[item["id"]]["task_id"]} for item in ordered if item["id"] in attempts]
+        if not ordered:
+            return
+        result = await self.executor.integrate(ordered, self.backlog.accepted_head())
+        if current:
+            self.backlog.set_integration(current["id"], state="superseded")
+        for item in ordered:
+            verdict = "included" if item["id"] in result["included"] else result["excluded"][item["id"]]["reason"]
+            evidence = {"integration": result["id"], "base": result["base"], "head": result["head"],
+                        **{key: value for key, value in result["excluded"].get(item["id"], {}).items() if key != "reason"}}
+            self.backlog.record(item["id"], attempts[item["id"]]["id"], "integration", verdict, evidence)
+        if result["included"]:
+            self.backlog.save_integration({**result, "state": "candidate"})
+            for item_id in result["included"]:
+                self.backlog.update(item_id, reason=f"verified and combined in integration {result['id']} "
+                                                    "with the other verified items; waits for your acceptance")
+            self.backlog.decide(result["included"][0], "integrated",
+                                f"integration {result['id']}: {len(result['included'])} item(s) pass together")
+            actions["integrated"].extend(result["included"])
+        for item_id, excluded in result["excluded"].items():
+            item = self.backlog.get(item_id)
+            self.backlog.update(item_id, base_commit=result["head"] if result["included"] else None)
+            detail = (f"your change {excluded['reason'].replace('_', ' ')} when combined with the other verified "
+                      f"items ({', '.join(result['included']) or 'none'}); redo it on top of them:\n"
+                      + str(excluded.get("detail", ""))[-2500:])
+            await self._failed(item, attempts[item_id], excluded["reason"], detail, actions)
 
     def _dependencies(self, actions):
         items = {item["id"]: item for item in self.backlog.list()}
@@ -503,7 +602,10 @@ class Conductor:
             kind = "premium" if strategy == "premium_plan" else "local"
             if free[kind] <= 0:
                 continue
+            item["base_commit"] = item.get("base_commit") or self.backlog.accepted_head()
             task_id = await self.executor.start(item, strategy, item["feedback"] or "")
+            if item.get("base_commit"):
+                self.backlog.update(item["id"], base_commit=None)  # used once: later work starts from the latest
             attempt_id = self.backlog.start_attempt(item, strategy, kind, task_id, started=self.clock())
             self.progress[attempt_id] = self.clock()
             self.backlog.decide(item["id"], "assigned", f"attempt {item['attempts'] + 1}: {strategy} agent, task {task_id}")
@@ -560,7 +662,11 @@ class BrainExecutor:
             goal += "\n\nAcceptance criteria (checked independently after you finish):\n" + criteria
         if feedback and strategy != "local":
             goal += "\n\n" + feedback[-3000:]
-        task = self.brain.submit(self.repository, goal, premium_plan=strategy == "premium_plan")
+        base = item.get("base_commit")
+        if base and subprocess.run(["git", "-C", str(self.brain.repository(self.repository)), "merge-base",
+                                    "--is-ancestor", base, "HEAD"], capture_output=True, timeout=60).returncode == 0:
+            base = None  # the project's branch already contains it: start from the newest work
+        task = self.brain.submit(self.repository, goal, base_commit=base, premium_plan=strategy == "premium_plan")
         return task["id"]
 
     async def poll(self, task_id: str) -> dict:
@@ -590,39 +696,143 @@ class BrainExecutor:
         try:
             copy = scratch / "workspace"
             shutil.copytree(workspace, copy, symlinks=True, ignore=shutil.ignore_patterns(".git"))
-            self._restore_test_config(task_id, workspace, copy)
-            shadows = sorted(entry.name for entry in copy.iterdir() if entry.name in RUNNER_SHADOWS or
-                             entry.name.endswith(".pth"))
-            added = [name for name in shadows if self._original(task_id, workspace, name) is None]
-            if added:
-                return {"passed": False, "exit_code": None, "command": None,
-                        "output": f"the change adds {', '.join(added)}, which would replace the test runner"}
-            for relative, content in item["acceptance"]["files"].items():  # frozen: the agent's edits are replaced
-                folder = copy
-                for part in PurePosixPath(relative).parts[:-1]:  # a linked folder must not redirect the write
-                    folder = folder / part
-                    if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
-                        folder.unlink()
-                    folder.mkdir(exist_ok=True)
-                target = folder / PurePosixPath(relative).name
-                if target.is_symlink() or target.is_dir():
-                    shutil.rmtree(target) if target.is_dir() and not target.is_symlink() else target.unlink()
-                target.write_text(content, encoding="utf-8")
+            refused = self._prepare(copy, lambda relative: self._original(task_id, workspace, relative),
+                                    item["acceptance"]["files"])
+            if refused:
+                return {"passed": False, "exit_code": None, "command": None, "output": refused}
             result = await asyncio.to_thread(sandbox.run_tests, copy, self.brain.image, None, item["acceptance"]["nodes"])
             return {"passed": acceptance_passed(result, item["acceptance"]["nodes"]), "exit_code": result.get("exit_code"),
                     "output": result.get("output", ""), "command": "sandbox pytest " + " ".join(item["acceptance"]["nodes"])}
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
 
-    def _restore_test_config(self, task_id: str, workspace: Path, copy: Path):
-        """Put back the project's own test configuration (at the task's baseline) so the agent's
-        conftest.py or pytest options cannot skip or weaken the acceptance tests."""
-        found = [Path(folder) / name for folder, _, files in os.walk(copy) for name in files if name in TEST_CONFIG]
+    @staticmethod
+    def _prepare(copy: Path, original, files: dict) -> str | None:
+        """Make a copy of a workspace safe to verify: the project's test configuration as it was
+        at the baseline (`original(relative)` gives that content, or None), no file that would
+        replace the test runner, and the frozen acceptance files. Returns why it was refused."""
+        found = [Path(folder) / name for folder, _, names in os.walk(copy) for name in names if name in TEST_CONFIG]
         for path in found:  # os.walk never descends through a linked folder
-            original = self._original(task_id, workspace, path.relative_to(copy).as_posix())
+            content = original(path.relative_to(copy).as_posix())
             path.unlink()
-            if original is not None:
-                path.write_bytes(original)
+            if content is not None:
+                path.write_bytes(content)
+        shadows = sorted(entry.name for entry in copy.iterdir() if entry.name in RUNNER_SHADOWS or
+                         entry.name.endswith(".pth"))
+        added = [name for name in shadows if original(name) is None]
+        if added:
+            return f"the change adds {', '.join(added)}, which would replace the test runner"
+        for relative, content in files.items():  # frozen: the agent's edits are replaced
+            folder = copy
+            for part in PurePosixPath(relative).parts[:-1]:  # a linked folder must not redirect the write
+                folder = folder / part
+                if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
+                    folder.unlink()
+                folder.mkdir(exist_ok=True)
+            target = folder / PurePosixPath(relative).name
+            if target.is_symlink() or target.is_dir():
+                shutil.rmtree(target) if target.is_dir() and not target.is_symlink() else target.unlink()
+            target.write_text(content, encoding="utf-8")
+        return None
+
+    # integration --------------------------------------------------------------------------------
+    async def integrate(self, items: list[dict], base: str | None) -> dict:
+        return await asyncio.to_thread(self._integrate, items, base)
+
+    def _integrate(self, items: list[dict], base: str | None) -> dict:
+        """Apply each item's change in turn on a private worktree at `base` (the project's HEAD
+        when None), keeping it only if every included item's frozen acceptance tests and the
+        project's own tests still pass together. The user's branches are not touched."""
+        manager = self.brain.manager
+        source = self.brain.repository(self.repository)
+        base = base or manager._git(source, "rev-parse", "HEAD")
+        record_id = uuid.uuid4().hex[:12]
+        workspace = Path(self.brain.data) / "backlog-integrations" / record_id
+        manager.integration(source, workspace, base)
+        included, excluded, head, checks = [], {}, base, None
+        for item in items:
+            files = {}
+            for other in [*included, item]:
+                for relative, content in other["acceptance"]["files"].items():
+                    if files.setdefault(relative, content) != content:
+                        excluded[item["id"]] = {"reason": "integration_conflict",
+                                                "detail": f"its acceptance file {relative} differs from another item's"}
+            if item["id"] in excluded:
+                continue
+            try:
+                commit = self._commit_of(item)
+                new_head = manager.integrate(workspace, commit)
+            except ValueError as error:
+                excluded[item["id"]] = {"reason": "integration_conflict", "detail": str(error)[-2000:]}
+                continue
+            result = self._combined(workspace, source, base, [*included, item], files)
+            if not result["passed"]:
+                manager._git(workspace, "reset", "--hard", head)
+                excluded[item["id"]] = {"reason": "integration_failed", "detail": result["output"][-2500:],
+                                        "exit_code": result.get("exit_code")}
+                continue
+            included.append(item)
+            head, checks = new_head, result
+        if included:  # pinned: removing the worktree later cannot let Git collect the candidate
+            manager.keep(source, f"refs/codingbrain/backlog/{record_id}", head)
+        return {"id": record_id, "base": base, "head": head, "workspace": str(workspace),
+                "included": [item["id"] for item in included], "excluded": excluded,
+                "checks": {key: (checks or {}).get(key) for key in ("command", "exit_code")}}
+
+    def _commit_of(self, item: dict) -> str:
+        """The task's change as a commit on its base, made without touching the task's worktree
+        or index (a private index file)."""
+        task = self.brain.store.get(item["task_id"])
+        if task.get("commit"):
+            return task["commit"]
+        workspace = self.brain.workspace(item["task_id"])
+        scratch = Path(tempfile.mkdtemp(prefix="cb-index-"))
+        try:
+            env = {**os.environ, "GIT_INDEX_FILE": str(scratch / "index")}
+
+            def git(*arguments):
+                result = subprocess.run(["git", "-C", str(workspace), "-c", "user.name=Coding Brain",
+                                         "-c", "user.email=coding-brain@localhost", *arguments],
+                                        capture_output=True, text=True, timeout=120, env=env)
+                if result.returncode:
+                    raise ValueError(result.stderr.strip() or "Git operation failed")
+                return result.stdout.strip()
+            git("read-tree", "HEAD")
+            git("add", "--all", "--", ".", ":(exclude,glob)**/__pycache__/**", ":(exclude,glob)**/*.pyc")
+            tree = git("write-tree")
+            if tree == git("rev-parse", "HEAD^{tree}"):
+                raise ValueError("the task changed nothing")
+            return git("commit-tree", tree, "-p", "HEAD", "-m", f"backlog {item['id']}: {item['title'][:120]}")
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    def _combined(self, workspace: Path, source: Path, base: str, items: list[dict], files: dict) -> dict:
+        from . import sandbox
+        scratch = Path(tempfile.mkdtemp(prefix="cb-integrate-"))
+        try:
+            copy = scratch / "workspace"
+            shutil.copytree(workspace, copy, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+
+            def original(relative):
+                shown = subprocess.run(["git", "-C", str(source), "show", f"{base}:{relative}"], capture_output=True,
+                                       timeout=60)
+                return shown.stdout if shown.returncode == 0 else None
+            refused = self._prepare(copy, original, files)
+            if refused:
+                return {"passed": False, "exit_code": None, "output": refused, "command": None}
+            nodes = [node for item in items for node in item["acceptance"]["nodes"]]
+            together = sandbox.run_tests(copy, self.brain.image, None, nodes)
+            if not acceptance_passed(together, nodes):
+                return {"passed": False, "exit_code": together.get("exit_code"), "command": "sandbox pytest " + " ".join(nodes),
+                        "output": "acceptance tests failed together:\n" + str(together.get("output", ""))}
+            suite = sandbox.run_tests(copy, self.brain.image, None, None)
+            if suite.get("exit_code") not in (0, 5):  # 5: the project has no tests of its own
+                return {"passed": False, "exit_code": suite.get("exit_code"), "command": "sandbox (project tests)",
+                        "output": "the project's own tests failed:\n" + str(suite.get("output", ""))}
+            return {"passed": True, "exit_code": 0, "output": str(together.get("output", ""))[-1500:],
+                    "command": "sandbox pytest " + " ".join(nodes) + " and the project's tests"}
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
 
     def _original(self, task_id: str, workspace: Path, relative: str) -> bytes | None:
         """The file's content at the task's baseline, or None if it did not exist (or was not a

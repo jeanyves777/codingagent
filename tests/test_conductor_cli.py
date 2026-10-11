@@ -30,6 +30,7 @@ def project(tmp_path, monkeypatch):
     config["autonomy"]["execution"] = "auto"
     settings.save(layout, config)
     monkeypatch.setenv("CODINGBRAIN_HOME", str(layout.home))
+    monkeypatch.setattr("brain.local.inference.cached_slots", lambda *args, **kwargs: 2)  # never probe a server
     repository = make_repository(tmp_path / "projects" / "demo", use_git=True)
     (repository / "acceptance").mkdir()
     (repository / "acceptance" / "test_alpha.py").write_text(ACCEPT)

@@ -53,7 +53,8 @@ def test_status_of_a_project_without_a_backlog_creates_nothing(world, monkeypatc
     engine, project = world["engine"], world["project"]
     status = engine.call("backlog.status", {"project_id": project["id"]})
     assert status == {"counts": {}, "agents": {"local_slots": 2, "busy": []}, "items": [], "finished": True,
-                      "waiting_on_people_only": False, "ledger_intact": True}
+                      "waiting_on_people_only": False, "ledger_intact": True,
+                      "integration": None}
     assert engine.call("backlog.ledger", {"project_id": project["id"]}) == {"intact": True, "entries": []}
     data = engine.context(project["id"]).data
     assert not (data / "backlog.sqlite3").exists() and not (data / "brain.sqlite3").exists()
