@@ -14,8 +14,8 @@ from . import accounting
 from .approvals import ApprovalRequired
 from .capabilities import TASK_CAPABILITIES, TASK_QUERY
 from .brains import is_unavailable
-from .completion import (accept_requirement_tests, assess_failures, requirement_goal, run_requirement_checks,
-                         without_tests)
+from .completion import (accept_requirement_tests, assess_failures, execution_gap, load_failure, requirement_goal,
+                         requirement_language, run_requirement_checks, without_tests)
 from .contracts import Assignment, Delegation, Proposal, validate_graph
 from .intelligence import build_index, relevant_context
 from .activity import ActivityMixin
@@ -310,6 +310,12 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
             await self._write_requirement_checks(task, workspace, context)
 
     async def _write_requirement_checks(self, task: dict, workspace: Path, context: dict):
+        language = requirement_language(workspace)
+        if language is None:
+            task["requirement_tests"] = {}
+            self.event(task, "requirement_checks_skipped", "The project's test profile has no requirement-check runner")
+            return
+        task["requirement_language"] = language
         started, before = time.monotonic(), self.usage_counters()
         try:
             with self.telemetry.span(task["trace_id"], "model.requirements", task["id"]), \
@@ -361,7 +367,8 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
         metrics[key] = round(metrics.get(key, 0) + amount, 1)
 
     def _completion(self, task: dict, status: str, detail: str):
-        """verified, unverified (valid checks still fail), inconclusive (no usable checks left), or
+        """verified, unverified (valid checks still fail, or the checks did not demonstrably run),
+        inconclusive (no usable checks left), or
         unchecked (none were written). Only verified counts as verified completion."""
         task["completion"] = {"status": status, "detail": detail[:500]}
         task["completion_verified"] = {"verified": True, "unchecked": None}.get(status, False)
@@ -386,12 +393,31 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
             if evidence.get("cancelled"):
                 self._check_cancelled(task)
             if evidence["passed"]:
-                self._completion(task, "verified", f"{checks['tests']} requirement check(s) passed")
-                self.event(task, "completion_verified", task["completion"]["detail"])
+                gap = execution_gap(evidence, checks)
+                if gap is None:
+                    self._completion(task, "verified", f"{checks['tests']} requirement check(s) passed")
+                    self.event(task, "completion_verified", task["completion"]["detail"])
+                    return None
+                # A passing run that does not show the checks executing proves nothing: fail closed.
+                self._audit(task, "not_executed", content=checks["content"], reason=gap,
+                            output=str(evidence.get("output", ""))[-2000:])
+                self._completion(task, "unverified", f"requirement checks did not run: {gap}")
+                self.event(task, "completion_unverified", task["completion"]["detail"])
                 return None
             failure = classify_test_failure(evidence)
+            if failure["category"] == "test_failure" and load_failure(evidence, checks):
+                failure = {**failure, "category": "collection"}  # the checks file itself did not load
+            if failure["category"] in ("infrastructure", "timeout", "no_tests"):
+                # The checks could not run (missing runner or image, timeout, nothing collected).
+                self._audit(task, "not_executed", content=checks["content"], category=failure["category"],
+                            output=failure["summary"][:2000])
+                task["requirement_tests"] = {}
+                self._completion(task, "unverified", f"requirement checks did not run ({failure['category']})")
+                self.event(task, "completion_unverified", f"{task['completion']['detail']}: {failure['summary'][:500]}")
+                return None
             if failure["category"] != "test_failure":
-                # Broken generated checks (collection errors) or sandbox problems: never block.
+                # Broken generated checks (syntax or collection errors, a Node file that does not load):
+                # the check's own defect, so it never blocks and never verifies.
                 self._audit(task, "discarded", content=checks["content"], category=failure["category"],
                             output=failure["summary"][:2000])
                 task["requirement_tests"] = {}
