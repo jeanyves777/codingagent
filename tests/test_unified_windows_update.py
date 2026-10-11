@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 
-from desktop_ui import updates
+from desktop_ui import management, updates
 from scripts.finalize_desktop_release import finalize
 
 
@@ -45,8 +45,65 @@ def test_release_contains_matching_desktop_version_and_checksums(tmp_path):
             "coding_brain-0.13.0-py3-none-any.whl"} <= set(entries)
     with pytest.raises(ValueError, match="already finalized"):
         finalize(root, installer, portable)
+
+
+def _windows_powershell_env() -> dict:
+    """As the desktop launches it: without PowerShell 7's PSModulePath (CI steps run in pwsh)."""
+    return {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+
+
+def test_the_updater_window_does_not_inherit_powershell_7_modules(monkeypatch):
+    seen = []
+    monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")
+    monkeypatch.setattr(management.subprocess, "CREATE_NEW_CONSOLE", 16, raising=False)
+    monkeypatch.setattr(management.subprocess, "Popen", lambda command, **kwargs: seen.append(kwargs.get("env")))
+    management.launch_interactive_windows(["powershell.exe", "-File", "Update-CodingBrain.ps1"], platform="nt")
+    management.launch_interactive_windows(["claude.exe", "login"], platform="nt")
+    assert seen[0] is not None and not any(key.upper() == "PSMODULEPATH" for key in seen[0]) and seen[0]
+    assert seen[1] is None  # other programs keep the environment as it is
+
+
+def _verify_asset(folder: Path, filename: str) -> subprocess.CompletedProcess:
+    """Run the updater's own Verify-Asset (and Expected-Sha256) from Update-CodingBrain.ps1."""
+    script = str(Path(__file__).resolve().parents[1] / "desktop_ui" / "Update-CodingBrain.ps1").replace("'", "''")
+    command = (f"$ast=[System.Management.Automation.Language.Parser]::ParseFile('{script}',[ref]$null,[ref]$null);"
+               "foreach($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and "
+               "$n.Name -in @('Expected-Sha256','Verify-Asset')}, $true)) { . ([scriptblock]::Create($f.Extent.Text)) };"
+               f"Verify-Asset '{filename}' '{str(folder).replace(chr(39), chr(39) * 2)}' "
+               f"'{str(folder / 'SHA256SUMS').replace(chr(39), chr(39) * 2)}'")
+    return subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                          capture_output=True, text=True, timeout=60, env=_windows_powershell_env())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="runs the updater's PowerShell checksum check")
+def test_updater_refuses_a_tampered_installer(tmp_path):
+    root = _backend_release(tmp_path)
+    installer, portable = tmp_path / "setup.exe", tmp_path / "portable.zip"
+    installer.write_bytes(b"e" * 2048)
+    portable.write_bytes(b"z" * 2048)
+    finalize(root, installer, portable)
+    accepted = _verify_asset(root, "CodingBrain-Setup.exe")
+    assert accepted.returncode == 0, accepted.stderr
     (root / "CodingBrain-Setup.exe").write_bytes(b"tampered")
-    assert hashlib.sha256((root / "CodingBrain-Setup.exe").read_bytes()).hexdigest() != entries["CodingBrain-Setup.exe"]
+    refused = _verify_asset(root, "CodingBrain-Setup.exe")
+    assert refused.returncode != 0 and "SHA256 mismatch" in refused.stdout + refused.stderr
+
+
+def test_desktop_installer_never_accepts_the_environment_plan_for_the_user():
+    """The installer's setup step must show Coding Brain's plan and ask: -Yes/--yes only when the
+    setup script itself was started unattended with -Yes, never by default."""
+    root = Path(__file__).resolve().parents[1] / "installer" / "windows"
+    iss = (root / "CodingBrainDesktop.iss").read_text(encoding="utf-8")
+    # Setup starts through Explorer (outside the installer's redirection-trust restrictions) via
+    # Setup-CodingBrain.cmd, which runs Setup-CodingBrain.ps1: neither may add -Yes.
+    setup_line = next(line for line in iss.splitlines() if "Setup-CodingBrain" in line and line.startswith("Filename"))
+    assert "explorer.exe" in setup_line and "Setup-CodingBrain.cmd" in setup_line
+    assert not re.search(r"(?i)\s-Yes\b", setup_line)
+    launcher = (root / "Setup-CodingBrain.cmd").read_text(encoding="utf-8")
+    assert "Setup-CodingBrain.ps1" in launcher and not re.search(r"(?i)\s-Yes\b", launcher)
+    script = (root / "Setup-CodingBrain.ps1").read_text(encoding="utf-8")
+    assert not re.search(r"(?i)-Full -Yes|install --full --yes", script)
+    assert "$installYes = if ($Yes)" in script and "$cliYes = if ($Yes)" in script
 
 
 @pytest.mark.parametrize("problem", ["wrong_tag", "missing_exe", "tiny_exe"])
@@ -198,7 +255,7 @@ def test_updater_has_valid_windows_powershell_syntax():
                "[ref]$tokens,[ref]$errors);"
                "if($errors.Count){$errors|ForEach-Object{Write-Error $_.Message};exit 1}")
     result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-                            capture_output=True, text=True, timeout=30)
+                            capture_output=True, text=True, timeout=30, env=_windows_powershell_env())
     assert result.returncode == 0, result.stderr
 
 

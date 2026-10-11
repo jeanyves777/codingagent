@@ -14,6 +14,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from urllib.parse import quote
 
 
@@ -53,15 +54,39 @@ def installed_brain_python() -> Path:
 
 
 class BridgeProcess:
+    # A bridge that keeps crashing is reported, not restarted forever.
+    MAX_RESTARTS = 3
+    RESTART_WINDOW = 120.0
+
     def __init__(self, python: Path | None = None, root: Path | None = None):
+        self._python_override = python
         self.python = python or installed_brain_python()
         self.root = root or source_root()
         self.child: subprocess.Popen | None = None
         self.address: str | None = None
+        self.stderr_tail: list[str] = []
+        self.stopping = threading.Event()
+        self.restarts: list[float] = []
+
+    @staticmethod
+    def _drain(stream, sink=None):
+        # The bridge must never block on a full pipe: uvicorn warnings and tracebacks keep coming
+        # after the handshake line, and nothing else reads them.
+        try:
+            for line in stream:
+                if sink is not None:
+                    sink(line)
+        except (OSError, ValueError):
+            pass
+
+    def _keep_stderr(self, line: str):
+        self.stderr_tail = (self.stderr_tail + [line])[-40:]
 
     def start(self, timeout: int = 30) -> str:
         if self.child is not None:
             raise RuntimeError("Desktop service is already running")
+        if not getattr(self, "_restarting", False):
+            self.stopping.clear()  # a restart must never undo a stop() that came in meanwhile
         env = os.environ.copy()
         env["PYTHONPATH"] = str(self.root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         kwargs = {"cwd": str(Path.home()), "stdin": subprocess.DEVNULL,
@@ -89,12 +114,61 @@ class BridgeProcess:
             if type(port) is not int or not 1024 <= port <= 65535 or not isinstance(token, str) or len(token) < 32:
                 raise RuntimeError("Invalid desktop bridge handshake")
             self.address = f"http://127.0.0.1:{port}/#token={quote(token, safe='')}"
+            threading.Thread(target=self._drain, args=(self.child.stdout,), daemon=True).start()
+            threading.Thread(target=self._drain, args=(self.child.stderr, self._keep_stderr), daemon=True).start()
             return self.address
         except (queue.Empty, RuntimeError, KeyError, TypeError, ValueError) as exc:
             self.stop()
             raise RuntimeError("Could not start Coding Brain Desktop bridge: " + str(exc)) from exc
 
+    def restart(self) -> str:
+        """Start a fresh bridge after an unexpected exit, from the engine installed *now*."""
+        now = time.monotonic()
+        self.restarts = [at for at in self.restarts if now - at < self.RESTART_WINDOW] + [now]
+        if len(self.restarts) > self.MAX_RESTARTS:
+            raise RuntimeError("The desktop service stopped repeatedly: " + "".join(self.stderr_tail)[-600:])
+        child, self.child = self.child, None
+        if child is not None:
+            for stream in (child.stdout, child.stderr):
+                if stream:
+                    stream.close()
+        if self._python_override is None:
+            # An update may have switched app/current.json to another version while we ran.
+            self.python = installed_brain_python()
+        if self.stopping.is_set():
+            raise RuntimeError("The desktop is closing")
+        self._restarting = True
+        try:
+            address = self.start()
+        finally:
+            self._restarting = False
+        if self.stopping.is_set():  # the window closed while the new bridge was starting
+            self.stop()
+            raise RuntimeError("The desktop is closing")
+        return address
+
+    def watch(self, on_restart, on_failure, poll: float = 1.0):
+        """Supervise the bridge until stop(): restart it if it exits and report the new address."""
+        def loop():
+            while not self.stopping.wait(poll):
+                child = self.child
+                if child is None or child.poll() is None:
+                    continue
+                if self.stopping.is_set():
+                    return
+                try:
+                    address = self.restart()
+                except RuntimeError as error:
+                    if not self.stopping.is_set():
+                        on_failure(str(error))
+                    return
+                on_restart(address)
+        thread = threading.Thread(target=loop, daemon=True)
+        thread.start()
+        return thread
+
     def stop(self):
+        self.stopping.set()
         child, self.child = self.child, None
         self.address = None
         if child is None:
@@ -110,6 +184,15 @@ class BridgeProcess:
             child.stdout.close()
         if child.stderr:
             child.stderr.close()
+
+
+def failure_page(reason: str) -> str:
+    from html import escape
+    return ("<!doctype html><meta charset='utf-8'><body style='background:#111315;color:#e6e6e6;"
+            "font:15px system-ui;padding:48px'><h2>Coding Brain Desktop stopped</h2>"
+            "<p>The local desktop service could not be restarted. Close and reopen Coding Brain; "
+            "if this repeats, run <code>codingbrain doctor</code>.</p>"
+            f"<pre style='white-space:pre-wrap;color:#9aa'>{escape(reason)}</pre></body>")
 
 
 def main(argv=None) -> int:
@@ -146,8 +229,12 @@ def main(argv=None) -> int:
             else:
                 bridge = BridgeProcess()
                 address = bridge.start()
-            webview.create_window("Coding Brain", address, width=1360, height=850,
-                                  min_size=(850, 560), background_color="#111315", text_select=True)
+            window = webview.create_window("Coding Brain", address, width=1360, height=850,
+                                           min_size=(850, 560), background_color="#111315", text_select=True)
+            if bridge:
+                # A crashed bridge comes back on a new port and token; the window follows it.
+                bridge.watch(on_restart=window.load_url,
+                             on_failure=lambda reason: window.load_html(failure_page(reason)))
             # WebView2 is required on Windows; never silently fall back to legacy MSHTML.
             webview.start(gui="edgechromium" if os.name == "nt" else None, debug=False)
             return 0

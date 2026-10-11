@@ -63,7 +63,8 @@ def build(out: Path, version: str | None, constraints: Path | None) -> dict:
     sys.path.insert(0, str(ROOT))
     from brain.local.config import SCHEMA_VERSION
     requires = re.search(r'^requires-python = "([^"]+)"', (ROOT / "pyproject.toml").read_text(), re.M).group(1)
-    prerelease = bool(re.search(r"(a|b|rc|dev)\d*$", version))
+    from packaging.version import Version
+    prerelease = Version(version).is_prerelease  # also right for local builds such as 0.13.0.dev5+desktop24
     info = {"version": version, "tag": f"v{version}", "state_schema": SCHEMA_VERSION,
             "min_upgrade_from": MIN_UPGRADE_FROM, "requires_python": requires,
             "channel": "dev" if prerelease else "stable", "notes": notes_for(version)}

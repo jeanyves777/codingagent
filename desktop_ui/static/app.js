@@ -26,6 +26,14 @@
   let gitLatest = null;
   let maintenancePoll = null;
   let feedbackTimer = null;
+  let bridgeBoot = null;
+  let installedVersion;
+  let connectionLost = false;
+  let heartbeatFailures = 0;
+  let heartbeatTimer = null;
+  let attachments = [];
+  // The task's stages and agents, rebuilt only from the engine's structured events.
+  let flow = {kind: null, stages: {}, agents: {}, progress: 0, current: null, status: null};
   const busyButtons = new WeakMap();
 
   function busyButton(button, working) {
@@ -108,20 +116,44 @@
   async function api(path, method = 'GET', body) {
     const options = {method, headers: {'X-CodingBrain-Token': token || ''}};
     if (body !== undefined) { options.headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(body); }
-    // Status checks are read-only, so a timeout cannot accidentally duplicate a task.
-    // Never automatically timeout or retry mutating requests: they may have taken effect.
-    const readOnlyStatus = method === 'GET' && path.startsWith('/api/engine/status');
-    const controller = readOnlyStatus ? new AbortController() : null;
+    // GETs are read-only, so a timeout cannot accidentally duplicate a task, and a hung read can
+    // never wedge a poll loop. Never automatically timeout or retry mutating requests: they may
+    // have taken effect.
+    const engineStatus = method === 'GET' && path.startsWith('/api/engine/status');
+    const controller = method === 'GET' ? new AbortController() : null;
     if (controller) options.signal = controller.signal;
-    const deadline = controller ? setTimeout(() => controller.abort(), 35000) : null;
+    const deadline = controller ? setTimeout(() => controller.abort(), engineStatus ? 35000 : 15000) : null;
     try {
-      const response = await fetch(path, options);
+      let response;
+      try { response = await fetch(path, options); }
+      catch (error) {
+        // fetch rejects with a TypeError only when the bridge cannot be reached; keep any other
+        // error's own message.
+        if (!(error instanceof TypeError)) throw error;
+        const offline = new Error('Could not reach the Coding Brain UI bridge'); offline.offline = true; throw offline;
+      }
       let result;
-      try { result = await response.json(); } catch { throw new Error('Could not reach the Coding Brain UI bridge'); }
-      if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'Request failed');
+      try { result = await response.json(); }
+      catch {
+        // The bridge answered, but not with JSON (e.g. an internal error): say so instead of
+        // claiming it is unreachable, so the real failure can be diagnosed.
+        const failure = new Error(`The Coding Brain desktop service returned an error (HTTP ${response.status}) for ${path.split('?')[0]}. Retry; if it repeats, reopen Coding Brain.`);
+        failure.status = response.status;
+        throw failure;
+      }
+      if (!response.ok) {
+        const failure = new Error(typeof result.detail === 'string' ? result.detail : 'Request failed');
+        failure.status = response.status;
+        throw failure;
+      }
       return result;
     } catch (error) {
-      if (error?.name === 'AbortError') throw new Error('Engine readiness check timed out. Open Setup to diagnose the installed engine, then retry.');
+      if (error?.name === 'AbortError') {
+        const timedOut = new Error(engineStatus ? 'Engine readiness check timed out. Open Setup to diagnose the installed engine, then retry.'
+          : 'The Coding Brain UI bridge did not answer in time');
+        timedOut.offline = !engineStatus;
+        throw timedOut;
+      }
       throw error;
     } finally {
       if (deadline !== null) clearTimeout(deadline);
@@ -182,6 +214,119 @@
     return holder;
   }
 
+  // ---- Code display: fenced blocks with a language label, copy button, syntax colors and diff
+  // highlighting. Everything is built with textContent; model output is never parsed as HTML.
+  const KEYWORDS = new Set(('def class return if elif else for while in not and or is import from as with try except ' +
+    'finally raise pass break continue lambda yield async await None True False self function const let var new ' +
+    'this typeof instanceof switch case default throw catch export extends static public private protected ' +
+    'interface type enum implements null undefined true false void delete do of package struct impl fn pub use ' +
+    'mut match where select insert update delete create table values into join on group order by').split(' '));
+  const HASH_COMMENTS = new Set(['py', 'python', 'sh', 'bash', 'shell', 'yaml', 'yml', 'toml', 'ps1', 'powershell', 'r', 'rb', 'ruby', 'ini', 'cfg']);
+  const LANGUAGE_BY_EXTENSION = {py:'python', js:'javascript', jsx:'javascript', ts:'typescript', tsx:'typescript',
+    json:'json', css:'css', html:'html', md:'markdown', sh:'bash', ps1:'powershell', yml:'yaml', yaml:'yaml',
+    toml:'toml', ini:'ini', cfg:'ini', rs:'rust', go:'go', java:'java', cs:'csharp', sql:'sql', rb:'ruby', diff:'diff', patch:'diff'};
+
+  function tokenPattern(lang) {
+    const comment = HASH_COMMENTS.has(lang) ? '#[^\\n]*' : lang === 'sql' ? '--[^\\n]*' : '\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/';
+    return new RegExp(`(${comment})|("(?:\\\\.|[^"\\\\\\n])*"|'(?:\\\\.|[^'\\\\\\n])*'|\`(?:\\\\.|[^\`\\\\])*\`)|(\\b\\d+(?:\\.\\d+)?\\b)|([A-Za-z_$][\\w$]*)`, 'g');
+  }
+
+  function highlightInto(parent, code, lang) {
+    lang = (lang || '').toLowerCase();
+    if (lang === 'diff' || (!lang && /^(diff --git|--- |\+\+\+ |@@ )/m.test(code))) {
+      for (const line of code.split('\n')) {
+        const span = document.createElement('span');
+        span.className = 'diff-line' + (line.startsWith('+') && !line.startsWith('+++') ? ' diff-add' :
+          line.startsWith('-') && !line.startsWith('---') ? ' diff-del' : line.startsWith('@@') ? ' diff-hunk' :
+          /^(diff --git|\+\+\+|---|index )/.test(line) ? ' diff-file' : '');
+        span.textContent = line + '\n';
+        parent.append(span);
+      }
+      return;
+    }
+    if (['text', 'txt', 'plain', 'markdown', 'md', 'output', 'console'].includes(lang) || code.length > 200000) {
+      parent.append(code);
+      return;
+    }
+    const pattern = tokenPattern(lang);
+    let last = 0;
+    for (const match of code.matchAll(pattern)) {
+      if (match.index > last) parent.append(code.slice(last, match.index));
+      const [token, comment, string, number, word] = match;
+      if (word && !KEYWORDS.has(word)) { parent.append(token); last = match.index + token.length; continue; }
+      const span = document.createElement('span');
+      span.className = comment ? 'tok-c' : string ? 'tok-s' : number ? 'tok-n' : 'tok-k';
+      span.textContent = token;
+      parent.append(span);
+      last = match.index + token.length;
+    }
+    if (last < code.length) parent.append(code.slice(last));
+  }
+
+  function codeBlock(code, lang, options = {}) {
+    const block = document.createElement('div');
+    block.className = 'code-block';
+    const bar = document.createElement('div');
+    bar.className = 'code-bar';
+    const label = document.createElement('span');
+    label.className = 'code-lang';
+    label.textContent = options.title || lang || 'code';
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'code-copy';
+    copy.textContent = 'Copy';
+    copy.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(code); copy.textContent = 'Copied'; setTimeout(() => copy.textContent = 'Copy', 1500); }
+      catch { toast('Copy unavailable'); }
+    });
+    bar.append(label, copy);
+    const pre = document.createElement('pre');
+    const element = document.createElement('code');
+    if (options.lineNumbers) {
+      pre.className = 'numbered';
+      code.split('\n').forEach((line, index, lines) => {
+        if (index === lines.length - 1 && line === '') return;
+        const row = document.createElement('span');
+        row.className = 'code-line';
+        const number = document.createElement('span');
+        number.className = 'line-no';
+        number.textContent = String(index + 1);
+        const text = document.createElement('span');
+        highlightInto(text, line, lang);
+        row.append(number, text, '\n');
+        element.append(row);
+      });
+    } else {
+      highlightInto(element, code.replace(/\n$/, ''), lang);
+    }
+    pre.append(element);
+    block.append(bar, pre);
+    return block;
+  }
+
+  function inlineText(parent, text) {
+    const parts = text.split(/(`[^`\n]+`)/g);
+    for (const part of parts) {
+      if (part.length > 2 && part.startsWith('`') && part.endsWith('`')) {
+        const code = document.createElement('code');
+        code.className = 'inline-code';
+        code.textContent = part.slice(1, -1);
+        parent.append(code);
+      } else if (part) parent.append(part);
+    }
+  }
+
+  function richText(parent, text) {
+    const fence = /```([\w+#.-]*)[^\n]*\n?([\s\S]*?)(?:```|$)/g;
+    let last = 0;
+    for (const match of text.matchAll(fence)) {
+      if (match.index > last) inlineText(parent, text.slice(last, match.index).replace(/\n+$/, '\n'));
+      parent.append(codeBlock(match[2], match[1]));
+      last = match.index + match[0].length;
+    }
+    if (last < text.length) inlineText(parent, text.slice(last).replace(/^\n+/, ''));
+  }
+
   function message(author, text, variant = 'assistant') {
     $('welcome').hidden = true;
     const row = document.createElement('article');
@@ -222,7 +367,8 @@
     }
     const content = document.createElement('div');
     content.className = 'message-content';
-    content.textContent = text;
+    if (variant !== 'user' && text.includes('`')) richText(content, text);
+    else content.textContent = text;
     bubble.append(head, content);
     row.append(avatar, bubble);
     $('thread').append(row);
@@ -325,12 +471,14 @@
     $('git-details').hidden = false;
     const signature = JSON.stringify({
       branch: snapshot.branch, head: snapshot.head, branches: snapshot.branches,
-      commits: snapshot.commits, changes: snapshot.changes, counts: snapshot.counts
+      commits: snapshot.commits, changes: snapshot.changes, counts: snapshot.counts, paused: snapshot.changes_paused
     });
     $('git-updated').textContent = 'Live · Checked ' +
       new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit'});
     $('branch-name').textContent = '◇ ' + (snapshot.branch || 'Detached HEAD');
     if (signature === gitLastSignature) return;
+    // Files changed on disk (by a task, an editor or a checkout): refresh the open file tree too.
+    if (gitLastSignature && !$('file-panel').hidden) loadTree();
     gitLastSignature = signature;
     $('git-current-branch').textContent = snapshot.branch || 'Unknown branch';
     $('git-current-head').textContent = snapshot.head ?
@@ -344,7 +492,7 @@
       (snapshot.changes_truncated ? '+' : '');
     const changed = $('git-changes');
     changed.replaceChildren();
-    if (!snapshot.changes?.length) gitText(changed, 'p', 'Working tree clean', 'git-empty');
+    if (!snapshot.changes?.length) gitText(changed, 'p', snapshot.changes_paused || 'Working tree clean', 'git-empty');
     for (const item of snapshot.changes || []) {
       const row = document.createElement('div');
       row.className = 'git-file-row'; row.setAttribute('role', 'listitem');
@@ -482,7 +630,9 @@
         try {
           const file = await api('/api/file?path=' + encodeURIComponent(entry.path));
           $('preview-name').textContent = file.path;
-          $('preview-content').textContent = file.content;
+          const extension = (file.path.split('.').pop() || '').toLowerCase();
+          $('preview-content').replaceChildren(codeBlock(file.content, LANGUAGE_BY_EXTENSION[extension] || extension,
+            {lineNumbers: true, title: file.path}));
           $('preview').hidden = false;
         } catch (e) { toast(e.message); }
         return;
@@ -504,18 +654,28 @@
   async function loadFolder(folder = '', parent = $('file-tree'), depth = 0) {
     try {
       const response = await api('/api/tree?path=' + encodeURIComponent(folder));
-      parent.replaceChildren();
+      // Build off-screen, including folders the user has open, then swap in one step: a live
+      // refresh never collapses the tree, flickers or jumps the scroll position.
+      const rows = [];
+      const nested = [];
       for (const entry of response.entries) {
-        parent.append(rowFor(entry, depth));
+        const row = rowFor(entry, depth);
+        rows.push(row);
+        if (entry.dir && expanded.has(entry.path)) {
+          nested.push(loadFolder(entry.path, row.querySelector(':scope > .tree-children'), depth + 1));
+        }
       }
-      if (!folder) $('file-count').textContent = `${response.entries.length} items`;
+      await Promise.all(nested);
       if (response.entries.length === 0) {
         const empty = document.createElement('p');
         empty.className = 'muted';
         empty.textContent = 'Folder is empty.';
-        parent.append(empty);
+        rows.push(empty);
       }
+      parent.replaceChildren(...rows);
+      if (!folder) $('file-count').textContent = `${response.entries.length} items`;
     } catch (e) {
+      if (folder && e.status === 400) expanded.delete(folder);  // the folder was deleted or renamed
       parent.textContent = e.message;
     }
   }
@@ -581,9 +741,8 @@
       const reveal = document.createElement('details');
       const summary = document.createElement('summary');
       summary.textContent = 'Review exact diff';
-      const diff = document.createElement('pre');
-      diff.className = 'proposal-diff';
-      diff.textContent = details.diff;
+      const diff = codeBlock(details.diff, 'diff', {title: 'Proposed changes'});
+      diff.classList.add('proposal-diff');
       reveal.append(summary, diff);
       box.append(reveal);
     }
@@ -603,6 +762,149 @@
       buttons.append(button);
     }
     box.append(buttons);
+  }
+
+  // ---- Agent flow and progress. Stages and agents come only from the engine's structured events;
+  // the percentage is an estimate from the stages completed so far, and never moves backward.
+  const STAGES = [
+    ['goal', 'Goal received', 4, true], ['project_validation', 'Project and Git check', 7], ['indexing', 'Repository indexing', 10],
+    ['memory', 'Memory and knowledge', 14], ['decomposition', 'Goal decomposition', 18], ['supervisor_selection', 'Supervisor selection', 20],
+    ['planning', 'Planning', 28, true], ['requirements', 'Requirements and tests', 34], ['proposal', 'Proposal', 44, true],
+    ['proposal_validation', 'Proposal validation', 48], ['approval', 'Your approval', 52, true], ['implementation', 'Implementation', 60, true],
+    ['tool', 'Tool use', 62], ['review', 'Code review', 68], ['sandbox', 'Sandbox run', 75, true], ['test_results', 'Test results', 82, true],
+    ['repair', 'Diagnosis and repair', 84], ['retest', 'Retesting', 86], ['completion_verification', 'Completion check', 90],
+    ['visual_verification', 'Visual check', 93], ['acceptance', 'Acceptance on a new branch', 100, true],
+  ];
+  const STAGE_INDEX = Object.fromEntries(STAGES.map((stage, index) => [stage[0], index]));
+  // Role names say what each agent does in the flow.
+  const AGENT_NAMES = {user: 'You', coding_brain: 'Orchestrator', coordinator: 'Coordinator (splits the goal)',
+    implementer: 'Implementer', reviewer: 'Reviewer', supervisor: 'Supervisor', sandbox: 'Test sandbox',
+    browser: 'Visual checker', installer: 'Installer'};
+  const AGENT_ORDER = ['coding_brain', 'coordinator', 'implementer', 'reviewer', 'supervisor', 'sandbox', 'browser', 'installer', 'user'];
+
+  // Which brain an agent belongs to, from the provider the engine reported (never guessed from a
+  // name). Agents with no model call fall back to what they are by construction.
+  function agentOwner(id, agent) {
+    const provider = String(agent.provider || '').toLowerCase();
+    if (provider === 'ollama' || provider === 'local') return {group: 'local', label: 'Local brain', detail: agent.model || 'Ollama'};
+    if (provider.startsWith('claude') || provider === 'anthropic') return {group: 'provider', label: 'Claude', detail: agent.model || 'subscription CLI'};
+    if (provider.startsWith('codex') || provider === 'openai') return {group: 'provider', label: 'Codex', detail: agent.model || 'subscription CLI'};
+    if (provider) return {group: 'provider', label: provider, detail: agent.model || ''};
+    if (id === 'user') return {group: 'you', label: 'You', detail: 'approvals'};
+    if (id === 'sandbox') return {group: 'tools', label: 'Docker sandbox', detail: 'isolated tests'};
+    if (id === 'browser') return {group: 'tools', label: 'Local browser', detail: 'screenshots'};
+    if (id === 'coding_brain' || id === 'coordinator' || id === 'installer') return {group: 'local', label: 'Local brain', detail: 'orchestration'};
+    return {group: 'local', label: 'Local brain', detail: agent.model || 'model not reported yet'};
+  }
+  const OWNER_GROUPS = [['local', 'Local brain · on this PC'], ['provider', 'Provider brains · Claude / Codex'],
+    ['tools', 'Tools'], ['you', 'You']];
+  const STATE_LABELS = {RUNNING: 'Working', COMPLETED: 'Done', FAILED: 'Failed', BLOCKED: 'Blocked', RETRYING: 'Retrying',
+    WAITING_APPROVAL: 'Waiting for you', CANCELLED: 'Cancelled', PENDING: 'Pending'};
+
+  function resetFlow(kind) {
+    flow = {kind, stages: {}, agents: {}, progress: kind === 'chat' ? 0 : 2, current: null, status: 'running'};
+    renderFlow();
+  }
+
+  function flowEvent(event) {
+    const data = event.data;
+    if (!data || flow.kind === 'chat') return;
+    const status = String(data.status || '').toUpperCase();
+    const summary = event.message.replace(/^[\w:]+ [A-Z_]+: /, '');
+    if (data.phase && data.phase in STAGE_INDEX) {
+      flow.stages[data.phase] = {status: status || 'RUNNING', at: event.at, summary, duration: data.duration};
+      const index = STAGE_INDEX[data.phase];
+      const reached = status === 'COMPLETED' ? STAGES[index][2] : index > 0 ? STAGES[index - 1][2] : 0;
+      flow.progress = Math.min(99, Math.max(flow.progress, reached));  // 100 only when the task finishes
+      if (status !== 'COMPLETED') flow.current = data.phase;
+    }
+    if (data.agent) {
+      // Who the agent runs on (local brain or a provider) sticks once reported: later events of the
+      // same agent often omit provider and model.
+      const known = flow.agents[data.agent] || {};
+      flow.agents[data.agent] = {status: status || 'RUNNING', at: event.at, phase: data.phase || known.phase, summary,
+        model: data.model || known.model, provider: data.provider || known.provider};
+    }
+    renderFlow();
+  }
+
+  function finishFlow(job) {
+    if (flow.kind === 'chat') return;
+    flow.status = job.status;
+    if (job.status === 'completed') flow.progress = 100;
+    for (const agent of Object.values(flow.agents)) {
+      if (agent.status === 'RUNNING' || agent.status === 'RETRYING') agent.status = job.status === 'completed' ? 'COMPLETED' : 'CANCELLED';
+    }
+    flow.current = null;
+    renderFlow();
+  }
+
+  function renderFlow() {
+    const running = flow.status === 'running';
+    const showProgress = flow.kind && flow.kind !== 'chat';
+    $('run-progress').hidden = !(showProgress && running);
+    $('run-progress-fill').style.width = flow.progress + '%';
+    $('run-progress-label').textContent = flow.progress + '%';
+    $('flow-progress-fill').style.width = (showProgress ? flow.progress : 0) + '%';
+    $('flow-percent').textContent = showProgress ? flow.progress + '%' : '–';
+    const current = flow.current && STAGES[STAGE_INDEX[flow.current]];
+    $('flow-title').textContent = !flow.kind ? 'No task running' : flow.kind === 'chat' ? 'Conversation' :
+      running ? (current ? current[1] : 'Starting…') : `Task ${flow.status}`;
+    $('flow-sub').textContent = !flow.kind ? 'Run a task to see each agent and stage live.' :
+      flow.kind === 'chat' ? 'Chat replies come from one model; agents appear when you run a task.' :
+      'Progress is estimated from the stages the engine has completed.';
+    const lanes = $('agent-lanes');
+    lanes.replaceChildren();
+    const agents = Object.entries(flow.agents);
+    if (!agents.length) {
+      const empty = document.createElement('p'); empty.className = 'muted';
+      empty.textContent = flow.kind && flow.kind !== 'chat' ? 'Waiting for the first agent event…' : 'No agents active.';
+      lanes.append(empty);
+    }
+    agents.sort((a, b) => (AGENT_ORDER.indexOf(a[0]) + 99) % 99 - (AGENT_ORDER.indexOf(b[0]) + 99) % 99);
+    for (const [group, heading] of OWNER_GROUPS) {
+      const members = agents.filter(([id, agent]) => agentOwner(id, agent).group === group);
+      if (!members.length) continue;
+      const title = document.createElement('div');
+      title.className = 'owner-heading owner-' + group;
+      title.textContent = heading;
+      lanes.append(title);
+      for (const [id, agent] of members) {
+        const owner = agentOwner(id, agent);
+        const card = document.createElement('div');
+        card.className = `agent-lane owner-${group} state-${agent.status.toLowerCase()}`;
+        card.setAttribute('role', 'listitem');
+        const top = document.createElement('div'); top.className = 'agent-top';
+        const name = document.createElement('strong'); name.textContent = AGENT_NAMES[id] || id;
+        const pill = document.createElement('span'); pill.className = 'agent-state'; pill.textContent = STATE_LABELS[agent.status] || agent.status;
+        top.append(name, pill);
+        const badge = document.createElement('div'); badge.className = 'owner-badge owner-' + group;
+        const who = document.createElement('strong'); who.textContent = owner.label;
+        badge.append(who, owner.detail ? ' · ' + owner.detail : '');
+        const meta = document.createElement('div'); meta.className = 'agent-meta';
+        const stage = agent.phase && STAGES[STAGE_INDEX[agent.phase]];
+        meta.textContent = stage ? stage[1] : agent.phase || '';
+        const text = document.createElement('p'); text.className = 'agent-summary'; text.textContent = agent.summary.slice(0, 240);
+        card.append(top, badge, meta, text);
+        lanes.append(card);
+      }
+    }
+    const list = $('stage-list');
+    list.replaceChildren();
+    for (const [phase, label, , core] of STAGES) {
+      const seen = flow.stages[phase];
+      if (!seen && !core) continue;  // optional stages appear only when the engine actually runs them
+      const item = document.createElement('li');
+      const status = seen ? seen.status : 'PENDING';
+      item.className = 'stage state-' + status.toLowerCase() + (flow.current === phase ? ' current' : '');
+      const mark = document.createElement('span'); mark.className = 'stage-mark';
+      mark.textContent = {COMPLETED: '✓', FAILED: '✕', BLOCKED: '!', CANCELLED: '–', WAITING_APPROVAL: '⏸', RETRYING: '↻', RUNNING: '●'}[status] || '○';
+      const name = document.createElement('span'); name.className = 'stage-name'; name.textContent = label;
+      const time = document.createElement('span'); time.className = 'stage-time';
+      time.textContent = seen?.duration ? `${Number(seen.duration).toFixed(1)}s` : seen ? STATE_LABELS[status] || '' : '';
+      item.append(mark, name, time);
+      list.append(item);
+    }
   }
 
   function tickTime() {
@@ -627,6 +929,7 @@
         if (displayedEvents.has(event.seq)) continue;
         displayedEvents.add(event.seq);
         activityEntry(event);
+        flowEvent(event);
         if (event.kind === 'approval') approval(job.id, job.approval || {summary: event.message});
         if (event.kind === 'output') { hideTyping(); message(job.kind === 'chat' ? 'CODING BRAIN' : 'CODING BRAIN · ACTIVITY', event.message, 'assistant'); }
         if (event.kind === 'error') { hideTyping(); message('CODING BRAIN · ERROR', event.message, 'system'); }
@@ -634,11 +937,14 @@
       const running = ['starting','running','approval_required'].includes(job.status);
       $('run-status').hidden = !running;
       busySend(running);
-      $('status-label').textContent = job.status === 'approval_required' ? 'Awaiting your approval' : `Running ${job.kind} — waiting for engine output`;
+      const stage = flow.current && STAGES[STAGE_INDEX[flow.current]];
+      $('status-label').textContent = job.status === 'approval_required' ? 'Awaiting your approval' :
+        stage ? `${stage[1]}…` : job.kind === 'chat' ? 'Coding Brain is replying…' : 'Starting — waiting for the first engine event';
       $('footer-status').textContent = job.kind === 'chat' && engineInfo?.chat_available === false ?
         'Engine update required for chat' : `Task ${job.status}`;
       tickTime();
       if (!running) {
+        finishFlow(job);
         if (pollTimer) clearInterval(pollTimer);
         pollTimer = null;
         $('run-status').hidden = true;
@@ -657,8 +963,75 @@
         }
         return;
       }
-    } catch(e) { $('footer-status').textContent = 'Connection lost'; toast(e.message); }
+    } catch(e) {
+      if (e.status === 404) {
+        // The bridge restarted and no longer knows this job; stop following it instead of
+        // polling a missing task forever.
+        endLostJob('This session is no longer tracked by the desktop service (it restarted). Check Activity or the task list before retrying.');
+      } else {
+        // The heartbeat owns reconnecting and its single notice; don't toast every 750 ms.
+        $('footer-status').textContent = e.offline ? 'Connection lost — retrying' : 'Task status unavailable — retrying';
+        if (!e.offline) toast(e.message);
+      }
+    }
     finally { polling = false; }
+  }
+
+  function endLostJob(text) {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+    activeJob = null;
+    $('run-status').hidden = true;
+    busySend(false);
+    hideTyping();
+    message('CODING BRAIN', text, 'system');
+  }
+
+  function setConnection(online, label) {
+    $('connection-dot').classList.toggle('green', online);
+    $('connection-dot').classList.toggle('red', !online);
+    $('connection-label').textContent = label;
+  }
+
+  function scheduleHeartbeat() {
+    clearTimeout(heartbeatTimer);
+    // Back off while disconnected (1 s, 2 s, 4 s … 30 s); idle slowly while the window is hidden.
+    const delay = connectionLost ? Math.min(30000, 1000 * 2 ** Math.max(0, heartbeatFailures - 1))
+      : document.hidden ? 30000 : 5000;
+    heartbeatTimer = setTimeout(heartbeat, delay);
+  }
+
+  async function heartbeat() {
+    try {
+      const health = await api('/api/health');
+      const restarted = bridgeBoot !== null && health.boot !== bridgeBoot;
+      const recovered = connectionLost;
+      bridgeBoot = health.boot;
+      heartbeatFailures = 0;
+      connectionLost = false;
+      setConnection(true, 'Desktop connected');
+      if (restarted && activeJob) endLostJob('The desktop service restarted; this session is no longer tracked. Check Activity before retrying.');
+      if (installedVersion !== undefined && health.installed_version !== installedVersion) {
+        // An update or rollback switched the engine underneath us: re-read readiness now
+        // instead of showing the old version's banner until someone clicks Refresh.
+        toast(`Coding Brain engine is now v${health.installed_version || '?'}`);
+        engineNoticeDismissed = false;
+        refreshEngine({force: true});
+      }
+      installedVersion = health.installed_version;
+      if (recovered || restarted) { toast('Reconnected to Coding Brain'); refresh(); }
+    } catch (error) {
+      if (error.status === 403) {
+        setConnection(false, 'Session expired — reopen Coding Brain');
+        return;  // a new bridge has a new token; retrying with the old one cannot succeed
+      }
+      heartbeatFailures++;
+      if (!connectionLost) toast('Lost connection to the Coding Brain desktop service. Reconnecting…');
+      connectionLost = true;
+      setConnection(false, `Reconnecting… (attempt ${heartbeatFailures})`);
+      if (!activeJob) $('footer-status').textContent = 'Desktop service unreachable';
+    }
+    scheduleHeartbeat();
   }
 
   async function submit() {
@@ -668,6 +1041,10 @@
     if (mode === 'run' && (!currentProject || !currentProject.git)) {
       toast('Open an existing Git repository before running a coding task.');
       openDialog();
+      return;
+    }
+    if (attachments.length && mode === 'chat') {
+      toast('Attachments are read by Run task and New project. Switch mode to send these files.');
       return;
     }
     submitting = true;
@@ -699,7 +1076,9 @@
       showTyping();
       $('run-status').hidden = false;
       $('status-label').textContent = 'Connecting to Coding Brain…';
-      const job = await api('/api/start', 'POST', {message: text, mode});
+      const job = await api('/api/start', 'POST', {message: text, mode, attachments: attachments.map(item => item.path)});
+      attachments = []; renderAttachments();
+      resetFlow(job.kind);
       activeJob = job.id;
       cursor = 0;
       displayedEvents = new Set();
@@ -725,6 +1104,7 @@
       if (data.active && ['starting','running','approval_required'].includes(data.active.status)) {
         activeJob = data.active.id;
         startedAt = data.active.started;
+        if (flow.kind !== data.active.kind || cursor === 0) { resetFlow(data.active.kind); cursor = 0; displayedEvents = new Set(); }
         await poll();
         if (!pollTimer) pollTimer = setInterval(poll, 750);
       }
@@ -759,12 +1139,13 @@
   for (const item of document.querySelectorAll('[data-suggestion]')) {
     item.addEventListener('click', () => {$('prompt').value = item.dataset.suggestion; $('prompt').focus();});
   }
-  for (const kind of ['files','activity','git']) {
+  const PANELS = {files: 'file-panel', activity: 'activity-panel', flow: 'flow-panel', git: 'git-panel'};
+  for (const kind of Object.keys(PANELS)) {
     $('tab-' + kind).addEventListener('click', () => {
-      for (const tab of ['files','activity','git']) {
+      for (const tab of Object.keys(PANELS)) {
         $('tab-' + tab).classList.toggle('active', tab === kind);
         $('tab-' + tab).setAttribute('aria-selected', String(tab === kind));
-        $(tab === 'files' ? 'file-panel' : tab === 'activity' ? 'activity-panel' : 'git-panel').hidden = tab !== kind;
+        $(PANELS[tab]).hidden = tab !== kind;
       }
       if (kind === 'git') {
         if (gitLatest) renderGitSnapshot(gitLatest);
@@ -774,10 +1155,92 @@
     });
   }
   $('git-refresh').addEventListener('click', () => refreshGit(true));
+
+  // ---- Attachments: chosen with the native picker, or pasted / dropped and staged privately by the
+  // bridge. Only paths travel to the engine, which re-checks and parses each file in isolation.
+  function formatBytes(bytes) {
+    return bytes >= 1e6 ? (bytes / 1e6).toFixed(1) + ' MB' : bytes >= 1e3 ? Math.round(bytes / 1e3) + ' KB' : bytes + ' B';
+  }
+
+  function renderAttachments() {
+    const list = $('attachment-list');
+    list.replaceChildren();
+    list.hidden = attachments.length === 0;
+    for (const item of attachments) {
+      const chip = document.createElement('span');
+      chip.className = 'attachment';
+      chip.title = item.path;
+      const name = document.createElement('span'); name.className = 'attachment-name'; name.textContent = item.name;
+      const size = document.createElement('span'); size.className = 'attachment-size'; size.textContent = formatBytes(item.bytes);
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.className = 'attachment-remove'; remove.textContent = '×';
+      remove.setAttribute('aria-label', 'Remove ' + item.name);
+      remove.addEventListener('click', () => { attachments = attachments.filter(other => other !== item); renderAttachments(); });
+      chip.append(name, size, remove);
+      list.append(chip);
+    }
+  }
+
+  function addAttachments(files) {
+    for (const file of files) {
+      if (attachments.some(item => item.path === file.path)) continue;
+      if (attachments.length >= 10) { toast('At most 10 attachments per message'); break; }
+      attachments.push(file);
+    }
+    renderAttachments();
+  }
+
+  async function uploadAttachment(file) {
+    const response = await fetch('/api/attachments/upload', {method: 'POST', body: file, headers: {
+      'X-CodingBrain-Token': token || '', 'Content-Type': 'application/octet-stream',
+      'X-Filename': encodeURIComponent(file.name || 'pasted-screenshot.png')}});
+    let result = {};
+    try { result = await response.json(); } catch { /* reported below */ }
+    if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'Attachment could not be added');
+    return result;
+  }
+
+  async function uploadAll(files) {
+    for (const file of files) {
+      try { addAttachments([await uploadAttachment(file)]); }
+      catch (e) { toast(e.message); }
+    }
+  }
+
+  $('attach-files').addEventListener('click', async () => {
+    busyButton($('attach-files'), true);
+    try {
+      const result = await api('/api/attachments/pick', 'POST');
+      addAttachments(result.files || []);
+      if (result.refused?.length) toast(result.refused.join(' · '));
+    } catch (e) { toast(e.message); }
+    finally { busyButton($('attach-files'), false); }
+  });
+  $('prompt').addEventListener('paste', event => {
+    const files = [...(event.clipboardData?.files || [])];
+    if (!files.length) return;  // ordinary text paste
+    event.preventDefault();
+    uploadAll(files);
+  });
+  const composer = document.querySelector('.composer');
+  composer.addEventListener('dragover', event => {
+    if ([...(event.dataTransfer?.types || [])].includes('Files')) { event.preventDefault(); composer.classList.add('dropping'); }
+  });
+  composer.addEventListener('dragleave', () => composer.classList.remove('dropping'));
+  composer.addEventListener('drop', event => {
+    composer.classList.remove('dropping');
+    const files = [...(event.dataTransfer?.files || [])];
+    if (!files.length) return;
+    event.preventDefault();
+    uploadAll(files);
+  });
   $('branch-name').addEventListener('click', () => $('tab-git').click());
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && currentProject) refreshGit(true);
+    if (document.hidden) return;
+    if (currentProject) refreshGit(true);
+    heartbeat();  // check right away on return instead of waiting out the hidden-window interval
   });
+  window.addEventListener('online', () => heartbeat());
   $('collapse-explorer').addEventListener('click', () => setExplorerVisibility(false));
   $('open-explorer').addEventListener('click', () => setExplorerVisibility(true));
   $('profile-trigger').addEventListener('click', () => {
@@ -1232,6 +1695,12 @@
   // Poll only while this desktop is visible. This is near-live local state,
   // not a remote GitHub watcher or a mutating Git operation.
   setInterval(() => { if (currentProject && !document.hidden) refreshGit(); }, 3000);
+  // Projects without Git get no change signal from the Git snapshot; re-read their open tree.
+  setInterval(() => {
+    if (currentProject && !currentProject.git && !document.hidden && !$('file-panel').hidden) loadTree();
+  }, 8000);
+  // Readiness changes on its own (Ollama stopped, a supervisor signed out): re-check quietly.
+  setInterval(() => { if (!document.hidden && !connectionLost && !activeJob) refreshEngine({quiet: true}); }, 60000);
   if (!token) message('CODING BRAIN', 'Missing local session token. Launch this page using python -m desktop_ui.', 'system');
-  else { renderEmptyExplorer(); refresh(); firstRun(); }
+  else { renderEmptyExplorer(); renderFlow(); refresh(); firstRun(); heartbeat(); }
 })();

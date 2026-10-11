@@ -132,7 +132,10 @@ class FakeMachine:
             self.programs.add("codex")
             return 0, "added 1 package"
         if "-m" in rest and "brain.knowledge" in rest:
-            path = Path((env or {})["BRAIN_KNOWLEDGE_DB"])
+            # Like the real `python -m brain.knowledge`: the library lives under BRAIN_DATA, which
+            # defaults to ./brain-data in the current folder (BRAIN_KNOWLEDGE_DB is not read).
+            path = Path((env or {}).get("BRAIN_DATA") or "brain-data") / "knowledge.sqlite3"
+            path.parent.mkdir(parents=True, exist_ok=True)
             if not self.network:
                 return 1, "network unreachable"
             with sqlite3.connect(path) as db:

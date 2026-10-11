@@ -235,3 +235,26 @@ and `providers.list` over CLI capability probes once the versioned engine API
 is shipped; preserve the honest UI-facing fields and human approvals. The
 Windows acceptance test must cover a real Qwen inference turn, authenticated
 premium supervisors, and recovery after upgrading an older engine.
+
+## Live connection, agent flow and attachments
+
+- **Live connection.** The window sends a cheap `/api/health` heartbeat (no engine start, no probes). When the bridge
+  is unreachable the footer shows *Reconnecting… (attempt n)* with backoff from 1 s to 30 s, and the window resyncs by
+  itself on recovery. A changed bridge `boot` id means the bridge restarted: jobs it no longer knows are closed with a
+  message instead of being polled forever. A changed installed engine version (an update or rollback) re-reads
+  readiness immediately; readiness is also re-checked quietly every minute.
+- **Bridge supervision.** The native shell drains the bridge's output, so it can no longer block on a full pipe, and
+  restarts a crashed bridge on its new address from the engine installed at that moment. Three crashes in two minutes
+  stop the restarts and show the reason.
+- **Agents tab.** Each agent appears under who it belongs to — **Local brain** (Ollama on this PC), **Provider brains**
+  (Claude or Codex subscription CLIs), **Tools** (Docker sandbox, local browser) or **You** — based on the provider the
+  engine reported for that agent, never inferred from its name. The stage list shows the core stages plus any optional
+  stage the engine actually ran, with durations.
+- **Progress.** The percentage is an estimate from the stages the engine has completed. It never moves backward during
+  repairs, and it reaches 100 % only when the task finishes.
+- **Code display.** Fenced code in replies is shown with its language, a Copy button and syntax colours; diffs are
+  coloured by added, removed and hunk lines; file previews have line numbers. All of it is built as text, never as HTML.
+- **Attachments.** Use *Attach* (native picker), paste a screenshot, or drop files on the message box. Pasted and
+  dropped files are staged in `%LOCALAPPDATA%\CodingBrain\desktop\attachments`. Files go to the engine with **Run task** and
+  **New project**; Chat is read-only and refuses attachments instead of dropping them silently. Engines without the
+  `tasks.start.attachments` feature are refused with an update message, and nothing starts.

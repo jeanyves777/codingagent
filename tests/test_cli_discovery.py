@@ -120,3 +120,21 @@ def test_standalone_codex_for_windows_without_npm_or_path(windows, monkeypatch, 
     assert codex["readiness"] == readiness and codex["billing_type"] == "subscription"
     assert all(arguments[0] == launcher for arguments in ran)  # the found launcher, not a PATH lookup
     assert not any("npm" in " ".join(arguments) for arguments in ran)
+
+
+def test_an_untraversable_path_folder_is_skipped_not_fatal(windows, monkeypatch):
+    # A PATH entry behind a junction Windows refuses to traverse (WinError 448, "untrusted mount
+    # point") used to raise out of locate() and crash `install --full` and every later check.
+    blocked = windows["tmp"] / "OpenAI" / "Codex" / "bin"
+    folder = windows["tmp"] / "Programs" / "tools"
+    windows["registry"].extend([str(blocked), str(folder)])
+    expected = place(folder, "tesseract.exe")
+    real = system_module.Path.is_file
+
+    def is_file(self):
+        if blocked in self.parents:
+            raise OSError(448, "The path cannot be traversed because it contains an untrusted mount point")
+        return real(self)
+    monkeypatch.setattr(system_module.Path, "is_file", is_file)
+    assert System().locate("tesseract")[0] == expected
+    assert System().locate("nvidia-smi")[0] is None

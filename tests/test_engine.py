@@ -408,3 +408,30 @@ def test_tool_decision_is_bound_to_the_pending_request(world, monkeypatch):
         engine.call("tasks.tool_decision", {"project_id": pid, "task_id": task["id"], "request_id": "r1",
                                             "decision": "maybe"})
     assert error.value.code == "bad_params"
+
+
+def test_tasks_start_takes_attachments_as_evidence(world, monkeypatch):
+    engine, pid = world["engine"], world["project"]["id"]
+    brain = with_fake_brain(world, monkeypatch)
+    assert "tasks.start.attachments" in engine.call("engine.info")["features"]
+    spec = world["home"] / "Documents" / "spec.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_text("# Spec\nThe calculator must add two numbers.\n", encoding="utf-8")
+    task = engine.call("tasks.start", {"project_id": pid, "goal": "Fix x", "attachments": [str(spec)]})
+    stored = brain.store.get(task["id"])
+    names = [item.get("name") or item.get("origin", "") for item in stored["attachments"]["attachments"]]
+    assert any("spec.md" in str(name) for name in names), stored["attachments"]
+    assert task["status"] == "proposed"  # attachments are evidence for planning; nothing is applied
+
+
+@pytest.mark.parametrize("attachments,code", [
+    ("spec.md", "bad_params"),           # must be a list
+    ([3], "bad_params"),                 # of strings
+    (["/no/such/file.png"], "refused"),  # that exist
+])
+def test_tasks_start_refuses_bad_attachments(world, monkeypatch, attachments, code):
+    engine, pid = world["engine"], world["project"]["id"]
+    with_fake_brain(world, monkeypatch)
+    with pytest.raises(ApiError) as error:
+        engine.call("tasks.start", {"project_id": pid, "goal": "Fix x", "attachments": attachments})
+    assert error.value.code == code

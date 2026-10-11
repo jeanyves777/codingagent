@@ -646,7 +646,10 @@ class Knowledge(Component):
     def install(self, env, status):
         import sys
         manifest = Path(__file__).parent / "assets" / "knowledge.example.json"
-        environment = {**env.system.environ(), "BRAIN_KNOWLEDGE_DB": str(env.layout.data / "knowledge.sqlite3")}
+        # brain.knowledge keeps its library and cache under BRAIN_DATA (default: ./brain-data in the
+        # current folder), so point it at this installation's data folder explicitly.
+        environment = {**env.system.environ(), "BRAIN_DATA": str(env.layout.data),
+                       "BRAIN_KNOWLEDGE_DB": str(env.layout.data / "knowledge.sqlite3")}
         code, output = env.system.run([sys.executable, "-m", "brain.knowledge", "sync", str(manifest)], timeout=3600,
                                       env=environment, on_line=env.progress)
         after = self.check(env)
