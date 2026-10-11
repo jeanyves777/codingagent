@@ -676,6 +676,10 @@ class BrainExecutor:
             progress = db.execute("SELECT MAX(at) FROM journal WHERE task_id=?", (task_id,)).fetchone()[0]
         failures = task.get("failure_log") or []
         failure = failures[-1].get("summary") if failures and isinstance(failures[-1], dict) else None
+        if not failure and task["status"] in FAILED_TASK:  # e.g. blocked by a model timeout: say which
+            stops = [str(event.get("detail") or "") for event in task.get("events", [])[-4:]
+                     if event.get("kind") in {"blocked", "failed", "attempts_exhausted"}]
+            failure = f"{task['status']}: " + "; ".join(filter(None, stops)) if stops else None
         return {"status": task["status"], "digest": task.get("digest"), "progress_at": progress,
                 "failure": failure or task.get("error") or task["status"]}
 

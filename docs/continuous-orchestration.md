@@ -160,6 +160,10 @@ the API nor the desktop can run the backlog: that stays `codingbrain backlog run
 
 ## Limits
 
+- On a CPU, a single model call can take many minutes when several agents share the cores.
+  Calls that exceed `models.timeout` (default 600 s) fail. The item is then retried, and the
+  failure (for example `ReadTimeout`) is passed on as feedback. On a slow machine, raise
+  `models.timeout` in `config.json` (up to 7200).
 - On a CPU, simultaneous generation shares the same cores. More agents help throughput only as
   far as the measurement shows.
 - Verification needs acceptance tests that you write or approve. The conductor does not invent

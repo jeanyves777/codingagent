@@ -15,8 +15,9 @@ BUDGET_KEYS = ("escalate_after", "plan_budget", "diagnose_budget", "decompose_bu
                "daily_limit")
 DEFAULTS = {
     "schema_version": SCHEMA_VERSION,
+    # timeout: seconds one local model call may take (raise it on slow, CPU-only machines).
     "models": {"provider": "ollama", "url": "http://localhost:11434", "model": "", "fast_model": "",
-               "extra_brains": {}},
+               "extra_brains": {}, "timeout": 600},
     "supervisors": {"claude": {"enabled": False, "model": None}, "codex": {"enabled": False, "model": None}},
     "budgets": {"escalate_after": 2, "plan_budget": 1, "diagnose_budget": 1, "decompose_budget": 1,
                 "review_budget": 0, "daily_limit": 20},
@@ -76,6 +77,8 @@ def brains_config(config: dict) -> dict:
         brains["main"]["url"] = models["url"]
     if models.get("api_key_env"):
         brains["main"]["api_key_env"] = models["api_key_env"]
+    if models["provider"] == "ollama" and models.get("timeout") not in (None, 600):
+        brains["main"]["timeout"] = int(models["timeout"])
     roles = {"implementer": ["main"], "reviewer": ["main"], "coordinator": ["main"], "fast": ["main"]}
     if models.get("fast_model") and models["fast_model"] != models["model"]:
         brains["fast"] = {**brains["main"], "model": models["fast_model"]}

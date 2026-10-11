@@ -143,6 +143,7 @@ def main():
     parser.add_argument("--supervisor", choices=["none", "claude", "codex"], default="none")
     parser.add_argument("--accept", action="store_true", help="accept the combined result as the user would")
     parser.add_argument("--minutes", type=float, default=90)
+    parser.add_argument("--timeout", type=int, default=600, help="models.timeout: seconds per local model call")
     parser.add_argument("--report")
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
@@ -157,7 +158,7 @@ def main():
     layout = Layout(root / "home").ensure()
     os.environ["CODINGBRAIN_HOME"] = str(layout.home)
     config = settings.load(layout)
-    config["models"].update(model=args.model, url=args.url)
+    config["models"].update(model=args.model, url=args.url, timeout=args.timeout)
     config["autonomy"]["execution"] = "auto"
     if args.supervisor != "none":
         config["supervisors"][args.supervisor]["enabled"] = True

@@ -181,3 +181,13 @@ def test_items_that_pass_alone_but_break_the_project_together_are_not_combined(w
     assert len(failed) == 1 and "project's own tests failed" in world["backlog"].attempts()[1]["detail"]
     assert {item["title"]: item["state"] for item in status["items"]} == {"alpha": "verified", "beta": "verified"}
     assert len(status["integration"]["included"]) == 2  # the redone beta no longer breaks alpha
+
+
+def test_a_blocked_task_reports_why_so_the_retry_and_the_user_see_it(world):
+    task = world["brain"].submit("demo", "x", launch=False)
+    task["status"] = "blocked"
+    task["events"] += [{"kind": "blocked", "detail": "Workspace, index, or model planning failed"},
+                       {"kind": "blocked", "detail": "ReadTimeout"}]
+    world["brain"].store.save(task)
+    polled = asyncio.run(BrainExecutor(world["brain"], "demo").poll(task["id"]))
+    assert polled["failure"] == "blocked: Workspace, index, or model planning failed; ReadTimeout"
