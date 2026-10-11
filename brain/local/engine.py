@@ -46,6 +46,8 @@ OPERATIONS = {
     "install.plan": ("read", {"profile": ("str", False)}, "each component's state and planned action"),
     "providers.list": ("read", {"deep": ("bool", False)}, "provider descriptors (brain.local.providers)"),
     "projects.list": ("read", {}, "registered projects with task counts"),
+    "models.list": ("read", {}, "the configured provider, URL, model and fast model, and the models the local "
+                                "Ollama server has installed (never downloads anything)"),
     "conversation.send": ("read", {"message": ("str", True), "project_id": ("str", False)},
                           "reply, intent, and a proposed action to confirm (never executed here)"),
     "conversation.history": ("read", {"project_id": ("str", False), "limit": ("int", False)}, "recent turns"),
@@ -79,6 +81,9 @@ OPERATIONS = {
                     "starts an interrupted, failed, blocked or cancelled task again in a fresh workspace from "
                     "the current base, as `codingbrain resume` does; returns the new proposal and its digest "
                     "(nothing is applied)"),
+    "models.set": ("action", {"model": ("str", True), "fast_model": ("str", False)},
+                   "uses an installed model (and optional fast model) for new work; refused while a task is "
+                   "running or when Ollama does not have the model (pulling it is the user's step)"),
     "backlog.add": ("action", {"project_id": ("str", True), "goal": ("str", True), "title": ("str", False),
                                "priority": ("str", False), "depends_on": ("list[str]", False),
                                "accept_files": ("list[str]", False), "accept_nodes": ("list[str]", False),
@@ -231,6 +236,52 @@ class Engine:
     def op_projects_list(self):
         from .assistant import registry
         return registry(self.layout)
+
+    def _installed_models(self, models: dict):
+        """The names the configured Ollama server has installed, or None with the reason."""
+        if models.get("provider", "ollama") != "ollama":
+            return None, "the provider is not Ollama: its models are not listed"
+        try:
+            import httpx
+            response = httpx.get(str(models.get("url") or "").rstrip("/") + "/api/tags", timeout=5, trust_env=False)
+            response.raise_for_status()
+            return sorted(item["name"] for item in response.json().get("models", [])), None
+        except Exception as error:
+            return None, f"Ollama is not reachable at {models.get('url')}: {type(error).__name__}"
+
+    def op_models_list(self):
+        models = settings.load(self.layout)["models"]
+        installed, problem = self._installed_models(models)
+        return {"provider": models.get("provider"), "url": models.get("url"), "model": models.get("model"),
+                "fast_model": models.get("fast_model"), "installed": installed, "problem": problem}
+
+    def op_models_set(self, model: str, fast_model: str | None = None):
+        config = settings.load(self.layout)
+        models = config["models"]
+        wanted = [name for name in (model, fast_model) if name]
+        if any(not name.strip() or len(name) > 200 for name in wanted):
+            raise ApiError("bad_params", "model names must be non-empty and at most 200 characters")
+        installed, problem = self._installed_models(models)
+        if models.get("provider", "ollama") == "ollama":
+            if installed is None:
+                raise ApiError("refused", problem)
+            names = set(installed) | {name.removesuffix(":latest") for name in installed}
+            missing = [name for name in wanted if name not in names]
+            if missing:
+                raise ApiError("refused", f"Ollama does not have {', '.join(missing)}; install it first "
+                                          f"(ollama pull {missing[0]}) and try again")
+        busy = [project_id for project_id, context in self.contexts.items()
+                if context._brain is not None and context._brain.jobs]
+        if busy:
+            raise ApiError("refused", "a task is running; change the model when it has finished or stopped")
+        models["model"] = model
+        if fast_model is not None:
+            models["fast_model"] = fast_model
+        settings.save(self.layout, config)
+        # Services read the model when they are built: the next call builds them with the new one.
+        self.contexts = {}
+        self._assistant = None
+        return self.op_models_list()
 
     def assistant(self):
         if self._assistant is None:

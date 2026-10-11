@@ -59,6 +59,7 @@ The same operations are available in-process as `brain.local.engine.Engine(...).
 | `projects.list` | the project registry, with task counts |
 | `conversation.send {message, project_id}` | `reply`, `intent`, and a proposed `action` with `needs` (`confirmation`, `clarification` or `choose_project` plus `options`). **Nothing is executed.** |
 | `conversation.history {project_id, limit}` | recent turns, global ones plus that project's only |
+| `models.list` | `{provider, url, model, fast_model, installed, problem}`: the configured model and, for Ollama, the names its server has installed (`installed` is `null` with a `problem` when it is unreachable or the provider is not Ollama). Never downloads anything. |
 | `tasks.list {project_id}`, `tasks.get {project_id, task_id}` | task summaries |
 | `tasks.events {project_id, task_id, after_seq}` | journal events after a sequence number |
 | `backlog.status {project_id, max_agents}` | the [continuous-orchestration](continuous-orchestration.md) backlog, exactly as `codingbrain backlog status --json` prints it (see below). Never starts the Brain service or a run, and never creates a backlog. |
@@ -77,6 +78,7 @@ The same operations are available in-process as `brain.local.engine.Engine(...).
 | `tasks.stop {project_id, task_id}` | Requests cancellation; returns at once. A running task stops at its next safe boundary. |
 | `tasks.resume {project_id, task_id}` | Continues an unfinished task. |
 | `tasks.retry {project_id, task_id}` | Starts an interrupted, failed, blocked or cancelled task again, as `codingbrain resume` does. A task that was running when the engine stopped is reported `blocked` ("retry is required") after a restart. Retrying it builds a fresh worktree from the current base and plans the goal again, and returns the **new** proposal and digest. Nothing is applied until `tasks.approve` with that digest, and the proposal from before the restart cannot be replayed. Any other state is `refused`. |
+| `models.set {model, fast_model}` | Uses `model` (and `fast_model`; `""` clears it) for new work, saved in the configuration as `codingbrain setup --model` does. With Ollama, both must be installed already: a missing model is `refused` with the `ollama pull` command to run, because downloading gigabytes is the user's step. Also `refused` while a task is running, so a task never changes model midway. Returns `models.list`. |
 | `backlog.add {project_id, goal, title, priority, depends_on, accept_files, accept_nodes, criteria, max_attempts}` | Adds a backlog item with the same checks as `codingbrain backlog add`: `accept_files` must be files inside the project and are frozen (read) now; every `accept_nodes` entry must name a test in them; `depends_on` takes item ids or unique prefixes; `priority` is `P0` to `P3` (default `P1`). Returns the item (`id`, `title`, `priority`, `state`, `attempts`, `reason`, `depends_on`, `acceptance` with file names, nodes and criteria, or `null`). **Nothing is started.** |
 
 The backlog is worked only by `codingbrain backlog run`, in a terminal the user started; the API
