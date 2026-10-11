@@ -21,7 +21,7 @@ def sandbox(tmp_path):
     (root / ".env").write_text("SECRET_TOKEN=must-not-leak")
     (root / ".env.development").write_text("ANOTHER_SECRET=hidden")
     (root / "tls.key").write_text("SECRET_PRIVATE_KEY")
-    (root / "big.txt").write_text("x" * 129000)
+    (root / "big.txt").write_text("x" * 1_000_001)  # over the editor limit (1 MB)
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "add", "hello.py"], check=True)
     subprocess.run(["git", "-C", str(root), "-c", "user.email=ui@example.test", "-c", "user.name=UI Test", "commit", "-qm", "init"], check=True)

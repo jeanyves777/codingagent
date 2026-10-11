@@ -32,6 +32,8 @@
   let heartbeatFailures = 0;
   let heartbeatTimer = null;
   let attachments = [];
+  let streaming = null;
+  let chatStep = '';  // the latest step the engine reported for this chat turn  // the reply bubble being written live: {content, copy, text}
   // The task's stages and agents, rebuilt only from the engine's structured events.
   let flow = {kind: null, stages: {}, agents: {}, progress: 0, current: null, status: null};
   const busyButtons = new WeakMap();
@@ -101,6 +103,16 @@
     const dots = document.createElement('span'); dots.className = 'typing-dots'; dots.setAttribute('aria-hidden','true');
     for (let index=0;index<3;index++) dots.append(document.createElement('span'));
     bubble.append(dots);
+  }
+
+  // The "Thinking" bubble names the step the engine reports (understanding, reading, writing).
+  function typingStep(text) {
+    if (!typingRow) showTyping();
+    const content = typingRow.querySelector('.message-content');
+    const dots = content.querySelector('.typing-dots');
+    chatStep = text;
+    content.replaceChildren(text + '…', ...(dots ? [dots] : []));
+    $('status-label').textContent = text + '…';
   }
 
   function hideTyping() {
@@ -359,7 +371,7 @@
       copy.title = 'Copy message';
       copy.setAttribute('aria-label','Copy message');
       copy.addEventListener('click', async () => {
-        try { await navigator.clipboard.writeText(text); copy.textContent = '✓'; }
+        try { await navigator.clipboard.writeText(copy.dataset.text ?? text); copy.textContent = '✓'; }
         catch { toast('Copy unavailable'); }
       });
       actions.append(copy);
@@ -479,6 +491,7 @@
     if (signature === gitLastSignature) return;
     // Files changed on disk (by a task, an editor or a checkout): refresh the open file tree too.
     if (gitLastSignature && !$('file-panel').hidden) loadTree();
+    if (gitLastSignature) refreshOpenTabs();
     gitLastSignature = signature;
     $('git-current-branch').textContent = snapshot.branch || 'Unknown branch';
     $('git-current-head').textContent = snapshot.head ?
@@ -627,6 +640,7 @@
     if (entry.dir) container.append(children);
     row.addEventListener('click', async () => {
       if (!entry.dir) {
+        if (await openInEditor(entry.path)) return;
         try {
           const file = await api('/api/file?path=' + encodeURIComponent(entry.path));
           $('preview-name').textContent = file.path;
@@ -744,6 +758,11 @@
       const diff = codeBlock(details.diff, 'diff', {title: 'Proposed changes'});
       diff.classList.add('proposal-diff');
       reveal.append(summary, diff);
+      const side = document.createElement('button');
+      side.type = 'button'; side.className = 'secondary-button review-side';
+      side.textContent = 'Review side by side';
+      side.addEventListener('click', () => openDiff(jobId));
+      box.append(side);
       box.append(reveal);
     }
     const buttons = document.createElement('div');
@@ -907,6 +926,31 @@
     }
   }
 
+  // ---- Streaming replies: shown as plain text while the model writes, then replaced by the
+  // formatted final reply (code blocks and all). Text only; never parsed as HTML.
+  function streamDelta(piece) {
+    hideTyping();
+    if (!streaming) {
+      const bubble = message('CODING BRAIN', '', 'assistant');
+      bubble.closest('.message').classList.add('streaming');
+      streaming = {content: bubble.querySelector('.message-content'), copy: bubble.querySelector('.message-copy'), text: ''};
+    }
+    streaming.text += piece;
+    streaming.content.textContent = streaming.text;
+    $('thread').scrollTop = $('thread').scrollHeight;
+  }
+
+  function finishStream(finalText) {
+    const done = streaming;
+    streaming = null;
+    if (!done) return;
+    const text = finalText || done.text;
+    done.content.replaceChildren();
+    if (text.includes('`')) richText(done.content, text); else done.content.textContent = text;
+    if (done.copy) done.copy.dataset.text = text;
+    done.content.closest('.message')?.classList.remove('streaming');
+  }
+
   function tickTime() {
     if (activeJob && startedAt) {
       const seconds = Math.floor(Date.now() / 1000 - startedAt);
@@ -928,10 +972,16 @@
         cursor = Math.max(cursor, event.seq);
         if (displayedEvents.has(event.seq)) continue;
         displayedEvents.add(event.seq);
+        if (event.kind === 'delta') { streamDelta(event.message); continue; }  // not an activity line
+        if (event.kind === 'step') typingStep(event.message);
         activityEntry(event);
         flowEvent(event);
         if (event.kind === 'approval') approval(job.id, job.approval || {summary: event.message});
-        if (event.kind === 'output') { hideTyping(); message(job.kind === 'chat' ? 'CODING BRAIN' : 'CODING BRAIN · ACTIVITY', event.message, 'assistant'); }
+        if (event.kind === 'output') {
+          hideTyping();
+          if (streaming && job.kind === 'chat') finishStream(event.message);
+          else message(job.kind === 'chat' ? 'CODING BRAIN' : 'CODING BRAIN · ACTIVITY', event.message, 'assistant');
+        }
         if (event.kind === 'error') { hideTyping(); message('CODING BRAIN · ERROR', event.message, 'system'); }
       }
       const running = ['starting','running','approval_required'].includes(job.status);
@@ -939,11 +989,12 @@
       busySend(running);
       const stage = flow.current && STAGES[STAGE_INDEX[flow.current]];
       $('status-label').textContent = job.status === 'approval_required' ? 'Awaiting your approval' :
-        stage ? `${stage[1]}…` : job.kind === 'chat' ? 'Coding Brain is replying…' : 'Starting — waiting for the first engine event';
+        stage ? `${stage[1]}…` : job.kind === 'chat' ? (chatStep ? chatStep + '…' : 'Coding Brain is replying…') : 'Starting — waiting for the first engine event';
       $('footer-status').textContent = job.kind === 'chat' && engineInfo?.chat_available === false ?
         'Engine update required for chat' : `Task ${job.status}`;
       tickTime();
       if (!running) {
+        if (streaming) finishStream(streaming.text);  // the reply ended without a final copy
         finishFlow(job);
         if (pollTimer) clearInterval(pollTimer);
         pollTimer = null;
@@ -1079,12 +1130,13 @@
       const job = await api('/api/start', 'POST', {message: text, mode, attachments: attachments.map(item => item.path)});
       attachments = []; renderAttachments();
       resetFlow(job.kind);
+      chatStep = '';
       activeJob = job.id;
       cursor = 0;
       displayedEvents = new Set();
       startedAt = job.started;
       await poll();
-      if (activeJob && !pollTimer) pollTimer = setInterval(poll, 750);
+      if (activeJob && !pollTimer) pollTimer = setInterval(poll, job.kind === 'chat' ? 300 : 750);
     } catch(e) {
       hideTyping();
       message('CODING BRAIN · CONNECTION', e.message, 'system');
@@ -1155,6 +1207,251 @@
     });
   }
   $('git-refresh').addEventListener('click', () => refreshGit(true));
+
+  // ---- Code editor: Monaco (the editor inside VS Code), bundled with the desktop and loaded on first
+  // use. Files open read-only; Edit unlocks a file, and Save writes it only if it is still the version
+  // that was opened (the bridge checks its SHA-256). Without Monaco the read-only preview is used.
+  let monacoLoad = null;
+  let editor = null;          // the code editor
+  let diffEditor = null;      // the side-by-side proposal view
+  const tabs = new Map();     // path -> {model, sha256, dirty, editing, view}
+  let activeTab = null;
+
+  function loadMonaco() {
+    if (window.monaco) return Promise.resolve(window.monaco);
+    if (monacoLoad) return monacoLoad;
+    monacoLoad = new Promise((resolve, reject) => {
+      // Workers load from the bundled file itself: the page's CSP (worker-src 'self') refuses blob: workers.
+      window.MonacoEnvironment = {getWorkerUrl: () => '/vendor/monaco/vs/base/worker/workerMain.js'};
+      const script = document.createElement('script');
+      script.src = '/vendor/monaco/vs/loader.js';
+      script.onerror = () => reject(new Error('Editor files are not bundled in this build'));
+      script.onload = () => {
+        window.require.config({paths: {vs: '/vendor/monaco/vs'}});
+        window.require(['vs/editor/editor.main'], () => {
+          window.monaco.editor.defineTheme('codingbrain', {base: 'vs-dark', inherit: true, rules: [], colors: {
+            'editor.background': '#141b1c', 'editorGutter.background': '#141b1c', 'editor.lineHighlightBackground': '#1c2627'}});
+          resolve(window.monaco);
+        }, reject);
+      };
+      document.head.append(script);
+    }).catch(error => { monacoLoad = null; throw error; });
+    return monacoLoad;
+  }
+
+  function showEditor(show) {
+    $('editor-area').hidden = !show;
+    document.querySelector('.conversation').classList.toggle('editing', show);
+    if (show) setTimeout(() => (diffEditor || editor)?.layout(), 0);
+  }
+
+  function editorState(text, tone = '') {
+    $('editor-state').textContent = text;
+    $('editor-state').className = 'editor-state' + (tone ? ' ' + tone : '');
+  }
+
+  function renderTabs() {
+    const strip = $('editor-tabs');
+    strip.replaceChildren();
+    const chat = document.createElement('button');
+    chat.type = 'button'; chat.className = 'editor-tab'; chat.textContent = '◆ Chat';
+    chat.addEventListener('click', () => showEditor(false));
+    strip.append(chat);
+    for (const [path, tab] of tabs) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.setAttribute('role', 'tab');
+      button.className = 'editor-tab' + (path === activeTab ? ' active' : '');
+      button.setAttribute('aria-selected', String(path === activeTab));
+      button.title = path;
+      const name = document.createElement('span'); name.textContent = path.split('/').pop();
+      button.append(name);
+      if (tab.dirty) { const dot = document.createElement('span'); dot.className = 'dirty'; dot.textContent = '●'; button.append(dot); }
+      const close = document.createElement('span');
+      close.className = 'tab-close'; close.textContent = '×'; close.setAttribute('aria-label', 'Close ' + path);
+      close.addEventListener('click', event => { event.stopPropagation(); closeTab(path); });
+      button.append(close);
+      button.addEventListener('click', () => activate(path));
+      strip.append(button);
+    }
+  }
+
+  function updateToolbar() {
+    const tab = activeTab && tabs.get(activeTab);
+    const diffing = Boolean(diffEditor);
+    $('editor-path').textContent = diffing ? 'Proposed changes (read-only)' : activeTab || '';
+    $('editor-edit').hidden = diffing || !tab;
+    $('editor-save').hidden = diffing || !tab;
+    $('editor-external').hidden = diffing || !tab;
+    $('editor-reload').hidden = diffing || !tab?.conflict;
+    if (!tab || diffing) return;
+    $('editor-edit').textContent = tab.editing ? 'Stop editing' : 'Edit';
+    $('editor-save').disabled = !tab.dirty;
+    if (!tab.conflict) editorState(tab.dirty ? 'Unsaved changes' : tab.editing ? 'Editing' : 'Read-only', tab.dirty ? 'warn' : '');
+    $('editor-reload').hidden = !tab.conflict;
+  }
+
+  function ensureEditor(monaco) {
+    if (diffEditor) { diffEditor.dispose(); diffEditor = null; $('diff-files').hidden = true; }
+    if (editor) return editor;
+    $('editor-host').replaceChildren();
+    editor = monaco.editor.create($('editor-host'), {theme: 'codingbrain', automaticLayout: true, readOnly: true,
+      fontFamily: '"Cascadia Code", Consolas, monospace', fontSize: 13, minimap: {enabled: true},
+      scrollBeyondLastLine: false, renderWhitespace: 'selection'});
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveActive());
+    return editor;
+  }
+
+  function activate(path) {
+    const tab = tabs.get(path);
+    if (!tab || !window.monaco) return;
+    const current = activeTab && tabs.get(activeTab);
+    if (current && editor && !diffEditor) current.view = editor.saveViewState();
+    ensureEditor(window.monaco);
+    activeTab = path;
+    editor.setModel(tab.model);
+    editor.updateOptions({readOnly: !tab.editing});
+    if (tab.view) editor.restoreViewState(tab.view);
+    showEditor(true);
+    renderTabs(); updateToolbar();
+    editor.focus();
+  }
+
+  async function openInEditor(path) {
+    let monaco;
+    try { monaco = await loadMonaco(); } catch { return false; }  // use the read-only preview instead
+    if (tabs.has(path)) { activate(path); return true; }
+    try {
+      const file = await api('/api/file?path=' + encodeURIComponent(path));
+      const uri = monaco.Uri.from({scheme: 'file', path: '/' + path});
+      const model = monaco.editor.getModel(uri) || monaco.editor.createModel(file.content, undefined, uri);
+      const tab = {model, sha256: file.sha256, dirty: false, editing: false, view: null, conflict: false, saved: file.content};
+      model.onDidChangeContent(() => {
+        const dirty = model.getValue() !== tab.saved;
+        if (dirty !== tab.dirty) { tab.dirty = dirty; renderTabs(); }
+        updateToolbar();
+      });
+      tabs.set(path, tab);
+      activate(path);
+    } catch (e) { toast(e.message); }
+    return true;
+  }
+
+  async function closeTab(path) {
+    const tab = tabs.get(path);
+    if (!tab) return;
+    if (tab.dirty && !await confirmAction('Discard unsaved changes?', `${path} has edits that were not saved.`, 'Discard', true)) return;
+    tab.model.dispose();
+    tabs.delete(path);
+    if (activeTab === path) {
+      activeTab = null;
+      const next = [...tabs.keys()].pop();
+      if (next) activate(next); else { editor?.setModel(null); showEditor(false); }
+    }
+    renderTabs(); updateToolbar();
+  }
+
+  async function saveActive() {
+    const path = activeTab, tab = path && tabs.get(path);
+    if (!tab || !tab.dirty || tab.saving) return;
+    tab.saving = true;
+    busyButton($('editor-save'), true);
+    const content = tab.model.getValue();
+    try {
+      const saved = await api('/api/file', 'POST', {path, content, sha256: tab.sha256});
+      tab.sha256 = saved.sha256; tab.saved = content; tab.dirty = false; tab.conflict = false;
+      editorState('Saved ' + new Date().toLocaleTimeString([], {hour: 'numeric', minute: '2-digit', second: '2-digit'}));
+      renderTabs();
+      refreshGit(true);
+    } catch (e) {
+      if (e.status === 409) { tab.conflict = true; editorState(e.message, 'error'); }
+      else { editorState(e.message, 'error'); toast(e.message); }
+    } finally {
+      tab.saving = false;
+      busyButton($('editor-save'), false);
+      updateToolbar();
+    }
+  }
+
+  async function reloadActive() {
+    const path = activeTab, tab = path && tabs.get(path);
+    if (!tab) return;
+    if (tab.dirty && !await confirmAction('Reload from disk?', 'Your unsaved edits in this file will be replaced by the version on disk.', 'Reload', true)) return;
+    try {
+      const file = await api('/api/file?path=' + encodeURIComponent(path));
+      tab.saved = file.content; tab.sha256 = file.sha256; tab.conflict = false;
+      tab.model.setValue(file.content);
+      tab.dirty = false; renderTabs(); updateToolbar();
+    } catch (e) { toast(e.message); }
+  }
+
+  // Files changed on disk (a task, a checkout, another editor): unmodified open tabs follow along.
+  async function refreshOpenTabs() {
+    for (const [path, tab] of tabs) {
+      if (tab.dirty || tab.editing) continue;
+      try {
+        const file = await api('/api/file?path=' + encodeURIComponent(path));
+        if (file.sha256 !== tab.sha256) { tab.saved = file.content; tab.sha256 = file.sha256; tab.model.setValue(file.content); tab.dirty = false; }
+      } catch { /* deleted or no longer readable: leave the tab as it is */ }
+    }
+  }
+
+  async function openDiff(jobId) {
+    let monaco;
+    try { monaco = await loadMonaco(); } catch (e) { toast(e.message); return; }
+    let files;
+    try { files = (await api(`/api/jobs/${jobId}/diff`)).files; } catch (e) { toast(e.message); return; }
+    if (!files.length) { toast('No file changes in this proposal'); return; }
+    if (editor && activeTab) tabs.get(activeTab).view = editor.saveViewState();
+    if (editor) { editor.dispose(); editor = null; }
+    if (diffEditor) diffEditor.dispose();
+    $('editor-host').replaceChildren();
+    diffEditor = monaco.editor.createDiffEditor($('editor-host'), {theme: 'codingbrain', automaticLayout: true, readOnly: true,
+      originalEditable: false, renderSideBySide: true, fontFamily: '"Cascadia Code", Consolas, monospace', fontSize: 13});
+    const list = $('diff-files');
+    list.replaceChildren(); list.hidden = false;
+    const models = [];
+    const show = (file, button) => {
+      for (const item of list.querySelectorAll('.diff-entry')) item.classList.toggle('active', item === button);
+      const language = monaco.languages.getLanguages().find(l => (l.extensions || []).some(ext => file.path.endsWith(ext)))?.id;
+      const original = monaco.editor.createModel(file.original, language);
+      const modified = monaco.editor.createModel(file.modified, language);
+      models.push(original, modified);
+      diffEditor.setModel({original, modified});
+      editorState(file.exact ? `${file.status} · full file` : `${file.status} · changed regions only (the file on disk differs from the proposal's base)`, file.exact ? '' : 'warn');
+    };
+    files.forEach((file, index) => {
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = 'diff-entry'; button.title = file.path;
+      const badge = document.createElement('span'); badge.className = 'badge ' + file.status; badge.textContent = file.status[0].toUpperCase();
+      const name = document.createElement('span'); name.className = 'name'; name.textContent = file.path;
+      button.append(badge, name);
+      button.addEventListener('click', () => show(file, button));
+      list.append(button);
+      if (index === 0) show(file, button);
+    });
+    diffEditor.onDidDispose(() => models.forEach(model => model.dispose()));
+    activeTab = null;
+    showEditor(true); renderTabs(); updateToolbar();
+  }
+
+  $('editor-edit').addEventListener('click', () => {
+    const tab = activeTab && tabs.get(activeTab);
+    if (!tab || !editor) return;
+    tab.editing = !tab.editing;
+    editor.updateOptions({readOnly: !tab.editing});
+    if (tab.editing) editor.focus();
+    updateToolbar();
+  });
+  $('editor-save').addEventListener('click', saveActive);
+  $('editor-reload').addEventListener('click', reloadActive);
+  $('editor-external').addEventListener('click', async () => {
+    if (!activeTab) return;
+    try { const result = await api('/api/file/open-external', 'POST', {path: activeTab}); toast(result.opened === 'vscode' ? 'Opened in VS Code' : 'Opened in the default app'); }
+    catch (e) { toast(e.message); }
+  });
+  window.addEventListener('beforeunload', event => {
+    if ([...tabs.values()].some(tab => tab.dirty)) { event.preventDefault(); event.returnValue = ''; }
+  });
 
   // ---- Attachments: chosen with the native picker, or pasted / dropped and staged privately by the
   // bridge. Only paths travel to the engine, which re-checks and parses each file in isolation.

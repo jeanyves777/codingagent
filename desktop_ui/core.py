@@ -290,7 +290,12 @@ def chat(job):
             for item in client.call("projects.list", {}, None, 60):
                 if Path(item["root"]).resolve() == selected:
                     params["project_id"] = item["id"]
-        answer = client.call("conversation.send", params, None, 300)
+        def streamed(event):  # engines with conversation.stream send steps, then the reply as it is written
+            if event.get("event_type") == "reply_delta" and event.get("text"):
+                job.emit("delta", str(event["text"])[:4000])
+            elif event.get("event_type") == "reply_step" and event.get("text"):
+                job.emit("step", str(event["text"])[:300])
+        answer = client.call("conversation.send", params, streamed, 300)
         if answer.get("reply"):
             job.emit("output", answer["reply"])
         action = answer.get("action")

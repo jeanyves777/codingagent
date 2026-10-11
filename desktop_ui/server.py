@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import json
 import os
 import shutil
@@ -29,6 +30,7 @@ ASSETS = Path(__file__).with_name("static")
 IGNORED = {".git", ".venv", "venv", "node_modules", "__pycache__", ".next", "dist", "build", ".idea", ".vscode"}
 SENSITIVE = {".env", ".env.local", ".env.production", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", "credentials.json", "secrets.json"}
 MAX_PREVIEW_BYTES = 128_000
+MAX_EDIT_BYTES = 1_000_000  # the editor opens and saves text files up to this size
 MAX_ENTRIES = 350
 # Attachments mirror the engine's own limits (brain.attachments.LIMITS); the engine re-checks every file.
 MAX_ATTACHMENTS = 10
@@ -54,6 +56,16 @@ class StartRequest(BaseModel):
     attachments: list[str] = Field(default_factory=list, max_length=MAX_ATTACHMENTS)
 
 
+class SaveFile(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+    content: str = Field(max_length=MAX_EDIT_BYTES)
+    sha256: str = Field(min_length=64, max_length=64)  # the version the editor opened
+
+
+class OpenFile(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+
+
 class ConfirmAction(BaseModel):
     confirmed: bool = False
 
@@ -69,6 +81,10 @@ class ProviderSetting(BaseModel):
 class Decision(BaseModel):
     allow: bool
     approval_id: str | None = None
+
+
+class FileChangedError(ValueError):
+    pass
 
 
 class Job:
@@ -526,8 +542,8 @@ class Workspace:
 
     def preview(self, relative: str) -> dict:
         path = self.resolve_read(relative)
-        if not path.is_file() or path.stat().st_size > MAX_PREVIEW_BYTES:
-            raise ValueError("Preview limited to text files smaller than 128 KB")
+        if not path.is_file() or path.stat().st_size > MAX_EDIT_BYTES:
+            raise ValueError("The editor opens text files up to 1 MB")
         raw = path.read_bytes()
         if b"\0" in raw:
             raise ValueError("Binary files cannot be previewed")
@@ -535,7 +551,73 @@ class Workspace:
             content = raw.decode("utf-8")
         except UnicodeDecodeError:
             raise ValueError("Preview supports UTF-8 text only") from None
-        return {"path": relative, "content": content, "bytes": len(raw)}
+        return {"path": relative, "content": content, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+    def save(self, relative: str, content: str, expected_sha256: str) -> dict:
+        """Write an existing text file of the selected project from the editor. Same path rules as
+        reading (no links, secrets or ignored folders; inside the project), the file must still be the
+        version the editor opened, and the write is atomic."""
+        path = self.resolve_read(relative)
+        if not path.is_file():
+            raise ValueError("Only existing files can be saved from the editor")
+        current = path.read_bytes()
+        if b"\0" in current:
+            raise ValueError("Binary files cannot be edited")
+        if hashlib.sha256(current).hexdigest() != expected_sha256:
+            raise FileChangedError("This file changed on disk after you opened it. Reload it, then reapply your edit.")
+        data = content.encode("utf-8")
+        if len(data) > MAX_EDIT_BYTES:
+            raise ValueError("The editor saves text files up to 1 MB")
+        staging = path.with_name(f".{path.name}.codingbrain-{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            staging.write_bytes(data)
+            os.replace(staging, path)
+        finally:
+            staging.unlink(missing_ok=True)
+        return {"path": relative, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+    def open_external(self, relative: str) -> dict:
+        """Open a project file in VS Code when it is installed, else in the default application."""
+        path = self.resolve_read(relative)
+        code = shutil.which("code")
+        if code and os.name == "nt":
+            # code.cmd sits in <VS Code>\bin; start Code.exe itself so no shell parses the path.
+            exe = Path(code).resolve().parent.parent / "Code.exe"
+            if exe.is_file():
+                subprocess.Popen([str(exe), "--goto", str(path)], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return {"opened": "vscode"}
+        elif code:
+            subprocess.Popen([code, "--goto", str(path)], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return {"opened": "vscode"}
+        if os.name == "nt":
+            os.startfile(str(path))  # noqa: S606 - a validated project file, default handler
+            return {"opened": "default"}
+        raise ValueError("VS Code was not found")
+
+    def job_diff(self, job_id: str) -> list[dict]:
+        """Side-by-side views of the proposal waiting for approval (display only)."""
+        from .diffview import views
+        job = self.jobs[job_id]
+        diff = (job.pending_payload or {}).get("diff") or ""
+        if not diff:
+            raise ValueError("No proposed changes to show")
+        root = Path(job.project) if job.project else None
+
+        def allowed(relative: str) -> bool:
+            if not root:
+                return False
+            parts = Path(relative).parts
+            if Path(relative).is_absolute() or ".." in parts or any(part in IGNORED or sensitive_name(part) for part in parts):
+                return False
+            current = root
+            for part in parts:
+                current = current / part
+                if current.is_symlink() or (hasattr(current, "is_junction") and current.is_junction()):
+                    return False
+            return True
+        return views(diff, root, allowed)
 
     def _staging(self) -> Path:
         """Where pasted or dropped files wait for the task. Never inside the engine's home: the engine
@@ -774,12 +856,25 @@ def create_app(state: Workspace | None = None) -> FastAPI:
     def index():
         response = FileResponse(ASSETS / "index.html")
         response.headers["Cache-Control"] = "no-store"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        response.headers["Content-Security-Policy"] = ("default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
+                                                       "worker-src 'self'; font-src 'self' data:; img-src 'self' data:; connect-src 'self'; "
+                                                       "object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
         return response
 
     @app.get("/app.css")
     def css():
         return FileResponse(ASSETS / "app.css", media_type="text/css")
+
+    @app.get("/vendor/{asset:path}")
+    def vendor(asset: str):
+        """Bundled third-party editor files (Monaco), fetched at build time with a pinned checksum."""
+        base = (ASSETS / "vendor").resolve()
+        target = (base / asset).resolve()
+        if not target.is_relative_to(base) or not target.is_file():
+            raise HTTPException(404, "Not found")
+        response = FileResponse(target)
+        response.headers["Cache-Control"] = "public, max-age=86400"
+        return response
 
     @app.get("/app.js")
     def js():
@@ -912,6 +1007,31 @@ def create_app(state: Workspace | None = None) -> FastAPI:
             return {"entries": state.tree(path)}
         except (ValueError, OSError) as e:
             raise HTTPException(400, str(e)) from e
+
+    @app.post("/api/file", dependencies=[Depends(auth)])
+    def save_file(body: SaveFile):
+        try:
+            return state.save(body.path, body.content, body.sha256)
+        except FileChangedError as e:
+            raise HTTPException(409, str(e)) from e
+        except (ValueError, OSError) as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.post("/api/file/open-external", dependencies=[Depends(auth)])
+    def open_external(body: OpenFile):
+        try:
+            return state.open_external(body.path)
+        except (ValueError, OSError) as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.get("/api/jobs/{job_id}/diff", dependencies=[Depends(auth)])
+    def job_diff(job_id: str):
+        try:
+            return {"files": state.job_diff(job_id)}
+        except KeyError:
+            raise HTTPException(404, "Unknown task")
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
 
     @app.get("/api/file", dependencies=[Depends(auth)])
     def file(path: str):

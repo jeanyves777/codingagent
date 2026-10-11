@@ -9,3 +9,4 @@ verified-learning.jsonl
 brains.json
 *.egg-info/
 gauntlet-runs/
+desktop_ui/static/vendor/

@@ -435,3 +435,53 @@ def test_tasks_start_refuses_bad_attachments(world, monkeypatch, attachments, co
     with pytest.raises(ApiError) as error:
         engine.call("tasks.start", {"project_id": pid, "goal": "Fix x", "attachments": attachments})
     assert error.value.code == code
+
+
+def test_local_model_streams_pieces_and_returns_the_full_reply(monkeypatch):
+    import contextlib
+    import json as _json
+    from brain.local.assistant import LocalModel
+    lines = [_json.dumps({"message": {"content": piece}, "done": False}) for piece in ("Hel", "lo", " there")]
+    lines.append(_json.dumps({"message": {"content": ""}, "done": True}))
+    sent = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def iter_lines(self):
+            return iter(lines)
+
+    @contextlib.contextmanager
+    def stream(method, url, json=None, **kwargs):
+        sent.update(json)
+        yield Response()
+
+    monkeypatch.setattr("httpx.stream", stream)
+    model = LocalModel({"models": {"url": "http://127.0.0.1:11434", "model": "m"}})
+    pieces = []
+    assert model.chat([{"role": "user", "content": "hi"}], on_token=pieces.append) == "Hello there"
+    assert pieces == ["Hel", "lo", " there"] and sent["stream"] is True
+
+
+def test_conversation_send_streams_reply_deltas(world, monkeypatch):
+    engine = world["engine"]
+    assert "conversation.stream" in engine.call("engine.info")["features"]
+    assistant = engine.assistant()
+
+    def chat(messages, schema=None, max_tokens=600, on_token=None):
+        if schema:  # the router: a general question
+            return '{"intent": "question", "goal": "explain decorators", "project": null, "clarification": null}'
+        for piece in ("A decorator ", "wraps a function."):
+            on_token(piece)
+        return "A decorator wraps a function."
+    monkeypatch.setattr(assistant.model, "chat", chat)
+    events = []
+    answer = engine.call("conversation.send", {"message": "what is a python decorator?"}, emit=events.append)
+    assert answer["reply"] == "A decorator wraps a function."
+    assert [event["text"] for event in events if event["event_type"] == "reply_delta"] == ["A decorator ", "wraps a function."]
+    steps = [event["text"] for event in events if event["event_type"] == "reply_step"]
+    assert steps[0] == "Understanding your request" and steps[-1].startswith("Writing the answer")
+    kinds = [event["event_type"] for event in events]
+    assert kinds.index("reply_step") < kinds.index("reply_delta")  # steps come before the answer
+    assert assistant.on_token is None and assistant.on_step is None  # never left attached after the turn
