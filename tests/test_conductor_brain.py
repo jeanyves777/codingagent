@@ -216,3 +216,15 @@ def test_verified_work_is_combined_while_other_agents_are_still_working(world):
     final = world["backlog"].integration()
     assert len(final["included"]) == 2 and final["base"] == early["head"]  # beta added on top, not rebuilt
     assert [record["state"] for record in world["backlog"].integrations()] == ["superseded", "candidate"]
+
+
+def test_restart_and_worker_shutdown_are_interruptions_but_a_requested_cancel_is_not(world):
+    executor = BrainExecutor(world["brain"], "demo")
+    cases = [("blocked", ["stage", "interrupted"], True), ("cancelled", ["stage", "cancelled"], True),
+             ("cancelled", ["cancellation_requested", "cancelled"], False), ("blocked", ["blocked"], False)]
+    for status, kinds, expected in cases:
+        task = world["brain"].submit("demo", "x", launch=False)
+        task["status"] = status
+        task["events"] += [{"kind": kind, "detail": ""} for kind in kinds]
+        world["brain"].store.save(task)
+        assert asyncio.run(executor.poll(task["id"]))["interrupted"] is expected, (status, kinds)

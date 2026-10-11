@@ -517,6 +517,14 @@ class Conductor:
                 self.backlog.update(item["id"], state="awaiting_approval", reason="a protected tool waits for you")
                 actions["waiting"].append(item["id"])
             return
+        if status in FAILED_TASK and task.get("interrupted"):  # not the agent's failure: retry, uncounted
+            self.backlog.end_attempt(attempt["id"], "interrupted")
+            self.progress.pop(attempt["id"], None)
+            self.backlog.update(item["id"], state="ready", attempts=max(0, item["attempts"] - 1),
+                                reason="interrupted by a restart; retried")
+            self.backlog.decide(item["id"], "requeued", "attempt interrupted by a restart; not counted")
+            actions["requeued"].append(item["id"])
+            return
         if status in FAILED_TASK:
             return await self._failed(item, attempt, "failed", task.get("failure") or status, actions)
         # still working: a stall is no new progress for stall_seconds
@@ -687,8 +695,12 @@ class BrainExecutor:
             stops = [str(event.get("detail") or "") for event in task.get("events", [])[-4:]
                      if event.get("kind") in {"blocked", "failed", "attempts_exhausted"}]
             failure = f"{task['status']}: " + "; ".join(filter(None, stops)) if stops else None
+        kinds = [event.get("kind") for event in task.get("events", [])]
+        # stopped by a restart or a worker shutdown, not by anyone's decision or the agent's work
+        interrupted = task["status"] in FAILED_TASK and bool(kinds) and (
+            kinds[-1] == "interrupted" or (task["status"] == "cancelled" and "cancellation_requested" not in kinds))
         return {"status": task["status"], "digest": task.get("digest"), "progress_at": progress,
-                "failure": failure or task.get("error") or task["status"]}
+                "failure": failure or task.get("error") or task["status"], "interrupted": interrupted}
 
     async def approve(self, task_id: str, digest: str):
         self.brain.schedule(task_id, "execute_task", {"digest": digest})

@@ -122,7 +122,8 @@ Everything is stored in the project's data folder (`backlog.sqlite3`): items, at
 ledger, integrations and the scheduler's decisions. The task and backlog databases use SQLite's
 WAL mode, so `backlog status`, the desktop and the engine API read without waiting for the
 agents' writes. Before WAL, a status read was measured waiting up to 11.5 s. Stopping `backlog run` (Ctrl+C) or restarting the computer
-loses nothing. The next run picks up the open attempts where they are.
+loses nothing. The next run picks up the open attempts where they are. An attempt that a restart
+or shutdown interrupted is retried, and it does not count against the item's attempts.
 
 ## From the desktop and other programs
 

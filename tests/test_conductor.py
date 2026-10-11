@@ -53,6 +53,11 @@ class Agents:
             if task["outcome"] != "hang":
                 task["progress_at"] = self.clock()
             needed = 3 if task["outcome"] == "slow" else 1
+            if task["outcome"] == "interrupted":  # a restart stopped it; the next attempt runs the rest
+                task["status"], self.scripts[task["item"]] = "cancelled", self.scripts[task["item"]][1:]
+                self.concurrent -= 1
+                return {"status": "cancelled", "digest": None, "progress_at": task["progress_at"],
+                        "failure": "cancelled", "interrupted": True}
             if task["outcome"] != "hang" and task["ticks"] >= needed:
                 task["status"] = "failed" if task["outcome"] == "fail" else "proposed"
                 if task["status"] == "failed":
@@ -351,3 +356,16 @@ def test_local_slots_follow_memory_and_cores():
 def test_failure_signatures_ignore_numbers_ids_and_paths():
     assert signature("AssertionError at /tmp/a1/x.py:12 got 3") == signature("AssertionError at /tmp/b9/x.py:40 got 7")
     assert signature("TypeError") != signature("KeyError")
+
+
+def test_an_attempt_interrupted_by_a_restart_is_retried_without_using_up_the_item(tmp_path):
+    clock = Clock()
+    backlog = Backlog(tmp_path / "b.sqlite3")
+    item = backlog.add("Create alpha", title="alpha", max_attempts=1, acceptance=ACCEPTANCE)
+    agents = Agents({"alpha": ["interrupted", "pass"]}, clock)
+    conductor = Conductor(backlog, agents, auto_execute=True, resources=Resources(max_local=2), clock=clock)
+    for _ in range(6):
+        asyncio.run(conductor.tick())
+    assert backlog.get(item["id"])["state"] == "verified"  # one allowed attempt, still verified
+    assert [attempt["outcome"] for attempt in backlog.attempts()] == ["interrupted", None]
+    assert backlog.get(item["id"])["attempts"] == 1
