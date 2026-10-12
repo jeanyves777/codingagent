@@ -31,6 +31,7 @@ on:
       - 'tests/test_desktop_editor.py'
       - 'tests/smoke_editor_browser.py'
       - 'tests/smoke_stream_browser.py'
+      - 'tests/smoke_markdown_browser.py'
       - 'tests/smoke_conversation_browser.py'
       - 'tests/smoke_display_browser.py'
       - 'scripts/fetch_monaco.py'
@@ -222,6 +223,10 @@ jobs:
         run: python tests/smoke_live_flow_browser.py
       - name: Verify streamed chat replies with engine steps
         run: python tests/smoke_stream_browser.py
+      - name: Verify styled Markdown in saved and completed chat replies
+        env:
+          CB_DESKTOP_MARKDOWN_SCREENSHOT: ${{ runner.temp }}/CodingBrain-Desktop-Markdown.png
+        run: python tests/smoke_markdown_browser.py
       - name: Verify the project conversation, context bar and directing work from chat
         run: python tests/smoke_conversation_browser.py
       - name: Verify the display library (tables, charts, option cards, sources, actions) and its safety

@@ -319,15 +319,79 @@
     return block;
   }
 
-  function inlineText(parent, text) {
-    const parts = text.split(/(`[^`\n]+`)/g);
-    for (const part of parts) {
-      if (part.length > 2 && part.startsWith('`') && part.endsWith('`')) {
+  function inlineText(parent, text, depth = 0) {
+    if (depth > 6) { parent.append(text); return; }
+    const tokens = /\\[\\`*_[\]()#!>~.-]|`[^`\n]+`|\*\*[^\n]+?\*\*|__[^\n]+?__|~~[^\n]+?~~|\*[^*\n]+?\*|\[[^\]\n]+\]\([^\s)]+\)/g;
+    let last = 0;
+    for (const match of text.matchAll(tokens)) {
+      parent.append(text.slice(last, match.index));
+      const part = match[0];
+      if (part.startsWith('\\')) parent.append(part.slice(1));
+      else if (part.startsWith('`')) {
         const code = document.createElement('code');
-        code.className = 'inline-code';
-        code.textContent = part.slice(1, -1);
-        parent.append(code);
-      } else if (part) parent.append(part);
+        code.className = 'inline-code'; code.textContent = part.slice(1, -1); parent.append(code);
+      } else if (part.startsWith('[')) {
+        const link = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+        const url = safeUrl(link[2]);
+        if (url) {
+          const button = document.createElement('button');
+          button.type = 'button'; button.className = 'ui-link markdown-link'; button.title = url;
+          inlineText(button, link[1], depth + 1);
+          button.addEventListener('click', () => openExternal(url)); parent.append(button);
+        } else parent.append(part);
+      } else {
+        const paired = part.startsWith('**') || part.startsWith('__') || part.startsWith('~~');
+        const node = document.createElement(part.startsWith('~~') ? 'del' : paired ? 'strong' : 'em');
+        inlineText(node, part.slice(paired ? 2 : 1, paired ? -2 : -1), depth + 1); parent.append(node);
+      }
+      last = match.index + part.length;
+    }
+    parent.append(text.slice(last));
+  }
+
+  function markdownText(parent, text) {
+    let paragraph = null;
+    const lists = [];
+    for (const line of text.replace(/\r\n?/g, '\n').split('\n')) {
+      if (!line.trim()) { paragraph = null; continue; }
+      const item = line.match(/^(\s*)([-+*]|\d+[.)])\s+(.+)$/);
+      if (item) {
+        paragraph = null;
+        const indent = item[1].replace(/\t/g, '    ').length, ordered = /^\d/.test(item[2]);
+        while (lists.length && (lists.at(-1).indent > indent ||
+               (lists.at(-1).indent === indent && lists.at(-1).ordered !== ordered))) lists.pop();
+        if (!lists.length || lists.at(-1).indent < indent) {
+          const node = document.createElement(ordered ? 'ol' : 'ul'); node.className = 'markdown-list';
+          if (ordered) node.start = Number.parseInt(item[2], 10);
+          (lists.at(-1)?.lastItem || parent).append(node);
+          lists.push({indent, ordered, node, lastItem: null});
+        }
+        const li = document.createElement('li'); inlineText(li, item[3]);
+        lists.at(-1).node.append(li); lists.at(-1).lastItem = li;
+        continue;
+      }
+      if (lists.length && /^\s{2,}\S/.test(line)) {
+        const li = lists.at(-1).lastItem; li.append(' '); inlineText(li, line.trim()); continue;
+      }
+      lists.length = 0;
+      const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*$/);
+      if (heading) {
+        paragraph = null;
+        const node = document.createElement('h' + Math.min(6, heading[1].length + 2));
+        node.className = 'markdown-heading'; inlineText(node, heading[2]); parent.append(node); continue;
+      }
+      if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+        paragraph = null; parent.append(document.createElement('hr')); continue;
+      }
+      const quote = line.match(/^\s{0,3}>\s?(.*)$/);
+      if (quote) {
+        paragraph = null;
+        const node = document.createElement('blockquote'); inlineText(node, quote[1]); parent.append(node); continue;
+      }
+      if (!paragraph) {
+        paragraph = document.createElement('p'); paragraph.className = 'markdown-paragraph'; parent.append(paragraph);
+      } else paragraph.append('\n');
+      inlineText(paragraph, line);
     }
   }
 
@@ -654,11 +718,11 @@
     const fence = /```([\w+#.-]*)[^\n]*\n?([\s\S]*?)(?:```|$)/g;
     let last = 0;
     for (const match of text.matchAll(fence)) {
-      if (match.index > last) inlineText(parent, text.slice(last, match.index).replace(/\n+$/, '\n'));
+      if (match.index > last) markdownText(parent, text.slice(last, match.index));
       parent.append(match[1] === 'cb-ui' ? uiBlock(match[2]) : codeBlock(match[2], match[1]));
       last = match.index + match[0].length;
     }
-    if (last < text.length) inlineText(parent, text.slice(last).replace(/^\n+/, ''));
+    if (last < text.length) markdownText(parent, text.slice(last));
   }
 
   function message(author, text, variant = 'assistant', at) {
@@ -703,7 +767,7 @@
     }
     const content = document.createElement('div');
     content.className = 'message-content';
-    if (variant !== 'user' && text.includes('`')) richText(content, text);
+    if (variant !== 'user') richText(content, text);
     else content.textContent = text;
     bubble.append(head, content);
     row.append(avatar, bubble);
@@ -1352,8 +1416,8 @@
     }
   }
 
-  // ---- Streaming replies: shown as plain text while the model writes, then replaced by the
-  // formatted final reply (code blocks and all). Text only; never parsed as HTML.
+  // ---- Streaming replies: format the accumulated text while the model writes and on completion.
+  // Formatting builds safe DOM nodes; model output is never parsed as HTML.
   function streamDelta(piece) {
     hideTyping();
     if (!streaming) {
@@ -1362,7 +1426,9 @@
       streaming = {content: bubble.querySelector('.message-content'), copy: bubble.querySelector('.message-copy'), text: ''};
     }
     streaming.text += piece;
-    streaming.content.textContent = streaming.text;
+    streaming.content.replaceChildren();
+    richText(streaming.content, streaming.text);
+    if (streaming.copy) streaming.copy.dataset.text = streaming.text;
     $('thread').scrollTop = $('thread').scrollHeight;
   }
 
@@ -1372,7 +1438,7 @@
     if (!done) return;
     const text = finalText || done.text;
     done.content.replaceChildren();
-    if (text.includes('`')) richText(done.content, text); else done.content.textContent = text;
+    richText(done.content, text);
     if (done.copy) done.copy.dataset.text = text;
     done.content.closest('.message')?.classList.remove('streaming');
   }
