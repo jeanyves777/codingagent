@@ -388,3 +388,16 @@ def test_a_specific_request_is_not_held_up(world):
     bot = assistant(world, FakeModel(routes={"create a task manager app with due dates": {"intent": "create_project", "goal": "Task manager with due dates"}}))
     answer = bot.respond("create a task manager app with due dates")
     assert answer["action"] == {"kind": "create_project", "goal": "Task manager with due dates"}
+
+
+@pytest.mark.parametrize("message", ["can you generate and excel with some data ?", "create a pdf with some random content",
+                                     "make an excel with sample data", "generate a word document"])
+def test_documents_without_a_subject_get_questions_first(world, message):
+    answer = assistant(world, FakeModel()).respond(message)
+    assert answer["action"] is None and answer["needs"] == "scope"
+
+
+def test_document_titles_never_repeat_the_question():
+    from brain.documents import title_of
+    assert title_of("## Sales Q1\n| a | b |", "can you generate an excel with some data ?") == "Sales Q1"
+    assert title_of("no heading", "make me an excel budget for a wedding") == "Excel budget for a wedding"

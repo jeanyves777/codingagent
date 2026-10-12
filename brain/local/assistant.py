@@ -97,9 +97,19 @@ def document_request(text: str) -> bool:
     return bool(DOCUMENT_REQUEST.match(text)) and not CODE_WORDS.search(text)
 
 
+# Words that sound like content but say nothing about it ("some data", "random stuff", "an example").
+DOC_VAGUE = {"and", "with", "some", "any", "data", "stuff", "things", "thing", "info", "information", "content",
+             "example", "examples", "sample", "samples", "random", "test", "dummy", "fake", "basic", "simple",
+             "nice", "good", "quick", "little", "something", "anything", "whatever", "few", "lot", "lots", "useful",
+             "interesting", "cool", "generic", "text", "numbers", "values", "rows", "columns", "pages", "page",
+             "one", "two", "short", "long", "please", "thanks", "now", "just", "that", "this", "is", "are", "be"}
+
+
 def document_is_specific(text: str) -> bool:
-    words = [word for word in re.findall(r"[\w'-]+", text.lower()) if word not in DOC_NOISE]
-    return len(words) >= 3
+    """Enough to write without asking: at least two words that say what the document is about."""
+    words = [word for word in re.findall(r"[\w'-]+", text.lower())
+             if word not in DOC_NOISE and word not in DOC_VAGUE and len(word) > 1]
+    return len(words) >= 2
 
 
 def scope_kind(text: str) -> str | None:

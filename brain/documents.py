@@ -147,9 +147,18 @@ def markdown_to_html(markdown: str, title: str = "Document") -> str:
             f"<style>{CSS}</style></head><body>{''.join(out)}</body></html>")
 
 
+REQUEST_PREFIX = re.compile(r"(?i)^\s*(please\s+)?((can|could|would|will)\s+(you|u)\s+(please\s+)?)?"
+                            r"(create|creat|generate|make|write|produce|prepare|draft|give)\s+(me\s+)?((a|an|the|some)\b)?\s*")
+
+
 def title_of(markdown: str, fallback: str) -> str:
-    match = re.search(r"^#\s+(.+)$", markdown, re.M)
-    return (match.group(1) if match else fallback).strip()[:120]
+    """The document's own title: its "# " heading, else its first "## " heading (a sheet name), else
+    the request without "can you make me a ..." in front."""
+    match = re.search(r"^#\s+(.+)$", markdown, re.M) or re.search(r"^##\s+(.+)$", markdown, re.M)
+    if match:
+        return match.group(1).strip().strip("#").strip()[:120]
+    cleaned = REQUEST_PREFIX.sub("", fallback).strip(" ?.!") or "Document"
+    return cleaned[:1].upper() + cleaned[1:120]
 
 
 def _slug(text: str) -> str:
