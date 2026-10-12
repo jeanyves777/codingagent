@@ -10,6 +10,7 @@ import collections
 import hashlib
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 import secrets
@@ -40,6 +41,20 @@ ATTACHMENT_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".docx", "
                     ".jsx", ".py", ".toml", ".ini", ".svg"}
 
 
+WINDOWS_DEVICES = {"con", "prn", "aux", "nul", *(f"com{n}" for n in range(1, 10)), *(f"lpt{n}" for n in range(1, 10))}
+IGNORED_FOLDED = {name.casefold() for name in IGNORED}
+
+
+def unsafe_part(part: str) -> bool:
+    """A path segment that could name something other than it appears to on Windows: a different case of
+    an ignored folder (.GIT), a trailing dot or space (Windows strips them), an alternate data stream
+    (name::$DATA), an 8.3 short name (PROGRA~1) or a device name (NUL, COM1)."""
+    folded = part.casefold()
+    return (folded in IGNORED_FOLDED or folded.rstrip(". ") in IGNORED_FOLDED or part != part.rstrip(". ")
+            or ":" in part or bool(re.search(r"~\d", part)) or folded.split(".")[0] in WINDOWS_DEVICES
+            or sensitive_name(part.rstrip(". ")))
+
+
 def sensitive_name(name: str) -> bool:
     lower = name.lower()
     return (lower in SENSITIVE or lower.startswith('.env') or lower.endswith(('.pem', '.p12', '.pfx', '.key'))
@@ -60,6 +75,7 @@ class SaveFile(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
     content: str = Field(max_length=MAX_EDIT_BYTES)
     sha256: str = Field(min_length=64, max_length=64)  # the version the editor opened
+    project: str | None = Field(default=None, max_length=8192)  # the project the file was opened from
 
 
 class OpenFile(BaseModel):
@@ -503,7 +519,7 @@ class Workspace:
         if not self.project:
             raise ValueError("Select a project first")
         rel = Path(relative)
-        if rel.is_absolute() or ".." in rel.parts or any(part in IGNORED or sensitive_name(part) for part in rel.parts):
+        if rel.is_absolute() or ".." in rel.parts or any(unsafe_part(part) for part in rel.parts):
             raise ValueError("This path is not available for preview")
         path = self.project / rel
         # Never follow symlinks/junctions, including intermediate directories.
@@ -518,6 +534,9 @@ class Workspace:
         resolved = path.resolve(strict=True)
         if not resolved.is_relative_to(self.project):
             raise ValueError("Path escapes the selected project")
+        # Check the real (long, correctly cased) name too: 8.3 names and case tricks resolve to it.
+        if any(unsafe_part(part) for part in resolved.relative_to(self.project).parts):
+            raise ValueError("This path is not available for preview")
         return resolved
 
     def tree(self, relative: str) -> list[dict]:
@@ -526,7 +545,7 @@ class Workspace:
             raise ValueError("Not a directory")
         result = []
         for item in folder.iterdir():
-            if (item.name in IGNORED or sensitive_name(item.name) or item.is_symlink()
+            if (unsafe_part(item.name) or item.is_symlink()
                     or (hasattr(item, "is_junction") and item.is_junction())):
                 continue
             try:
@@ -548,15 +567,20 @@ class Workspace:
         if b"\0" in raw:
             raise ValueError("Binary files cannot be previewed")
         try:
-            content = raw.decode("utf-8")
+            content = raw.decode("utf-8-sig")
         except UnicodeDecodeError:
             raise ValueError("Preview supports UTF-8 text only") from None
-        return {"path": relative, "content": content, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        return {"path": relative, "content": content, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                "project": str(self.project), "bom": raw.startswith(b"\xef\xbb\xbf"),
+                "eol": "\r\n" if b"\r\n" in raw else "\n"}
 
-    def save(self, relative: str, content: str, expected_sha256: str) -> dict:
+    def save(self, relative: str, content: str, expected_sha256: str, project: str | None = None) -> dict:
         """Write an existing text file of the selected project from the editor. Same path rules as
         reading (no links, secrets or ignored folders; inside the project), the file must still be the
         version the editor opened, and the write is atomic."""
+        if project is not None and (not self.project or Path(project).resolve() != self.project):
+            raise FileChangedError("This file belongs to a project that is no longer selected. Reopen that project "
+                                   "to save it; nothing was written.")
         path = self.resolve_read(relative)
         if not path.is_file():
             raise ValueError("Only existing files can be saved from the editor")
@@ -565,15 +589,23 @@ class Workspace:
             raise ValueError("Binary files cannot be edited")
         if hashlib.sha256(current).hexdigest() != expected_sha256:
             raise FileChangedError("This file changed on disk after you opened it. Reload it, then reapply your edit.")
+        if b"\r\n" in current and "\r\n" not in content:
+            content = content.replace("\n", "\r\n")  # keep Windows line endings the file had
         data = content.encode("utf-8")
+        if current.startswith(b"\xef\xbb\xbf") and not data.startswith(b"\xef\xbb\xbf"):
+            data = b"\xef\xbb\xbf" + data  # keep the BOM (Windows PowerShell 5.1 needs it for non-ASCII)
         if len(data) > MAX_EDIT_BYTES:
             raise ValueError("The editor saves text files up to 1 MB")
-        staging = path.with_name(f".{path.name}.codingbrain-{uuid.uuid4().hex[:8]}.tmp")
-        try:
-            staging.write_bytes(data)
-            os.replace(staging, path)
-        finally:
-            staging.unlink(missing_ok=True)
+        if path.stat().st_nlink > 1:
+            path.write_bytes(data)  # a hard-linked file: replacing it would break the link
+        else:
+            staging = path.with_name(f".{path.name}.codingbrain-{uuid.uuid4().hex[:8]}.tmp")
+            try:
+                staging.write_bytes(data)
+                shutil.copymode(path, staging)  # keep the file mode (e.g. executable scripts)
+                os.replace(staging, path)
+            finally:
+                staging.unlink(missing_ok=True)
         return {"path": relative, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
     def open_external(self, relative: str) -> dict:
@@ -591,9 +623,11 @@ class Workspace:
             subprocess.Popen([code, "--goto", str(path)], stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return {"opened": "vscode"}
+        # Never open a project file with its default handler: for .bat, .ps1, .js, .lnk or .exe that
+        # would RUN it, outside every approval. Show it in Explorer instead.
         if os.name == "nt":
-            os.startfile(str(path))  # noqa: S606 - a validated project file, default handler
-            return {"opened": "default"}
+            subprocess.Popen(["explorer.exe", "/select,", str(path)])
+            return {"opened": "explorer", "detail": "VS Code was not found; the file is shown in Explorer"}
         raise ValueError("VS Code was not found")
 
     def job_diff(self, job_id: str) -> list[dict]:
@@ -617,7 +651,7 @@ class Workspace:
                 if current.is_symlink() or (hasattr(current, "is_junction") and current.is_junction()):
                     return False
             return True
-        return views(diff, root, allowed)
+        return views(diff, root, allowed, truncated=bool((job.pending_payload or {}).get("diff_truncated")))
 
     def _staging(self) -> Path:
         """Where pasted or dropped files wait for the task. Never inside the engine's home: the engine
@@ -1011,7 +1045,7 @@ def create_app(state: Workspace | None = None) -> FastAPI:
     @app.post("/api/file", dependencies=[Depends(auth)])
     def save_file(body: SaveFile):
         try:
-            return state.save(body.path, body.content, body.sha256)
+            return state.save(body.path, body.content, body.sha256, body.project)
         except FileChangedError as e:
             raise HTTPException(409, str(e)) from e
         except (ValueError, OSError) as e:
