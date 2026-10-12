@@ -152,14 +152,20 @@ def test_uploaded_attachment_is_staged_privately_and_checked(tmp_path):
     assert client.post("/api/attachments/upload", content=b"x", headers={**headers, "X-Filename": "tool.exe"}).status_code == 400
 
 
-def test_attachments_are_refused_for_chat_links_and_missing_files(tmp_path):
+def test_chat_files_need_an_engine_that_reads_them_and_bad_paths_are_refused(tmp_path, monkeypatch):
     from desktop_ui.server import StartRequest
     workspace = Workspace(home=tmp_path, executable="not-a-real-binary")
     spec = tmp_path / "spec.md"
     spec.write_text("# spec")
     import pytest
-    with pytest.raises(ValueError, match="Run task and New project"):
+    # Chat takes files; an engine that cannot read them in chat says so instead of dropping them.
+    older = {"engine": {"available": True, "typed_api": True, "conversation": True, "version": "0.13.0",
+                        "operations": ["conversation.send"], "attachments": True, "chat_attachments": False},
+             "title": "ok", "detail": ""}
+    monkeypatch.setattr(workspace, "engine_status", lambda refresh=False: older)
+    with pytest.raises(ValueError, match="cannot read files in chat yet"):
         workspace.start(StartRequest(message="hi", mode="chat", attachments=[str(spec)]))
+    assert workspace.active is None
     with pytest.raises(ValueError, match="file not found"):
         workspace.check_attachment(str(tmp_path / "missing.png"))
     with pytest.raises(ValueError, match="absolute"):

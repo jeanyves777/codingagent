@@ -270,6 +270,7 @@ class Workspace:
         # help probes in management.engine_capabilities are only the fallback for older engines.
         core.update(operations=sorted(operations), features=sorted(info.get("features") or []),
                     attachments="tasks.start.attachments" in (info.get("features") or []),
+                    chat_attachments="conversation.attachments" in (info.get("features") or []),
                     version=info.get("engine_version") or core.get("version"), api_version=info.get("api_version"),
                     conversation=all(op in operations for op in REQUIRED_OPERATIONS["chat"]),
                     new_project=all(op in operations for op in REQUIRED_OPERATIONS["new"]),
@@ -828,9 +829,6 @@ class Workspace:
     def start(self, body: StartRequest) -> Job:
         mode = body.mode
         attachments = [str(self.check_attachment(item)) for item in body.attachments]
-        if attachments and mode == "chat":
-            raise ValueError("Chat only reads your message; attachments are used by Run task and New project. "
-                             "Switch mode to send these files. Nothing was started.")
         if mode not in {"chat", "run", "new", "document"}:
             raise ValueError("Unknown mode")
         if mode == "run" and (not self.project or not self.git_branch(self.project)):
@@ -891,6 +889,12 @@ class Workspace:
                 raise ValueError(f"The installed engine (v{status['engine'].get('version') or '?'}) does not support "
                                  f"{'creating projects' if mode == 'new' else 'this action'} ({', '.join(missing)} missing). "
                                  "Update Coding Brain; nothing was started.")
+            if attachments and mode == "chat" and not status["engine"].get("chat_attachments"):
+                del self.jobs[job.id]
+                if self.active == job.id:
+                    self.active = None
+                raise ValueError(f"The installed engine (v{status['engine'].get('version') or '?'}) cannot read files "
+                                 "in chat yet. Update Coding Brain, or use Run task. Nothing was started.")
             if attachments and not status["engine"].get("attachments"):
                 del self.jobs[job.id]
                 if self.active == job.id:

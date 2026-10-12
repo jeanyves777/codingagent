@@ -73,11 +73,8 @@ with sync_playwright() as p:
       document.querySelector('.composer').dispatchEvent(new DragEvent('drop', {dataTransfer:data, bubbles:true, cancelable:true}));
     }""")
     page.locator('#attachment-list .attachment-name', has_text='design.png').wait_for()
-    # Chat mode refuses to silently drop files.
+    # Files go with a Run task too (chat reads them as well: smoke_conversation_browser).
     page.fill('#prompt', 'Fix add()')
-    page.click('#send')
-    assert page.evaluate('window.__demo.starts.length') == 0
-    assert page.locator('#attachment-list .attachment').count() == 1
     page.click('#mode-run')
     page.click('#send')
     page.wait_for_function('window.__demo.starts.length === 1')

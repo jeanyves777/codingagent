@@ -236,7 +236,12 @@ class LocalModel:
 CAPABILITIES = """What Coding Brain can do (answer questions about yourself from this list only):
 - Chat and answer programming questions; explain and review code in the user's projects.
 - Change the user's projects: fix bugs, add features, write tests, refactor - as a task the user approves
-  before anything is written; tests run in an offline Docker sandbox; results land on a new Git branch.
+  before anything is written; results land on a new Git branch. Tests run in an offline Docker sandbox
+  on this computer, or - for projects with GitHub verification turned on - on GitHub Actions in the
+  background, so the user's computer stays light and other work is never blocked.
+- With GitHub verification: an accepted change becomes a draft pull request; when every check is green
+  Coding Brain asks before merging (it never merges by itself); when a check fails it offers to fix the
+  same pull request.
 - Create new software projects from a description, after the user confirms.
 - Write documents: PDF, Word (.docx), Excel (.xlsx), CSV, plain text (emails), Markdown, HTML - after the
   user confirms what it should contain.
@@ -255,11 +260,16 @@ JSON object (double quotes, no comments). Types and fields:
 - chart: {"type":"chart","kind":"bar"|"line"|"pie","title":?,"labels":[...],"series":[{"name":..,"values":[numbers]}],"unit":?}
 - options: {"type":"options","title":?,"items":[{"title":..,"subtitle":?,"price":?,"badges":[..]?,"details":[..]?,
   "source":{"label":..,"url":?}?,"actions":[{"label":..,"ask":"follow-up message"}|{"label":..,"url":"https://..."}]?}]}
+- flow: {"type":"flow","title":?,"stages":[[{"icon":"goal","title":..,"text":?}],[{..},{..}],...]} - a process
+  at a glance: stages top to bottom, a stage's items side by side. icon: goal, plan, research, code, validate,
+  review, deliver, data, document, user, idea, warning, cloud, git
 - steps: {"type":"steps","title":?,"items":[{"title":..,"detail":?,"status":"done"|"current"|"todo"}]}
 - compare: {"type":"compare","title":?,"options":[...],"rows":[{"label":..,"values":[...]}],"recommendation":?}
 - callout: {"type":"callout","tone":"info"|"success"|"warning"|"danger","title":?,"text":..}
 - actions: {"type":"actions","items":[{"label":..,"ask":"follow-up message"}]}
 Any block may have "source": {"label":..,"url":?}. Use blocks only when they help; keep the prose short.
+Longer answers read best organized like a well-designed page: one short opening line, a few "## " headings,
+bullets with a **bold** lead-in, and a flow, steps or table block where the structure is the point.
 Never invent facts, prices, availability, schedules or statistics: real-world data needs a real source
 (the user's files, the project, a tool result). You cannot browse the internet, so for live data such as
 flights, prices or news say you cannot fetch it instead of making options up."""
@@ -474,6 +484,9 @@ class Assistant:
         self.history.add("assistant", text, project_id or self.focus_id())
 
     def converse(self, text: str, extra_context: str = "", project_id: str | None = None):
+        attached = getattr(self, "attached", "")  # files sent with this message (engine API), this turn only
+        if attached:
+            extra_context = f"{extra_context}\n\n{attached}" if extra_context else attached
         system = CHAT_PROMPT.format(projects=self.project_names(), folder=self.folder_description())
         earlier = self.history.recent(project_id or self.focus_id(), 21)
         if earlier and earlier[-1] == {"role": "user", "content": text}:
@@ -585,7 +598,9 @@ class Assistant:
             elif route.intent != "answer":
                 self.scoping = None
             result.update(intent=route.intent, source=route.source)
-            self.history.add("user", text, self.focus_id(), {"intent": route.intent, "source": route.source})
+            names = getattr(self, "attached_names", None)
+            self.history.add("user", text + (f" [attached: {', '.join(names)}]" if names else ""), self.focus_id(),
+                             {"intent": route.intent, "source": route.source})
             if route.reply:
                 self.say(route.reply)
             elif route.intent == "projects":

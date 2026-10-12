@@ -21,7 +21,8 @@ def block(data):
 
 
 REPLY = "\n".join([
-    "Here is your quarter at a glance.",
+    "## Here is your quarter at a glance",
+    "1. **Revenue** grew and `sales.csv` is the source <b>not html</b>",
     block({"type": "stats", "title": "Q1 sales", "items": [{"label": "Revenue", "value": "$48,200", "delta": "+12%"},
           {"label": "Orders", "value": 312, "delta": "-3%"}, {"label": "Avg order", "value": "$154"}],
           "source": {"label": "sales.csv"}}),
@@ -42,6 +43,11 @@ REPLY = "\n".join([
           {"title": "Draft report", "detail": "Two pages", "status": "current"}, {"title": "Review"}]}),
     block({"type": "compare", "options": ["Plan A", "Plan B"], "rows": [{"label": "Cost", "values": ["Low", "High"]},
           {"label": "Speed", "values": ["Slow", "Fast"]}], "recommendation": "Plan A fits the budget."}),
+    block({"type": "flow", "title": "How a change ships", "stages": [
+        [{"icon": "goal", "title": "Receive a goal", "text": "Understand requirements"}],
+        [{"icon": "plan", "title": "Plan", "text": "Architecture"}, {"icon": "research", "title": "Research", "text": "Evidence"}],
+        [{"icon": "code", "title": "Execute"}, {"icon": "validate", "title": "Validate", "text": "Tests and checks"}],
+        [{"icon": "deliver", "title": "Deliver verified results", "tone": "success"}]]}),
     block({"type": "callout", "tone": "warning", "title": "Live data", "text": "I cannot fetch live fares."}),
     block({"type": "actions", "items": [{"label": "Make it a PDF", "ask": "Turn this into a PDF report"}]}),
     "```cb-ui\n{not json at all\n```",
@@ -96,9 +102,15 @@ with sync_playwright() as p:
     for selector, count in [('.ui-stat', 3), ('.ui-chart-svg rect', 6), ('.ui-chart-svg.pie path', 3), ('.ui-table tbody tr', 5),
                             ('.ui-option', 2), ('.ui-step', 3), ('.ui-compare-table tbody tr', 2), ('.ui-callout.warning', 1)]:
         assert page.locator(selector).count() >= count, (selector, page.locator(selector).count())
+    assert page.locator('.ui-flow-stage').count() == 4 and page.locator('.ui-flow-item').count() == 6
+    assert page.locator('.ui-flow-arrow').count() == 3 and page.locator('.ui-flow-item.success').count() == 1
     assert page.locator('.ui-stat-delta.down').count() == 1 and 'sales.csv' in page.locator('.ui-source').first.inner_text()
     # Hostile text stays text; malformed and unknown blocks fall back to readable code.
     assert page.locator('img').count() == 0 and not dialogs
+    # Light Markdown: headings and **bold** render as text nodes; written HTML stays text.
+    assert page.locator('.md-heading', has_text='Here is your quarter at a glance').count() == 1
+    assert page.locator('.message-bubble strong', has_text='Revenue').count() == 1
+    assert page.locator('.message-bubble b').count() == 0 and '**' not in page.locator('.message.assistant').first.inner_text()
     assert page.locator('.code-lang', has_text='Display block (could not be drawn)').count() == 2
     # Governance: an unsourced price is labelled; a javascript: link is never offered.
     second = page.locator('.ui-option').nth(1)
@@ -117,4 +129,4 @@ with sync_playwright() as p:
 
     assert not errors, errors
     browser.close()
-print("Display library browser PASS: stats, bar/pie charts, table, option cards with sources/actions, steps, compare, callout, next actions; safe fallbacks; links confirmed")
+print("Display library browser PASS: stats, bar/pie charts, table, option cards with sources/actions, flow, steps, compare, callout, next actions; safe fallbacks; links confirmed")

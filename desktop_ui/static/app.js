@@ -319,16 +319,37 @@
     return block;
   }
 
-  function inlineText(parent, text) {
-    const parts = text.split(/(`[^`\n]+`)/g);
-    for (const part of parts) {
+  // Light Markdown for model replies: `code`, **bold**, headings and bullets. Text nodes only, so
+  // nothing the model writes becomes HTML; anything else stays as written.
+  function inlineSpans(parent, text) {
+    for (const part of text.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__)/g)) {
       if (part.length > 2 && part.startsWith('`') && part.endsWith('`')) {
         const code = document.createElement('code');
         code.className = 'inline-code';
         code.textContent = part.slice(1, -1);
         parent.append(code);
+      } else if (part.length > 4 && (/^\*\*.*\*\*$/.test(part) || /^__.*__$/.test(part))) {
+        const strong = document.createElement('strong');
+        strong.textContent = part.slice(2, -2);
+        parent.append(strong);
       } else if (part) parent.append(part);
     }
+  }
+
+  function inlineText(parent, text) {
+    const lines = text.split('\n');
+    lines.forEach((line, index) => {
+      const heading = line.match(/^\s{0,3}#{1,4}\s+(.+?)\s*#*\s*$/);
+      if (heading) {
+        const strong = document.createElement('strong');
+        strong.className = 'md-heading';
+        inlineSpans(strong, heading[1].replace(/^\*\*(.*)\*\*$/, '$1'));
+        parent.append(strong);
+      } else {
+        inlineSpans(parent, line.replace(/^(\s*)[-*+]\s+/, '$1• '));
+      }
+      if (index < lines.length - 1) parent.append('\n');
+    });
   }
 
   // ---- Display library: rich blocks the model chooses (```cb-ui {json}). Everything is drawn here from
@@ -414,6 +435,9 @@
     return frame;
   }
 
+  const FLOW_ICONS = {goal: '◎', plan: '◇', research: '⌕', code: '</>', execute: '</>', validate: '⛨', test: '⛨',
+    review: '◉', deliver: '✓', done: '✓', data: '▤', document: '▭', user: '☺', idea: '✦', warning: '⚠',
+    cloud: '☁', git: '⑂', merge: '⑂', step: '•'};
   const UI_COMPONENTS = {
     table(block) {
       const columns = (block.columns || []).slice(0, UI_LIMITS.columns);
@@ -512,6 +536,30 @@
         list.append(card);
       }
       frame.append(list);
+      return finishFrame(frame, block);
+    },
+    // A process at a glance: stages top to bottom, a stage's items side by side, arrows between.
+    flow(block) {
+      const stages = (block.stages || []).slice(0, 8)
+        .map(stage => (Array.isArray(stage) ? stage : stage?.items || [stage]).filter(item => item && typeof item === 'object').slice(0, 4))
+        .filter(items => items.length);
+      if (stages.length < 2) return null;
+      const frame = uiFrame(block, 'flow');
+      const board = el('div', 'ui-flow');
+      stages.forEach((items, index) => {
+        if (index) board.append(el('div', 'ui-flow-arrow', '↓'));
+        const row = el('div', 'ui-flow-stage');
+        row.style.gridTemplateColumns = `repeat(${items.length}, minmax(0, 1fr))`;
+        for (const item of items) {
+          const cell = el('div', 'ui-flow-item' + (item.tone === 'success' ? ' success' : ''));
+          cell.append(el('span', 'ui-flow-icon', FLOW_ICONS[item.icon] || FLOW_ICONS.step));
+          cell.append(el('strong', '', item.title || ''));
+          if (item.text) cell.append(el('p', '', item.text));
+          row.append(cell);
+        }
+        board.append(row);
+      });
+      frame.append(board);
       return finishFrame(frame, block);
     },
     steps(block) {
@@ -1011,6 +1059,10 @@
         updateProject(await api('/api/project', 'POST', {path: action.root}));
       }
       setMode(action.kind === 'create_project' ? 'new' : 'run');
+      if (action.attachments?.length && !attachments.length) {  // files sent in chat travel with the work
+        attachments = action.attachments.map(path => ({path, name: path.split(/[\\/]/).pop(), size: 0}));
+        renderAttachments();
+      }
       $('prompt').value = action.goal;
       await submit();
     } catch (e) { toast(e.message); }
@@ -1601,10 +1653,6 @@
       await startAction(lastAction);
       return;
     }
-    if (attachments.length && mode === 'chat') {
-      toast('Attachments are read by Run task and New project. Switch mode to send these files.');
-      return;
-    }
     submitting = true;
     busySend(true);
     try {
@@ -2016,7 +2064,7 @@
       chip.className = 'attachment';
       chip.title = item.path;
       const name = document.createElement('span'); name.className = 'attachment-name'; name.textContent = item.name;
-      const size = document.createElement('span'); size.className = 'attachment-size'; size.textContent = formatBytes(item.bytes);
+      const size = document.createElement('span'); size.className = 'attachment-size'; size.textContent = item.bytes ? formatBytes(item.bytes) : '';
       const remove = document.createElement('button');
       remove.type = 'button'; remove.className = 'attachment-remove'; remove.textContent = '×';
       remove.setAttribute('aria-label', 'Remove ' + item.name);

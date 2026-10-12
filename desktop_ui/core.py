@@ -341,6 +341,8 @@ def chat(job):
             client.ensure()
         features = set((getattr(client, "info", None) or {}).get("features") or [])
         params = {"message": job.goal}
+        if getattr(job, "attachments", None) and "conversation.attachments" in features:
+            params["attachments"] = list(job.attachments)  # read as evidence for this reply, never executed
         if job.project:  # read-only lookup: a conversation never registers or changes anything
             selected = Path(job.project).resolve()
             for item in client.call("projects.list", {}, None, 60):
@@ -367,7 +369,9 @@ def chat(job):
         if action and action.get("kind") in {"create_project", "task"}:
             # Shown as a button; starting it still goes through the normal reviewed and approved flow.
             job.emit("action", json.dumps({"kind": action["kind"], "goal": str(action.get("goal") or job.goal)[:2000],
-                                           "project": action.get("project"), "root": action.get("root")}))
+                                           "project": action.get("project"), "root": action.get("root"),
+                                           # the files travel with the work the chat proposed
+                                           "attachments": list(getattr(job, "attachments", None) or [])}))
         elif action:
             where = "New project" if action.get("kind") == "create_project" else "Run task"
             job.emit("output", f"To do this, use {where} to review and authorize it. Nothing was changed.")
