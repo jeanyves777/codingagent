@@ -57,19 +57,20 @@ with sync_playwright() as p:
     assert 'Writing the answer' in page.locator('#status-label').inner_text()
 
     # The reply streams into one bubble...
-    page.evaluate("window.__push('delta', 'A decorator ')")
+    page.evaluate("window.__push('delta', 'A **decorator** ')")
     page.locator('.message.streaming .message-content', has_text='A decorator').wait_for()
     assert page.locator('.typing-row').count() == 0
+    assert page.locator('.message.streaming strong', has_text='decorator').count() == 1
     page.evaluate("window.__push('delta', 'wraps a function: `@cache`')")
     page.locator('.message.streaming .message-content', has_text='@cache').wait_for()
 
     # ...then becomes the formatted final reply in the same bubble.
-    page.evaluate("window.__push('output', 'A decorator wraps a function: `@cache`'); window.__push('finish', 'Chat completed'); window.__demo.status = 'completed'")
+    page.evaluate("window.__push('output', 'A **decorator** wraps a function: `@cache`'); window.__push('finish', 'Chat completed'); window.__demo.status = 'completed'")
     page.locator('.message-content .inline-code', has_text='@cache').wait_for()
-    assert page.locator('.message.streaming').count() == 0
+    page.locator('.message.streaming').wait_for(state='detached')
     assistant = page.locator('.message.assistant').all_inner_texts()
     assert sum('A decorator wraps a function' in text for text in assistant) == 1, assistant
-    assert page.locator('.activity-entry', has_text='A decorator').count() == 1  # the final reply only; deltas are not logged
+    assert page.locator('.activity-entry', has_text='wraps a function').count() == 1  # the final reply only; deltas are not logged
 
     assert not errors, errors
     browser.close()
