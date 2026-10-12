@@ -64,14 +64,33 @@ def _supervise(command: list[str], name: str, output, should_cancel) -> int | st
 
 
 NODE_ID = re.compile(r"[\w./-]+\.py::[\w.\[\]-]+")
+# Requirement checks run explicitly with their language's runner, never through the project's own
+# test script (which may not collect them): pytest for Python, node --test for Node.
+REQUIREMENT_FILE = re.compile(r"(?:(?:[A-Za-z0-9_-]+/){0,3}test_requirements_[a-f0-9]{8}(\.test\.mjs)|"
+                              r"test_requirements_[a-f0-9]{8}(\.py))")
+REQUIREMENT_RUNNERS = {
+    ".py": ("python", ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]),
+    ".test.mjs": ("node", ["node", "--test", "--test-reporter=tap"]),
+}
 
 
-def run_tests(workspace: Path, images: str | dict, should_cancel=None, only=None) -> dict:
+def run_tests(workspace: Path, images: str | dict, should_cancel=None, only=None, checks=None) -> dict:
     """Run the project's tests offline. `only` (pytest node ids such as test_x.py::test_y) runs
-    just those tests with the same command, for diagnosis."""
-    selected = profile(workspace)
+    just those tests with the same command, for diagnosis. `checks` (a requirement checks file in
+    the workspace root) runs only that file with the runner for its language, in that language's
+    image."""
+    if checks:
+        found = REQUIREMENT_FILE.fullmatch(checks) if isinstance(checks, str) else None
+        if not found:
+            return {"passed": False, "exit_code": None, "profile": None,
+                    "output": "Requirement checks must be one file named test_requirements_<id>.py (project root) or "
+                              ".test.mjs"}
+        language, runner = REQUIREMENT_RUNNERS[found.group(1) or found.group(2)]
+        selected = {"name": language, "command": [*runner, checks]}
+    else:
+        selected = profile(workspace)
     if only:
-        if selected["name"] != "python" or "pytest" not in selected["command"] or \
+        if checks or selected["name"] != "python" or "pytest" not in selected["command"] or \
                 not all(isinstance(node, str) and NODE_ID.fullmatch(node) for node in only):
             return {"passed": False, "exit_code": None, "profile": selected["name"],
                     "output": "Running single tests is supported for pytest node ids only"}

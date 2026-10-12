@@ -4,6 +4,14 @@
 
 See docs/engine-api.md.
 
+- **Requirement checks run in the project's language and need proof they ran:** checks written from the
+  goal are now generated for the sandbox test profile (pytest for Python, `node:test` as
+  `test_requirements_<id>.test.mjs` for Node) and run explicitly with that runner (`python -m pytest <file>`,
+  `node --test <file>`) instead of through the project's own test command, which did not collect them
+  (a Node project's `npm test`, or a Python project with `testpaths`), so failing checks were reported as
+  verified. Completion is verified only when the runner reports at least as many passing checks as were
+  written and none failed, skipped, deselected or left to do; a run without that evidence, a missing
+  runner or image, a timeout or zero collected checks is reported `unverified` (`completion_unverified`).
 - **`codingbrain api --describe | --stdio`:** a versioned (1.0) API that the desktop app and other
   programs use instead of parsing CLI output. It covers:
   - engine information and the schema;
