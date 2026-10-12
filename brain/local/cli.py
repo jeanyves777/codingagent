@@ -741,6 +741,15 @@ def cmd_pr(args, layout):
         if item.get("failed"):
             status = 1
             print(f"\nChecks failed on {item['url']}:\n{item.get('failure_log', '')[-1500:]}")
+            if ask("Fix it? Coding Brain plans a repair from this pull request's code (you approve the plan) "
+                   "and the accepted fix updates the same pull request."):
+                try:
+                    fix = pullrequests.prepare_fix(context, store, item["task_id"])
+                except Exception as error:
+                    print(f"Cannot fix it now: {error}")
+                    continue
+                run_goal(context, fix["goal"], on_task=lambda task, fix=fix: task.update(
+                    base_commit=fix["base_commit"], fixes=fix["fixes"]))
         if not item.get("ask_merge"):
             continue
         if not ask(item["question"]):

@@ -235,3 +235,51 @@ def test_runs_count_only_for_the_code_the_pull_request_holds(project, monkeypatc
     with pytest.raises(remote_verify.RemoteUnavailable):
         remote_verify.merge_pull_request(root, {"repository": "owner/repo"}, url, head, [stale])
     remote_verify.merge_pull_request(root, {"repository": "owner/repo"}, url, head, [run])
+
+
+class Store(dict):
+    def get(self, task_id):
+        return self[task_id]
+
+    def save(self, task):
+        self[task["id"]] = task
+
+
+def test_fix_it_repairs_the_same_pull_request_fast_forward(project, monkeypatch):
+    root, workspace, origin = project
+    git(root, "push", "-q", "origin", "main:refs/heads/codingbrain/add-thing")
+    head = git(root, "rev-parse", "main")
+    store = Store()
+    store.save({"id": "orig0001", "goal": "Add a thing",
+                "pull_request": {"url": "https://github.com/owner/repo/pull/12", "branch": "codingbrain/add-thing"}})
+
+    class Context:
+        config = {"verification": {"projects": {str(root.resolve()): {"enabled": True, "repository": "owner/repo"}}}}
+
+        class brain:
+            pass
+
+        @staticmethod
+        def tasks():
+            return list(store.values())
+    Context.root, Context.brain.store = root, store
+    gh = FakeGitHub(monkeypatch, head=head, checks=[{"name": "tests", "conclusion": "FAILURE",
+                                                    "detailsUrl": "https://github.com/owner/repo/actions/runs/99/job/1"}])
+    gh.log = "x\ty\t2026-10-12T00:00:00Z FAILED tests/test_app.py::test_add"
+    fix = pullrequests.prepare_fix(Context, store, "orig0001")
+    assert fix["base_commit"] == head and fix["fixes"] == "orig0001"  # planned from the PR's own head
+    assert "pull/12" in fix["goal"] and "FAILED tests/test_app.py::test_add" in fix["goal"]
+
+    (workspace / "app.py").write_text("def add(a, b):\n    return a + b  # fixed\n", encoding="utf-8")
+    commit = accepted_head(workspace, root)
+    task = {"id": "fix00002", "goal": fix["goal"], "fixes": "orig0001", "branch": "codingbrain/local", "commit": commit}
+    record = pullrequests.publish(Context, task)
+    assert record == {"url": "https://github.com/owner/repo/pull/12", "branch": "codingbrain/add-thing",
+                      "fix_of": "orig0001"}
+    assert git(origin, "rev-parse", "codingbrain/add-thing") == commit  # same PR, fast-forward
+    assert store["orig0001"]["pull_request"]["superseded_by"] == "fix00002"
+    assert not any(call[1:3] == ["pr", "create"] for call in gh.calls)  # no second pull request
+    with pytest.raises(ValueError, match="newer fix"):
+        pullrequests.prepare_fix(Context, store, "orig0001")
+    store.save(task)
+    assert [item["task_id"] for item in pullrequests.open_reviews(Context, store)] == ["fix00002"]

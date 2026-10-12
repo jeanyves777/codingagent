@@ -73,6 +73,8 @@ class StartRequest(BaseModel):
     details: str = Field(default="", max_length=4000)
     format: str | None = Field(default=None, max_length=10)
     language: str | None = Field(default=None, max_length=60)
+    # mode "run": repair this task's pull request (Fix it on a failed PR) instead of a new goal
+    fix_of: str | None = Field(default=None, min_length=6, max_length=64, pattern=r"^[0-9a-f]+$")
 
 
 class SaveFile(BaseModel):
@@ -869,6 +871,7 @@ class Workspace:
                 raise ValueError("Another task is active; finish or stop it first")
             job = Job(mode, str(self.project) if self.project else None, command)
             job.attachments = attachments
+            job.fix_of = body.fix_of if mode == "run" else None
             if mode == "document":
                 job.document = {"request": body.message, "details": body.details, "format": body.format,
                                 "language": body.language}

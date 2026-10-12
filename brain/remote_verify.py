@@ -257,7 +257,8 @@ def pull_request_checks(root: Path, settings: dict, url: str, runs=()) -> dict:
     checks = []
     for check in info.get("statusCheckRollup") or []:
         status = (check.get("conclusion") or check.get("state") or check.get("status") or "").upper()
-        checks.append({"name": check.get("name") or check.get("context") or "check", "status": status})
+        checks.append({"name": check.get("name") or check.get("context") or "check", "status": status,
+                       "url": check.get("detailsUrl") or check.get("targetUrl")})
     head, failure = info.get("headRefOid"), ""
     for run in runs or ():
         if not run.get("id") or not head or not covers(Path(root), run, head):
@@ -269,6 +270,11 @@ def pull_request_checks(root: Path, settings: dict, url: str, runs=()) -> dict:
             failure = f"{run.get('url')}\n" + failure_log(slug, run["id"], 120)
     pending = [c for c in checks if c["status"] in {"", "PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED", "WAITING"}]
     failed = [c for c in checks if c not in pending and c["status"] not in {"SUCCESS", "NEUTRAL", "SKIPPED"}]
+    for check in failed:  # the PR's own checks: their log, when they ran on GitHub Actions
+        found = re.search(r"/actions/runs/(\d+)", check.get("url") or "")
+        if failure or not found:
+            continue
+        failure = f"{check['name']}: {check['url']}\n" + failure_log(slug, int(found.group(1)), 120)
     return {"state": info.get("state"), "draft": info.get("isDraft"), "mergeable": info.get("mergeable"),
             "head": head, "checks": checks, "pending": len(pending), "failed": len(failed),
             "failure_log": failure[-6000:],

@@ -89,7 +89,7 @@ def test_schema_and_info():
     assert {op for op, item in schema["operations"].items() if item["kind"] == "action"} == {
         "projects.register", "projects.create", "tasks.start", "tasks.approve", "tasks.accept", "tasks.stop",
         "tasks.resume", "tasks.tool_decision", "conversation.reset", "documents.create",
-        "tasks.merge"}
+        "tasks.merge", "tasks.fix_pull_request"}
     assert schema["operations"]["conversation.send"]["kind"] == "read"
 
 

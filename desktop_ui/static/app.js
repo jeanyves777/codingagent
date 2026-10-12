@@ -1518,11 +1518,19 @@
         reveal.append(summary, codeBlock(item.failure_log, 'text', {title: 'GitHub Actions'}));
         box.append(reveal);
       }
-      row.append(prButton('Fix it', () => {
+      row.append(prButton('Fix it', async () => {
+        // Plans a repair from the PR's own head; the plan is shown for approval like any task, and the
+        // accepted fix updates this same pull request.
+        if (activeJob || submitting) { toast('Finish or stop the current session first.'); return; }
         row.remove();
-        // Starts planning only: the fix is shown for approval like any task.
-        startAction({kind: 'task', goal: `Fix the failing checks of pull request ${item.url} (for: ${item.goal || ''}). ` +
-          `Failure log:\n${(item.failure_log || '').slice(-3000)}`});
+        try {
+          const job = await api('/api/start', 'POST', {message: `Fix the failing checks of ${item.url}`, mode: 'run', fix_of: item.task_id});
+          message('YOU', `Fix the failing checks of ${item.url}`, 'user');
+          activeJob = job.id; cursor = 0; displayedEvents = new Set(); startedAt = job.started;
+          resetFlow('run'); showTyping(); busySend(true); $('run-status').hidden = false;
+          await poll();
+          if (activeJob && !pollTimer) pollTimer = setInterval(poll, 300);
+        } catch (e) { toast(e.message); }
       }));
     }
     if (safeUrl) row.append(prButton('Open the pull request', () => api('/api/open-url', 'POST', {url: safeUrl}).catch(e => toast(e.message)), true));

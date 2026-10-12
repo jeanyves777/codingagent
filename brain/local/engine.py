@@ -79,6 +79,9 @@ OPERATIONS = {
     "pull_requests.list": ("read", {"project_id": ("str", True)},
                            "open pull requests of accepted tasks with their validation (GitHub run + PR checks); "
                            "polled in the background so validation never blocks other work"),
+    "tasks.fix_pull_request": ("action", {"project_id": ("str", True), "task_id": ("str", True)},
+                               "plans a repair of a pull request whose checks failed, from the PR's current head; "
+                               "the plan needs approval and its accepted result updates the same pull request"),
     "tasks.merge": ("action", {"project_id": ("str", True), "task_id": ("str", True), "head": ("str", True)},
                     "merges the task's pull request after the user confirmed: refused unless every check is "
                     "green and the head is still the commit the user was asked about"),
@@ -92,8 +95,8 @@ OPERATIONS = {
 # Additive capabilities within API 1.x that clients detect here rather than from a version number.
 FEATURES = {"tasks.start.attachments", "conversation.stream", "conversation.scope", "conversation.reset",
             "documents.create", "tasks.pull_requests"}
-TASK_MILESTONES = {"tasks.start", "tasks.approve", "tasks.accept"}
-LONG = {"tasks.merge", "documents.create", "conversation.send", "tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
+TASK_MILESTONES = {"tasks.fix_pull_request", "tasks.start", "tasks.approve", "tasks.accept"}
+LONG = {"tasks.fix_pull_request", "tasks.merge", "documents.create", "conversation.send", "tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
 CHECK_TYPES = {"str": str, "bool": bool, "int": int, "list": list}
 
 
@@ -272,7 +275,7 @@ class Engine:
         goal = str(task.get("goal") or "")[:300]
         status = task.get("status")
         files = ", ".join((task.get("files") or [])[:12])
-        if op == "tasks.start":
+        if op in {"tasks.start", "tasks.fix_pull_request"}:
             text = (f"[Task] Planned \"{goal}\": proposes changes to {files or 'no files'}; waiting for approval."
                     if status == "proposed" else f"[Task] \"{goal}\": {status}.")
         elif op == "tasks.approve":
@@ -437,7 +440,17 @@ class Engine:
         retain(context, attachments, processing, False)
         return attachments, packet
 
-    def op_tasks_start(self, project_id: str, goal: str, new_project: bool = False, attachments=None, emit=None):
+    def op_tasks_fix_pull_request(self, project_id: str, task_id: str, emit=None):
+        from . import pullrequests
+        from ..remote_verify import RemoteUnavailable
+        try:
+            fix = pullrequests.prepare_fix(self.context(project_id), self.brain(project_id).store, task_id)
+        except (ValueError, RemoteUnavailable) as error:
+            raise ApiError("refused", str(error))
+        return self.op_tasks_start(project_id, fix["goal"], emit=emit, base_commit=fix["base_commit"], fixes=fix["fixes"])
+
+    def op_tasks_start(self, project_id: str, goal: str, new_project: bool = False, attachments=None, emit=None,
+                       base_commit=None, fixes=None):
         brain = self.brain(project_id)
         context = self.context(project_id)
         files, packet = self._prepare_attachments(context, goal, attachments) if attachments else ([], None)
@@ -452,6 +465,8 @@ class Engine:
                 for attachment in files:
                     store.link(attachment.sha256, task["id"], goal)
             scope.add(task["id"])
+            if fixes:  # internal (tasks.fix_pull_request): start from the pull request's head
+                task["base_commit"], task["fixes"] = base_commit, fixes
             if new_project:
                 task["tests_expected"] = True
             try:

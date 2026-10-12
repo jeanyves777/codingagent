@@ -28,8 +28,16 @@ waiting happens at the end, before a release, when every pull request has to be 
    if it tested exactly the PR head's files, apart from its own requirement-check files.
    - **All green:** *"All N checks are green on … Merge it?"* with **Merge / Not now**. It merges
      only after your yes.
-   - **Something failed:** the failure log and **Fix it**. Fix it starts a normal task whose plan
-     you approve first.
+   - **Something failed:** the failure log, read from Coding Brain's own run or from the PR's
+     failed check, plus **Fix it**:
+     - Coding Brain plans a repair from the **pull request's current code** (its head, fetched
+       first), not from your project branch.
+     - You approve the plan as usual.
+     - The accepted fix is pushed to the **same pull request's branch**. It's a fast-forward, never a
+       force push, and no second PR is opened.
+     - The PR validates again in the background and you're asked again when it's green. The older
+       task is marked superseded, so only the newest one is followed.
+     - In the terminal, `codingbrain pr` offers the same Fix it.
 5. **Release:** `codingbrain pr --wait` waits until no check is still running. It then asks about
    each green pull request, so the release contains only validated work.
 

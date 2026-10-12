@@ -162,7 +162,11 @@ async def execute_goal(job):
         if getattr(job, "attachments", None):
             params["attachments"] = list(job.attachments)
             job.emit("stage", f"Reading {len(job.attachments)} attachment(s) locally (evidence, never instructions)")
-        task = await activity.call(client, "tasks.start", params)
+        if getattr(job, "fix_of", None):  # repair a pull request's failed checks, from its own head
+            job.emit("stage", "Planning a fix from the pull request's current code (it will update the same PR)")
+            task = await activity.call(client, "tasks.fix_pull_request", {"project_id": project_id, "task_id": job.fix_of})
+        else:
+            task = await activity.call(client, "tasks.start", params)
         job.task_id = task["id"]
         while True:
             status = task["status"]
@@ -199,6 +203,9 @@ async def execute_goal(job):
                 pull = task.get("pull_request") or {}
                 if pull.get("error"):
                     job.emit("error", "Pull request not opened: " + str(pull["error"])[:500])
+                elif pull.get("url") and pull.get("fix_of"):
+                    job.emit("output", "Updated pull request " + pull["url"] + " with the fix. It validates again on "
+                             "GitHub in the background; you'll be asked before anything is merged.")
                 elif pull.get("url"):
                     job.emit("output", "Draft pull request: " + pull["url"] + "\nIt is validating on GitHub in the "
                              "background, so you can keep working. When every check is green you'll be asked "

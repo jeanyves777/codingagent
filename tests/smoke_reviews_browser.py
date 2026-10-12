@@ -62,10 +62,10 @@ with sync_playwright() as p:
     page.locator('.message', has_text='CHECKS FAILED').get_by_role('button', name='Fix it').click()
     page.wait_for_function("window.__demo.starts.length === 1")
     start = page.evaluate("window.__demo.starts[0]")
-    assert start["mode"] == "run" and "pull/2" in start["message"] and "test_next" in start["message"]
+    assert start["mode"] == "run" and start["fix_of"] == "bbbb2222" and "pull/2" in start["message"]
 
     # Each state is asked once, however often the watcher reports it.
     assert page.locator('.message', has_text='READY TO MERGE').count() == 1
     assert not errors, errors
     browser.close()
-print("Background PR validation browser PASS: merge offered only when green with the shown head; failures show the log and Fix it plans a task")
+print("Background PR validation browser PASS: merge offered only when green with the shown head; failures show the log and Fix it plans a repair of the same PR")
