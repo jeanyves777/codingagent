@@ -87,6 +87,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Desktop packaging dependencies failed' }
           python -m pytest -q -p no:cacheprovider tests/test_unified_windows_update.py tests/test_desktop_git_live.py
           if ($LASTEXITCODE -ne 0) { throw 'Unified updater tests failed' }
+          python -m pytest -q tests/test_desktop_installer_shutdown.py
+          if ($LASTEXITCODE -ne 0) { throw 'Installer shutdown tests failed' }
           $env:CODINGBRAIN_DESKTOP_VERSION = $env:version
           python -c "import json,os,pathlib;pathlib.Path('desktop_ui/release-version.json').write_text(json.dumps({'version':os.environ['CODINGBRAIN_DESKTOP_VERSION']}),encoding='utf-8')"
           if ($LASTEXITCODE -ne 0) { throw 'Desktop preview version metadata failed' }

@@ -17,7 +17,8 @@ def finalize(out: Path, installer: Path, portable: Path) -> dict:
     manifest = out / "release.json"
     info = json.loads(manifest.read_text(encoding="utf-8"))
     version = info.get("version")
-    if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+(?:(?:a|b|rc|\.dev)\d+)?", version):
+    if not isinstance(version, str) or not re.fullmatch(
+            r"\d+\.\d+\.\d+(?:(?:a|b|rc|\.dev)\d+)?(?:\+[a-z0-9]+(?:[._-][a-z0-9]+)*)?", version):
         raise ValueError("invalid release manifest version")
     if info.get("tag") != "v" + version:
         raise ValueError("release manifest tag/version mismatch")

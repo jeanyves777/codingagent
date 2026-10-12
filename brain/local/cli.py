@@ -1079,12 +1079,25 @@ def cmd_install(args, layout):
                                register_resume=False if args.no_auto_resume else None)
     if not args.plan and not report.get("restart_required") and report["levels"]["sandbox"]["ready"] and (
             args.selftest or (installer.interactive and not args.yes and ask(
-                "Run a short end-to-end test now (a throwaway project, a real task for your model, tests in the "
+                "Run an end-to-end test now (may take several minutes; a throwaway project, a real task for your model, tests in the "
                 "sandbox; your projects are not touched)?", False))):
-        report["selftest"] = run_selftest(layout, args.json)
+        from .live import LiveView
+        with LiveView(installer.journal, mode, task_ids=[installer.run_id], stream=installer.stream) as view:
+            installer.view = view
+            try:
+                with installer.operation("selftest", "end-to-end model and sandbox test") as outcome:
+                    report["selftest"] = run_selftest(layout, args.json)
+                    if not report["selftest"]["passed"]:
+                        outcome.update(status="FAILED", summary="End-to-end test did not pass")
+                report = installer.refresh_model_after_selftest(report)
+            finally:
+                installer.view = None
     if args.json:
         print(json.dumps(report, indent=2, default=str))
-    return 0 if args.plan or report["level"] not in {"blocked"} else 1
+    if report.get("restart_required"):
+        return 3010  # Windows: installation paused until a required restart.
+    return 0 if args.plan or (report["level"] != "blocked" and
+                             report.get("selftest", {}).get("passed", True)) else 1
 
 
 def run_selftest(layout, quiet=False) -> dict:

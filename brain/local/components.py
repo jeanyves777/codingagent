@@ -215,6 +215,10 @@ class WSL(Component):
         after = self.check(env, deep=True)
         if after.ready:
             return after
+        if code not in {0, 3010, 1641}:
+            return Status("failed", f"wsl --install failed (exit {code}); WSL is not verified. "
+                          "Run 'wsl --install --no-distribution' in administrator PowerShell to see the Windows error.",
+                          action="install")
         env.evidence["pending_restart"] = self.id  # Virtual Machine Platform becomes active after a restart
         return Status("needs_restart", f"WSL installed (exit {code}); restart Windows to finish", action="restart")
 

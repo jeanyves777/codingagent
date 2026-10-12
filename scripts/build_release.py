@@ -38,7 +38,7 @@ def build(out: Path, version: str | None, constraints: Path | None) -> dict:
     with tempfile.TemporaryDirectory() as scratch:
         source = Path(scratch) / "source"
         shutil.copytree(ROOT, source, ignore=shutil.ignore_patterns(
-            ".git", "dist", "build", "*.egg-info", "__pycache__", ".venv", "gauntlet", "benchmarks", "tests"))
+            ".git", "dist", "build", "*.egg-info", "__pycache__", ".pytest_cache", ".venv", "gauntlet", "benchmarks", "tests"))
         if version:
             pyproject = source / "pyproject.toml"
             pyproject.write_text(re.sub(r'^version = "[^"]+"', f'version = "{version}"', pyproject.read_text(),

@@ -26,10 +26,15 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\CodingBrainDesktop.exe
-CloseApplications=yes
+; PyInstaller/WebView processes do not reliably support Restart Manager shutdown.
+; PrepareToInstall checks only this installation and reports blockers before copying files.
+CloseApplications=no
+RestartApplications=no
+SetupLogging=yes
 MinVersion=10.0
 
 [Files]
+Source: "Close-CodingBrainDesktop.ps1"; Flags: dontcopy
 Source: "..\..\dist\CodingBrainDesktop\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 #ifdef WithEngine
 Source: "{#EngineBundle}\*"; DestDir: "{app}\engine"; Flags: ignoreversion
@@ -59,6 +64,30 @@ Filename: "{app}\CodingBrainDesktop.exe"; Description: "Launch Coding Brain Desk
 #endif
 
 [Code]
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ExitCode: Integer;
+  ReportPath: String;
+  Details: AnsiString;
+begin
+  Result := '';
+  ExtractTemporaryFile('Close-CodingBrainDesktop.ps1');
+  ReportPath := ExpandConstant('{tmp}\desktop-close-report.txt');
+  // Native PowerShell can inspect 64-bit Python modules even though Setup is 32-bit.
+  if not Exec(ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
+    ExpandConstant('{tmp}\Close-CodingBrainDesktop.ps1') + '" -InstallDir "' +
+    ExpandConstant('{app}') + '" -ReportPath "' + ReportPath + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+    Result := 'Unable to check whether Coding Brain Desktop is running. Close Coding Brain Desktop and retry Setup.'
+  else if ExitCode <> 0 then begin
+    Result := 'Save your work and close Coding Brain Desktop, then click Retry. ' +
+      'Setup has not updated any files.';
+    if LoadStringFromFile(ReportPath, Details) then
+      Result := Result + #13#10#13#10 + String(Details);
+  end;
+end;
+
 function InitializeSetup(): Boolean;
 begin
   Result := True;
