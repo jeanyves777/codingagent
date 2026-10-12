@@ -326,3 +326,17 @@ Fixed rules govern what may happen, whatever the model concludes:
 - Every chat and routing call carries one fixed statement of what Coding Brain can and cannot do, so it never
   claims abilities it lacks (images, slide decks, audio, video, acting outside the user's projects).
 - Moving on ("I was just asking", a new question) drops a pending request; nothing is made from it.
+
+## Display library (rich answers)
+
+The model may answer with display blocks, a fenced ```cb-ui block holding one JSON object, chosen from a fixed
+library that its instructions describe: **table**, **stats**, **chart** (bar, line, pie), **options** (cards with
+title, subtitle, price, badges, details, a source and actions), **steps**, **compare**, **callout** and **actions**
+(next steps). The model decides whether and which; no rule picks for it.
+
+The window draws every block itself from text nodes and SVG (no HTML from the model, no external chart
+library). Malformed or unknown blocks fall back to readable text. Governance: real-world data needs a source;
+a price or availability without one is labelled **Unverified example**; actions are limited to *ask* (send a
+follow-up message) and *open link* (http/https only, opened in the browser after the user confirms the address).
+Coding Brain cannot browse the internet, so it says so for live data (fares, prices, news) instead of making
+options up; the same components show such data when a source tool is connected.

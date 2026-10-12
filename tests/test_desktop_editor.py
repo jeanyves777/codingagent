@@ -142,3 +142,16 @@ def test_review_b3_cut_off_diffs_are_never_labelled_full_file(project):
     whole = "diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n def add(a, b):\n-    return a + b\n+    return b + a\n"
     assert views(whole, project)[0]["exact"] is True
     assert "cut at 100,000" in views(whole, project, truncated=True)[-1]["note"]
+
+
+@pytest.mark.parametrize("url,ok", [("https://example.com/flight?x=1", True), ("http://example.com", True),
+                                    ("javascript:alert(1)", False), ("file:///C:/Windows/System32/calc.exe", False),
+                                    ("https://exa\nmple.com", False), ("C:\Windows\notepad.exe", False)])
+def test_display_links_open_only_web_addresses(tmp_path, monkeypatch, url, ok):
+    import webbrowser
+    opened = []
+    monkeypatch.setattr(webbrowser, "open", lambda target, new=0: opened.append(target))
+    workspace = Workspace(home=tmp_path)
+    client = TestClient(create_app(workspace))
+    reply = client.post("/api/open-url", headers={"X-CodingBrain-Token": workspace.secret}, json={"url": url})
+    assert (reply.status_code == 200) is ok and (opened == [url]) is ok

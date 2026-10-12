@@ -245,6 +245,25 @@ What Coding Brain cannot do: create or edit images, logos, drawings or photos; s
 audio or video; browse or post on the internet for the user; send emails or messages; act outside the
 user's projects and its own Documents folder."""
 
+# The display library: components the window can draw. The model chooses whether and which; nothing
+# here decides for it. The window validates every block and falls back to text.
+DISPLAY_LIBRARY = """Display library: when a table, numbers, a chart, a list of options, steps, a comparison or
+next actions would make the answer clearer, add a fenced block that starts with ```cb-ui and holds ONE
+JSON object (double quotes, no comments). Types and fields:
+- table: {"type":"table","title":?,"columns":[...],"rows":[[...],...]}
+- stats: {"type":"stats","items":[{"label":..,"value":..,"delta":?,"hint":?}]}
+- chart: {"type":"chart","kind":"bar"|"line"|"pie","title":?,"labels":[...],"series":[{"name":..,"values":[numbers]}],"unit":?}
+- options: {"type":"options","title":?,"items":[{"title":..,"subtitle":?,"price":?,"badges":[..]?,"details":[..]?,
+  "source":{"label":..,"url":?}?,"actions":[{"label":..,"ask":"follow-up message"}|{"label":..,"url":"https://..."}]?}]}
+- steps: {"type":"steps","title":?,"items":[{"title":..,"detail":?,"status":"done"|"current"|"todo"}]}
+- compare: {"type":"compare","title":?,"options":[...],"rows":[{"label":..,"values":[...]}],"recommendation":?}
+- callout: {"type":"callout","tone":"info"|"success"|"warning"|"danger","title":?,"text":..}
+- actions: {"type":"actions","items":[{"label":..,"ask":"follow-up message"}]}
+Any block may have "source": {"label":..,"url":?}. Use blocks only when they help; keep the prose short.
+Never invent facts, prices, availability, schedules or statistics: real-world data needs a real source
+(the user's files, the project, a tool result). You cannot browse the internet, so for live data such as
+flights, prices or news say you cannot fetch it instead of making options up."""
+
 ROUTE_SCHEMA = {"type": "object", "properties": {
     "intent": {"type": "string", "enum": list(INTENTS)},
     "project": {"type": ["string", "null"]},
@@ -298,7 +317,8 @@ and offer what you can do instead, such as a program that generates it.
 Known projects: {projects}
 Current folder: {folder}
 """ + CAPABILITIES + """
-Never claim an ability that is not in this list, and say plainly when something is not possible."""
+Never claim an ability that is not in this list, and say plainly when something is not possible.
+""" + DISPLAY_LIBRARY.replace("{", "{{").replace("}", "}}")  # literal JSON braces in a .format() template
 
 
 # The assistant ----------------------------------------------------------------------------------------

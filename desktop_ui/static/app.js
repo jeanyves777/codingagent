@@ -331,12 +331,331 @@
     }
   }
 
+  // ---- Display library: rich blocks the model chooses (```cb-ui {json}). Everything is drawn here from
+  // text nodes and SVG; nothing the model writes becomes HTML. Unknown or malformed blocks fall back to
+  // the raw text. Data without a source is labelled; links open only after the user confirms.
+  const UI_LIMITS = {rows: 200, columns: 12, items: 40, text: 600};
+  const clip = (value, limit = UI_LIMITS.text) => String(value ?? '').slice(0, limit);
+  const el = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = clip(text);
+    return node;
+  };
+  const svg = (tag, attrs = {}) => {
+    const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+    return node;
+  };
+  const PALETTE = ['#5fbf9f', '#8ec5ff', '#e9b879', '#c9a5f0', '#f09a8c', '#9fe0c8', '#d8d27e', '#7fb0d9'];
+
+  function safeUrl(raw) {
+    try {
+      const url = new URL(String(raw));
+      return ['https:', 'http:'].includes(url.protocol) ? url.href : null;
+    } catch { return null; }
+  }
+
+  async function openExternal(url) {
+    const safe = safeUrl(url);
+    if (!safe) { toast('Only web links (https) can be opened'); return; }
+    if (!await confirmAction('Open this link in your browser?', safe, 'Open link')) return;
+    try { await api('/api/open-url', 'POST', {url: safe}); } catch (e) { toast(e.message); }
+  }
+
+  function sourceChip(source) {
+    if (!source) return null;
+    const info = typeof source === 'string' ? {label: source} : source;
+    const chip = el('span', 'ui-source');
+    chip.append('Source: ');
+    const url = safeUrl(info.url);
+    if (url) {
+      const link = el('button', 'ui-link', info.label || new URL(url).hostname);
+      link.type = 'button'; link.title = url;
+      link.addEventListener('click', () => openExternal(url));
+      chip.append(link);
+    } else chip.append(clip(info.label || 'not stated', 120));
+    return chip;
+  }
+
+  function actionButtons(actions) {
+    const row = el('div', 'ui-actions');
+    for (const action of (Array.isArray(actions) ? actions : []).slice(0, 6)) {
+      if (!action || !action.label) continue;
+      const button = el('button', 'ui-action', action.label);
+      button.type = 'button';
+      if (action.ask) {
+        button.title = clip(action.ask, 300);
+        button.addEventListener('click', () => {
+          if (activeJob) { toast('Wait for the current reply to finish.'); return; }
+          setMode('chat'); $('prompt').value = clip(action.ask, 2000); submit();
+        });
+      } else if (safeUrl(action.url)) {
+        button.classList.add('external'); button.title = safeUrl(action.url);
+        button.addEventListener('click', () => openExternal(action.url));
+      } else continue;
+      row.append(button);
+    }
+    return row.childElementCount ? row : null;
+  }
+
+  function uiFrame(block, kind) {
+    const frame = el('section', 'ui-block ui-kind-' + kind);  // never the same class as the inner layout
+    if (block.title) frame.append(el('h4', 'ui-title', block.title));
+    return frame;
+  }
+
+  function finishFrame(frame, block) {
+    const foot = el('div', 'ui-foot');
+    const chip = sourceChip(block.source);
+    if (chip) foot.append(chip);
+    if (block.note) foot.append(el('span', 'ui-note', block.note));
+    if (foot.childElementCount) frame.append(foot);
+    return frame;
+  }
+
+  const UI_COMPONENTS = {
+    table(block) {
+      const columns = (block.columns || []).slice(0, UI_LIMITS.columns);
+      const rows = (block.rows || []).slice(0, UI_LIMITS.rows);
+      if (!columns.length || !Array.isArray(rows)) return null;
+      const frame = uiFrame(block, 'table');
+      const scroller = el('div', 'ui-table-wrap');
+      const table = el('table', 'ui-table');
+      const head = el('tr');
+      columns.forEach(name => head.append(el('th', '', name)));
+      const thead = el('thead'); thead.append(head); table.append(thead);
+      const body = el('tbody');
+      for (const row of rows) {
+        const tr = el('tr');
+        columns.forEach((_, index) => {
+          const value = Array.isArray(row) ? row[index] : row?.[columns[index]];
+          const cell = el('td', typeof value === 'number' ? 'num' : '', value ?? '');
+          tr.append(cell);
+        });
+        body.append(tr);
+      }
+      table.append(body);
+      scroller.append(table);
+      frame.append(scroller);
+      if ((block.rows || []).length > rows.length) frame.append(el('p', 'ui-note', `Showing ${rows.length} of ${block.rows.length} rows`));
+      return finishFrame(frame, block);
+    },
+    stats(block) {
+      const items = (block.items || []).slice(0, 12);
+      if (!items.length) return null;
+      const frame = uiFrame(block, 'stats');
+      const grid = el('div', 'ui-stats');
+      for (const item of items) {
+        const card = el('div', 'ui-stat');
+        card.append(el('span', 'ui-stat-label', item.label), el('strong', 'ui-stat-value', item.value));
+        if (item.delta !== undefined && item.delta !== null && item.delta !== '') {
+          const text = String(item.delta);
+          card.append(el('span', 'ui-stat-delta ' + (/^-/.test(text) ? 'down' : 'up'), text));
+        }
+        if (item.hint) card.append(el('span', 'ui-stat-hint', item.hint));
+        grid.append(card);
+      }
+      frame.append(grid);
+      return finishFrame(frame, block);
+    },
+    chart(block) {
+      const labels = (block.labels || []).slice(0, 40).map(String);
+      const series = (block.series || []).slice(0, 6).map(item => ({name: clip(item.name || '', 60),
+        values: (item.values || []).slice(0, labels.length).map(Number)}));
+      if (!labels.length || !series.length || series.some(item => item.values.some(Number.isNaN))) return null;
+      const frame = uiFrame(block, 'chart');
+      const kind = ['bar', 'line', 'pie'].includes(block.kind) ? block.kind : 'bar';
+      frame.append(kind === 'pie' ? pieChart(labels, series[0]) : axisChart(kind, labels, series, block.unit));
+      if (series.length > 1 || kind === 'pie') {
+        const legend = el('div', 'ui-legend');
+        (kind === 'pie' ? labels : series.map(item => item.name)).forEach((name, index) => {
+          const key = el('span', 'ui-key'); key.style.setProperty('--key', PALETTE[index % PALETTE.length]);
+          key.append(el('i'), name); legend.append(key);
+        });
+        frame.append(legend);
+      }
+      return finishFrame(frame, block);
+    },
+    options(block) {
+      const items = (block.items || []).slice(0, UI_LIMITS.items);
+      if (!items.length) return null;
+      const frame = uiFrame(block, 'options');
+      const list = el('div', 'ui-options');
+      for (const item of items) {
+        if (!item || !item.title) continue;
+        const card = el('article', 'ui-option');
+        const top = el('div', 'ui-option-top');
+        const heading = el('div');
+        heading.append(el('strong', 'ui-option-title', item.title));
+        if (item.subtitle) heading.append(el('span', 'ui-option-subtitle', item.subtitle));
+        top.append(heading);
+        if (item.price !== undefined && item.price !== null && item.price !== '') top.append(el('span', 'ui-price', item.price));
+        card.append(top);
+        const badges = el('div', 'ui-badges');
+        (item.badges || []).slice(0, 6).forEach(badge => badges.append(el('span', 'ui-badge', clip(badge, 40))));
+        // A price or availability without a source is never presented as real.
+        if (!item.source && (item.price || /available|seats?|in stock/i.test(JSON.stringify(item.details || ''))))
+          badges.append(el('span', 'ui-badge warn', 'Unverified example'));
+        if (badges.childElementCount) card.append(badges);
+        if (Array.isArray(item.details) && item.details.length) {
+          const details = el('ul', 'ui-details');
+          item.details.slice(0, 8).forEach(line => details.append(el('li', '', line)));
+          card.append(details);
+        }
+        const foot = el('div', 'ui-option-foot');
+        const chip = sourceChip(item.source);
+        if (chip) foot.append(chip);
+        const actions = actionButtons(item.actions);
+        if (actions) foot.append(actions);
+        if (foot.childElementCount) card.append(foot);
+        list.append(card);
+      }
+      frame.append(list);
+      return finishFrame(frame, block);
+    },
+    steps(block) {
+      const items = (block.items || []).slice(0, 30);
+      if (!items.length) return null;
+      const frame = uiFrame(block, 'steps');
+      const list = el('ol', 'ui-steps');
+      items.forEach((item, index) => {
+        const status = ['done', 'current', 'todo'].includes(item.status) ? item.status : 'todo';
+        const row = el('li', 'ui-step ' + status);
+        row.append(el('span', 'ui-step-mark', status === 'done' ? '✓' : String(index + 1)));
+        const text = el('div');
+        text.append(el('strong', '', item.title || ''));
+        if (item.detail) text.append(el('p', '', item.detail));
+        row.append(text);
+        list.append(row);
+      });
+      frame.append(list);
+      return finishFrame(frame, block);
+    },
+    compare(block) {
+      const options = (block.options || []).slice(0, 6);
+      const rows = (block.rows || []).slice(0, 40);
+      if (!options.length || !rows.length) return null;
+      const frame = uiFrame(block, 'compare');
+      const table = el('table', 'ui-table ui-compare-table');
+      const head = el('tr');
+      head.append(el('th', '', ''));
+      options.forEach(name => head.append(el('th', '', name)));
+      const thead = el('thead'); thead.append(head); table.append(thead);
+      const body = el('tbody');
+      for (const row of rows) {
+        const tr = el('tr');
+        tr.append(el('th', 'ui-row-label', row.label));
+        options.forEach((_, index) => tr.append(el('td', '', (row.values || [])[index] ?? '')));
+        body.append(tr);
+      }
+      table.append(body);
+      const wrap = el('div', 'ui-table-wrap'); wrap.append(table); frame.append(wrap);
+      if (block.recommendation) frame.append(el('p', 'ui-recommend', block.recommendation));
+      return finishFrame(frame, block);
+    },
+    callout(block) {
+      if (!block.text) return null;
+      const tone = ['info', 'success', 'warning', 'danger'].includes(block.tone) ? block.tone : 'info';
+      const frame = el('section', 'ui-block ui-callout ' + tone);
+      if (block.title) frame.append(el('strong', 'ui-title', block.title));
+      frame.append(el('p', '', block.text));
+      return finishFrame(frame, block);
+    },
+    actions(block) {
+      const row = actionButtons(block.items);
+      if (!row) return null;
+      const frame = uiFrame(block, 'next');
+      if (!block.title) frame.append(el('span', 'ui-kicker', 'Next steps'));
+      frame.append(row);
+      return frame;
+    },
+  };
+
+  function axisChart(kind, labels, series, unit) {
+    const width = 560, height = 230, left = 46, bottom = 34, top = 12, right = 10;
+    const values = series.flatMap(item => item.values);
+    const max = Math.max(0, ...values), min = Math.min(0, ...values);
+    const span = max - min || 1;
+    const plotW = width - left - right, plotH = height - top - bottom;
+    const y = value => top + plotH - ((value - min) / span) * plotH;
+    const root = svg('svg', {viewBox: `0 0 ${width} ${height}`, class: 'ui-chart-svg', role: 'img'});
+    for (let index = 0; index <= 4; index++) {
+      const value = min + (span * index) / 4;
+      const lineY = y(value);
+      root.append(svg('line', {x1: left, x2: width - right, y1: lineY, y2: lineY, class: 'grid'}));
+      const label = svg('text', {x: left - 6, y: lineY + 3, class: 'axis', 'text-anchor': 'end'});
+      label.textContent = formatNumber(value) + (unit && index === 4 ? ' ' + clip(unit, 12) : '');
+      root.append(label);
+    }
+    const band = plotW / labels.length;
+    labels.forEach((name, index) => {
+      const label = svg('text', {x: left + band * index + band / 2, y: height - 12, class: 'axis', 'text-anchor': 'middle'});
+      label.textContent = clip(name, 14);
+      root.append(label);
+    });
+    series.forEach((item, seriesIndex) => {
+      const color = PALETTE[seriesIndex % PALETTE.length];
+      if (kind === 'bar') {
+        const barW = Math.max(3, (band * 0.7) / series.length);
+        item.values.forEach((value, index) => {
+          const x = left + band * index + band * 0.15 + barW * seriesIndex;
+          const rect = svg('rect', {x, y: Math.min(y(value), y(0)), width: barW, height: Math.abs(y(value) - y(0)) || 1,
+            rx: 3, fill: color});
+          const tip = svg('title'); tip.textContent = `${item.name || labels[index]}: ${formatNumber(value)}${unit ? ' ' + unit : ''}`;
+          rect.append(tip); root.append(rect);
+        });
+      } else {
+        const points = item.values.map((value, index) => `${left + band * index + band / 2},${y(value)}`).join(' ');
+        root.append(svg('polyline', {points, fill: 'none', stroke: color, 'stroke-width': 2.5}));
+        item.values.forEach((value, index) => {
+          const dot = svg('circle', {cx: left + band * index + band / 2, cy: y(value), r: 3.5, fill: color});
+          const tip = svg('title'); tip.textContent = `${labels[index]}: ${formatNumber(value)}${unit ? ' ' + unit : ''}`;
+          dot.append(tip); root.append(dot);
+        });
+      }
+    });
+    return root;
+  }
+
+  function pieChart(labels, item) {
+    const total = item.values.reduce((sum, value) => sum + Math.max(0, value), 0) || 1;
+    const root = svg('svg', {viewBox: '0 0 220 220', class: 'ui-chart-svg pie', role: 'img'});
+    let angle = -Math.PI / 2;
+    item.values.forEach((value, index) => {
+      const share = Math.max(0, value) / total;
+      const next = angle + share * Math.PI * 2;
+      const large = share > 0.5 ? 1 : 0;
+      const [x1, y1, x2, y2] = [110 + 90 * Math.cos(angle), 110 + 90 * Math.sin(angle), 110 + 90 * Math.cos(next), 110 + 90 * Math.sin(next)];
+      const path = share >= 0.9999 ? svg('circle', {cx: 110, cy: 110, r: 90, fill: PALETTE[index % PALETTE.length]})
+        : svg('path', {d: `M110,110 L${x1},${y1} A90,90 0 ${large} 1 ${x2},${y2} Z`, fill: PALETTE[index % PALETTE.length]});
+      const tip = svg('title'); tip.textContent = `${labels[index]}: ${formatNumber(value)} (${Math.round(share * 100)}%)`;
+      path.append(tip); root.append(path);
+      angle = next;
+    });
+    root.append(svg('circle', {cx: 110, cy: 110, r: 46, class: 'pie-hole'}));
+    return root;
+  }
+
+  function formatNumber(value) {
+    return Math.abs(value) >= 1000 ? Math.round(value).toLocaleString() : String(Math.round(value * 100) / 100);
+  }
+
+  function uiBlock(source) {
+    let block;
+    try { block = JSON.parse(source); } catch { block = null; }
+    const render = block && typeof block === 'object' && UI_COMPONENTS[block.type];
+    let node = null;
+    try { node = render ? render(block) : null; } catch { node = null; }
+    return node || codeBlock(source, 'json', {title: 'Display block (could not be drawn)'});
+  }
+
   function richText(parent, text) {
     const fence = /```([\w+#.-]*)[^\n]*\n?([\s\S]*?)(?:```|$)/g;
     let last = 0;
     for (const match of text.matchAll(fence)) {
       if (match.index > last) inlineText(parent, text.slice(last, match.index).replace(/\n+$/, '\n'));
-      parent.append(codeBlock(match[2], match[1]));
+      parent.append(match[1] === 'cb-ui' ? uiBlock(match[2]) : codeBlock(match[2], match[1]));
       last = match.index + match[0].length;
     }
     if (last < text.length) inlineText(parent, text.slice(last).replace(/^\n+/, ''));

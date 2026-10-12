@@ -82,6 +82,10 @@ class SaveFile(BaseModel):
     project: str | None = Field(default=None, max_length=8192)  # the project the file was opened from
 
 
+class OpenUrl(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+
+
 class OpenFile(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
 
@@ -1110,6 +1114,17 @@ def create_app(state: Workspace | None = None) -> FastAPI:
             return state.conversation()
         except (EngineError, ValueError, OSError) as error:
             raise HTTPException(503, f"Conversation history unavailable: {str(error)[:200]}") from error
+
+    @app.post("/api/open-url", dependencies=[Depends(auth)])
+    def open_url(body: OpenUrl):
+        """A link from a display block, after the user confirmed it in the window: web links only."""
+        from urllib.parse import urlsplit
+        parts = urlsplit(body.url)
+        if parts.scheme not in {"http", "https"} or not parts.netloc or any(ch in body.url for ch in "\r\n\"<>"):
+            raise HTTPException(400, "Only http(s) links can be opened")
+        import webbrowser
+        webbrowser.open(body.url, new=2)
+        return {"opened": body.url}
 
     @app.post("/api/documents/open", dependencies=[Depends(auth)])
     def open_document(body: OpenFile, reveal: bool = False):
