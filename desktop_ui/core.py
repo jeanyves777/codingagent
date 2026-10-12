@@ -53,8 +53,11 @@ def _summary(task: dict, kind: str) -> dict:
     if kind == "accept":
         tests = task.get("tests") or {}
         where = "on GitHub Actions" if tests.get("profile") == "github" else "in the sandbox"
+        summary = ("Local checks passed; the full tests are running on GitHub in the background. Accept it on a NEW "
+                   "Git branch and open a draft pull request? Nothing is merged until every check is green and you "
+                   "say yes." if tests.get("deferred") else f"Tests passed {where}. Accept the result on a NEW Git branch?")
         return {"kind": kind, "task_id": task["id"],
-                "summary": f"Tests passed {where}. Accept the result on a NEW Git branch?",
+                "summary": summary,
                 "tests_passed": bool(tests.get("passed")), "requirement": task.get("requirements") or "unchecked",
                 "diff": str(task.get("diff") or "")[:100000]}
     return {"kind": kind, "task_id": task["id"], "summary": "The agent requests permission for a protected tool.",
@@ -197,8 +200,9 @@ async def execute_goal(job):
                 if pull.get("error"):
                     job.emit("error", "Pull request not opened: " + str(pull["error"])[:500])
                 elif pull.get("url"):
-                    job.emit("output", "Draft pull request: " + pull["url"])
-                    await offer_merge(job, client, project_id, task["id"])
+                    job.emit("output", "Draft pull request: " + pull["url"] + "\nIt is validating on GitHub in the "
+                             "background, so you can keep working. When every check is green you'll be asked "
+                             "before anything is merged.")
                 return "completed"
             elif status == "awaiting_tool_approval":
                 request_id = task.get("pending_tool_approval")
@@ -226,42 +230,6 @@ async def execute_goal(job):
                 return "failed"
     finally:
         activity.close()
-
-
-async def offer_merge(job, client, project_id: str, task_id: str, every: float = 30, limit: float = 3600):
-    """Watch the PR's checks; once every one is green, ask before merging (Coding Brain never merges by
-    itself). The merge is bound to the head the user was asked about."""
-    features = set((getattr(client, "info", None) or {}).get("features") or [])
-    if "tasks.pull_requests" not in features:
-        return
-    job.emit("stage", "Waiting for the pull request's checks on GitHub")
-    waited, state = 0.0, None
-    while waited < limit and not job.stop_requested.is_set():
-        try:
-            state = await asyncio.to_thread(client.call, "tasks.pull_request",
-                                            {"project_id": project_id, "task_id": task_id}, None, 120)
-        except EngineError as error:
-            job.emit("error", f"Could not read the pull request: {str(error)[:300]}")
-            return
-        if state.get("ask_merge") or state.get("failed") or state.get("state") != "OPEN":
-            break
-        await asyncio.sleep(every)
-        waited += every
-    if not state or not state.get("ask_merge"):
-        if state and state.get("failed"):
-            job.emit("error", f"{state['failed']} check(s) failed on {state.get('url')}; not offering to merge.")
-        elif state and state.get("state") == "OPEN":
-            job.emit("output", "Checks are still running; the pull request stays open for you.")
-        return
-    if not await wait_approval(job, "merge", {**state, "id": task_id}):
-        job.emit("output", "Not merged. The pull request stays open.")
-        return
-    try:
-        merged = await asyncio.to_thread(client.call, "tasks.merge", {"project_id": project_id, "task_id": task_id,
-                                                                      "head": state["head"]}, None, 300)
-        job.emit("output", "Merged " + str(merged.get("url")))
-    except EngineError as error:
-        job.emit("error", f"Not merged: {str(error)[:500]}")
 
 
 def _fail(job, exc):

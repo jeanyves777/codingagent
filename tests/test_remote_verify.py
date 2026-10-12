@@ -43,6 +43,7 @@ class FakeGitHub:
         self.calls, self.conclusion, self.log = [], conclusion, log
         self.checks = checks if checks is not None else [{"name": "tests", "conclusion": "SUCCESS"}]
         self.head, self.mergeable, self.request = head, mergeable, None
+        self.runs = {}  # run id -> (status, conclusion) for background runs
         real = remote_verify._run
         monkeypatch.setattr(remote_verify, "_gh", lambda: "gh")
         monkeypatch.setattr(remote_verify.time, "sleep", lambda seconds: None)
@@ -60,7 +61,8 @@ class FakeGitHub:
             if verb == ["run", "view"] and "--log-failed" in command:
                 return self.log
             if verb == ["run", "view"]:
-                return json.dumps({"status": "completed", "conclusion": self.conclusion})
+                status, conclusion = self.runs.get(int(command[3]), ("completed", self.conclusion))
+                return json.dumps({"status": status, "conclusion": conclusion})
             if verb == ["pr", "view"]:
                 return json.dumps({"state": "OPEN", "isDraft": True, "mergeable": self.mergeable,
                                    "headRefOid": self.head, "statusCheckRollup": self.checks})
@@ -71,7 +73,9 @@ class FakeGitHub:
 
 
 def verifier(root, **extra):
-    return remote_verify.GitHubVerifier(root, {"repository": "owner/repo", "trusted_ref": "chat-context", **extra})
+    """Blocking mode (wait: true) unless a test asks for the default background mode."""
+    return remote_verify.GitHubVerifier(root, {"repository": "owner/repo", "trusted_ref": "chat-context", "wait": True,
+                                               **extra})
 
 
 def test_snapshot_leaves_worktree_index_and_head_untouched(project):
@@ -175,7 +179,7 @@ def test_pull_request_status_asks_to_merge_only_when_green(project, monkeypatch)
     class Context:
         config = {"verification": {"projects": {str(root.resolve()): {"enabled": True, "repository": "owner/repo"}}}}
     Context.root = root
-    task = {"pull_request": {"url": "https://github.com/owner/repo/pull/12"}}
+    task = {"id": "abcdef12", "pull_request": {"url": "https://github.com/owner/repo/pull/12"}}
     FakeGitHub(monkeypatch)
     state = pullrequests.status(Context, task)
     assert state["ask_merge"] and "Merge it?" in state["question"] and state["head"] == "h" * 40
@@ -188,3 +192,46 @@ def test_service_uses_the_verifier_only_when_opted_in(tmp_path):
     from brain.service import Brain
     brain = Brain(tmp_path / "repos", tmp_path / "data", None, "img")
     assert brain.tester({"repository": "x", "id": "1"}) is run_tests
+
+
+def test_background_mode_does_not_wait_for_github(project, monkeypatch):
+    root, workspace, _ = project
+    (workspace / "app.py").write_text("def add(a, b):\n    return a + b  # v2\n", encoding="utf-8")
+    gh = FakeGitHub(monkeypatch)
+    result = verifier(root, wait=False)(workspace, None, label="abcdef12", extra={"tests/test_req.py": "X = 1\n"})
+    assert result["passed"] and result["deferred"] and result["run"]["id"] == 7
+    assert result["run"]["extra"] == ["tests/test_req.py"]
+    assert not any(call[1:3] == ["run", "view"] for call in gh.calls)  # never polled: nothing blocks
+
+
+def accepted_head(workspace, root):
+    """The accepted commit: the workspace's files as a real commit (what the PR head holds)."""
+    git(workspace, "add", "-A")
+    git(workspace, "-c", "user.email=t@e", "-c", "user.name=T", "commit", "-q", "-m", "accepted")
+    return git(workspace, "rev-parse", "HEAD")
+
+
+def test_runs_count_only_for_the_code_the_pull_request_holds(project, monkeypatch):
+    root, workspace, _ = project
+    (workspace / "app.py").write_text("def add(a, b):\n    return a + b  # v3\n", encoding="utf-8")
+    commit, _, _ = remote_verify.snapshot_commit(workspace, "m", {"tests/test_req.py": "X = 1\n"})
+    head = accepted_head(workspace, root)
+    url = "https://github.com/owner/repo/pull/12"
+    run = {"id": 41, "commit": commit, "url": "u", "extra": ["tests/test_req.py"]}
+    gh = FakeGitHub(monkeypatch, checks=[], head=head)
+    gh.runs[41] = ("in_progress", None)
+    state = remote_verify.pull_request_checks(root, {"repository": "owner/repo"}, url, [run])
+    assert state["pending"] == 1 and not state["green"]  # still running: no merge question yet
+    gh.runs[41] = ("completed", "success")
+    assert remote_verify.pull_request_checks(root, {"repository": "owner/repo"}, url, [run])["green"]
+    gh.runs[41] = ("completed", "failure")
+    gh.log = "x\ty\t2026-10-12T00:00:00Z FAILED tests/test_app.py::test_add"
+    state = remote_verify.pull_request_checks(root, {"repository": "owner/repo"}, url, [run])
+    assert state["failed"] == 1 and "FAILED tests/test_app.py::test_add" in state["failure_log"]
+    # A run of other code never counts for this head.
+    stale = {**run, "extra": []}
+    gh.runs[41] = ("completed", "success")
+    assert not remote_verify.pull_request_checks(root, {"repository": "owner/repo"}, url, [stale])["green"]
+    with pytest.raises(remote_verify.RemoteUnavailable):
+        remote_verify.merge_pull_request(root, {"repository": "owner/repo"}, url, head, [stale])
+    remote_verify.merge_pull_request(root, {"repository": "owner/repo"}, url, head, [run])

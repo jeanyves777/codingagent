@@ -21,7 +21,8 @@ def body(task: dict) -> str:
     completion = (task.get("completion") or {}).get("status", "unchecked")
     return (f"## Goal\n{task.get('goal', '')[:2000]}\n\n## Plan\n{str(proposal.get('plan', ''))[:4000]}\n\n"
             f"## Files\n{files or '-'}\n\n## Verification\n"
-            f"- Tests: {'passed' if evidence.get('passed') else 'not passed'} ({evidence.get('profile', 'sandbox')})"
+            + ("- Tests: running on GitHub Actions in the background" if evidence.get("deferred") else
+               f"- Tests: {'passed' if evidence.get('passed') else 'not passed'} ({evidence.get('profile', 'sandbox')})")
             + (f": {evidence['url']}" if evidence.get("url") else "") +
             f"\n- Requirement checks: {completion}\n- Accepted by the user in Coding Brain (task `{task['id'][:8]}`)\n\n"
             "Coding Brain asks before merging and merges only with every check green.\n\n"
@@ -47,8 +48,10 @@ def status(context, task: dict) -> dict:
     record = task.get("pull_request") or {}
     if not record.get("url"):
         raise ValueError("this task has no pull request")
-    state = remote_verify.pull_request_checks(context.root, enabled(context) or {}, record["url"])
-    return {**state, "url": record["url"], "ask_merge": state["green"],
+    state = remote_verify.pull_request_checks(context.root, enabled(context) or {}, record["url"],
+                                              task.get("remote_runs") or [])
+    return {**state, "url": record["url"], "task_id": task["id"], "goal": task.get("goal", "")[:300],
+            "ask_merge": state["green"],
             "question": (f"All {len(state['checks'])} checks are green on {record['url']}. Merge it?"
                          if state["green"] else None)}
 
@@ -57,6 +60,31 @@ def merge(context, task: dict, confirmed_head: str) -> str:
     record = task.get("pull_request") or {}
     if not record.get("url"):
         raise ValueError("this task has no pull request")
-    url = remote_verify.merge_pull_request(context.root, enabled(context) or {}, record["url"], confirmed_head)
+    url = remote_verify.merge_pull_request(context.root, enabled(context) or {}, record["url"], confirmed_head,
+                                           task.get("remote_runs") or [])
     record["merged"] = confirmed_head
     return url
+
+
+def open_reviews(context, store) -> list[dict]:
+    """Every accepted task whose pull request is still open, with its validation state. Polled in the
+    background (the desktop's PR watcher), so validation never blocks other work. A closed or merged PR
+    is recorded once and then no longer checked."""
+    found = []
+    for task in context.tasks():
+        record = task.get("pull_request") or {}
+        if not record.get("url") or record.get("merged") or record.get("closed"):
+            continue
+        full = store.get(task["id"])
+        try:
+            state = status(context, full)
+        except Exception as error:  # GitHub unreachable right now: try again on the next round
+            found.append({"task_id": task["id"], "url": record["url"], "goal": task.get("goal", "")[:300],
+                          "error": str(error)[:300]})
+            continue
+        if state.get("state") != "OPEN":
+            full["pull_request"]["closed"] = state.get("state")
+            store.save(full)
+            continue
+        found.append(state)
+    return found

@@ -11,6 +11,11 @@ The governing rule: change -> verify remotely -> open a pull request -> the huma
   workflow itself has read-only permissions and no secrets.
 - A quick local syntax check of changed Python files runs first, so obvious mistakes cost no CI run.
 The result has the same shape as brain.sandbox.run_tests, so the repair loop works unchanged.
+
+By default the GitHub run is not waited for (settings "wait": false): GitHub validation never blocks
+the rest of the day's work. The task records the run, the user can accept (a branch and a draft PR,
+never a merge), and the run plus the PR's own checks are watched in the background; merging is offered
+only once all of them are green. "wait": true keeps the blocking mode (the repair loop sees the result).
 """
 from __future__ import annotations
 
@@ -112,6 +117,7 @@ class GitHubVerifier:
         self.trusted_ref = settings.get("trusted_ref") or "main"
         self.tests = str(settings.get("tests") or "").strip()
         self.timeout = int(settings.get("timeout_minutes") or 40) * 60
+        self.wait = bool(settings.get("wait", False))
         if self.tests and not SAFE_TESTS.match(self.tests):
             raise ValueError("verification tests must be test paths or pytest node ids separated by spaces")
 
@@ -145,7 +151,13 @@ class GitHubVerifier:
                 args += ["-f", f"tests={tests}"]
             _run(args, timeout=60)
             run_id = self._find_run(request)
-            self.log(f"Verifying on GitHub: https://github.com/{self.slug}/actions/runs/{run_id}")
+            url = f"https://github.com/{self.slug}/actions/runs/{run_id}"
+            self.log(f"Verifying on GitHub: {url}")
+            if not self.wait:
+                return self._result(True, 0, f"Local checks passed. The full tests run on GitHub in the background "
+                                    f"({url}); nothing is merged until they and every pull request check are green.",
+                                    url=url, deferred=True,
+                                    run={"id": run_id, "commit": commit, "url": url, "extra": sorted(extra or {})})
             return self._wait(run_id, should_cancel)
         except RemoteUnavailable as error:
             return self._result(False, None, f"GitHub verification unavailable: {error}. Nothing was tested; check "
@@ -179,8 +191,7 @@ class GitHubVerifier:
             if time.monotonic() > deadline:
                 return self._result(False, None, f"GitHub verification timed out after {self.timeout // 60} min: {url}",
                                     url=url)
-            state = json.loads(_run([_gh(), "run", "view", str(run_id), "--repo", self.slug, "--json",
-                                     "status,conclusion"], timeout=60))
+            state = run_state(self.slug, run_id)
             if state.get("status") == "completed":
                 break
             time.sleep(POLL_SECONDS)
@@ -190,12 +201,31 @@ class GitHubVerifier:
         if conclusion == "cancelled":
             return self._result(False, None, f"The verification run was cancelled on GitHub: {url}", url=url,
                                 infrastructure=True)
-        try:
-            log = _run([_gh(), "run", "view", str(run_id), "--repo", self.slug, "--log-failed"], timeout=120)
-        except RemoteUnavailable as error:
-            log = str(error)
-        lines = [re.sub(r"^\S+\t\S+\t\S+Z ", "", line) for line in log.splitlines()]
-        return self._result(False, 1, f"Tests failed on GitHub Actions ({url}):\n" + "\n".join(lines[-200:]), url=url)
+        return self._result(False, 1, f"Tests failed on GitHub Actions ({url}):\n" + failure_log(self.slug, run_id),
+                            url=url)
+
+
+def run_state(slug: str, run_id: int) -> dict:
+    return json.loads(_run([_gh(), "run", "view", str(run_id), "--repo", slug, "--json", "status,conclusion"],
+                           timeout=60))
+
+
+def failure_log(slug: str, run_id: int, lines: int = 200) -> str:
+    try:
+        log = _run([_gh(), "run", "view", str(run_id), "--repo", slug, "--log-failed"], timeout=120)
+    except RemoteUnavailable as error:
+        log = str(error)
+    return "\n".join(re.sub(r"^\S+\t\S+\t\S+Z ", "", line) for line in log.splitlines()[-lines:])
+
+
+def covers(root: Path, run: dict, head: str) -> bool:
+    """Whether a verification run tested the PR head's files: identical, apart from the run's own extra
+    files (requirement checks). A run of other code never counts for this head."""
+    try:
+        diff = _run(["git", "-C", str(root), "diff", "--name-only", head, run.get("commit", "")], timeout=60)
+    except (RemoteUnavailable, subprocess.TimeoutExpired, OSError):
+        return False
+    return set(filter(None, diff.splitlines())) <= set(run.get("extra") or [])
 
 
 def publish_pull_request(root: Path, settings: dict, branch: str, commit: str, title: str, body: str) -> str:
@@ -217,8 +247,10 @@ def publish_pull_request(root: Path, settings: dict, branch: str, commit: str, t
     return match.group(0) if match else out.strip()[:300]
 
 
-def pull_request_checks(root: Path, settings: dict, url: str) -> dict:
-    """The PR's state and checks: {"state", "draft", "mergeable", "checks": [...], "green": bool}."""
+def pull_request_checks(root: Path, settings: dict, url: str, runs=()) -> dict:
+    """The PR's state, its checks and the task's verification runs that tested exactly the PR head's
+    files: {"state", "draft", "mergeable", "head", "checks", "pending", "failed", "failure_log", "green"}.
+    Green needs at least one check or run, none pending or failed, an open and mergeable PR."""
     slug = settings.get("repository") or repo_slug(Path(root))
     info = json.loads(_run([_gh(), "pr", "view", url, "--repo", slug, "--json",
                             "state,isDraft,mergeable,headRefOid,statusCheckRollup"], timeout=60))
@@ -226,20 +258,30 @@ def pull_request_checks(root: Path, settings: dict, url: str) -> dict:
     for check in info.get("statusCheckRollup") or []:
         status = (check.get("conclusion") or check.get("state") or check.get("status") or "").upper()
         checks.append({"name": check.get("name") or check.get("context") or "check", "status": status})
+    head, failure = info.get("headRefOid"), ""
+    for run in runs or ():
+        if not run.get("id") or not head or not covers(Path(root), run, head):
+            continue  # it tested other files than the PR now holds
+        found = run_state(slug, run["id"])
+        status = "PENDING" if found.get("status") != "completed" else (found.get("conclusion") or "").upper()
+        checks.append({"name": "Coding Brain verify", "status": status, "url": run.get("url")})
+        if status not in {"PENDING", "SUCCESS"} and not failure:
+            failure = f"{run.get('url')}\n" + failure_log(slug, run["id"], 120)
     pending = [c for c in checks if c["status"] in {"", "PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED", "WAITING"}]
     failed = [c for c in checks if c not in pending and c["status"] not in {"SUCCESS", "NEUTRAL", "SKIPPED"}]
     return {"state": info.get("state"), "draft": info.get("isDraft"), "mergeable": info.get("mergeable"),
-            "head": info.get("headRefOid"), "checks": checks, "pending": len(pending), "failed": len(failed),
+            "head": head, "checks": checks, "pending": len(pending), "failed": len(failed),
+            "failure_log": failure[-6000:],
             "green": bool(checks) and not pending and not failed and info.get("mergeable") == "MERGEABLE"
             and info.get("state") == "OPEN"}
 
 
-def merge_pull_request(root: Path, settings: dict, url: str, confirmed_head: str) -> str:
+def merge_pull_request(root: Path, settings: dict, url: str, confirmed_head: str, runs=()) -> str:
     """Merge only what the user confirmed: every check green, mergeable, and the head unchanged since
     the user was asked (a new push means a new question). Never with --admin: branch protection holds."""
     if not confirmed_head:
         raise RemoteUnavailable("merging needs the user's confirmation of a specific head commit")
-    state = pull_request_checks(root, settings, url)
+    state = pull_request_checks(root, settings, url, runs)
     if not state["green"]:
         raise RemoteUnavailable(f"not merging: {state['failed']} failed, {state['pending']} pending check(s), "
                                 f"mergeable={state['mergeable']}, state={state['state']}")

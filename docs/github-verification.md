@@ -11,16 +11,30 @@ codingbrain verify off                         # back to the local sandbox
 
 ## The governed flow
 
+GitHub validation runs **in the background**. It never blocks the rest of the day's work. The only
+waiting happens at the end, before a release, when every pull request has to be validated.
+
 1. **Plan:** you approve the plan as usual. Nothing leaves your computer before that.
-2. **Verify:** Coding Brain checks changed Python files for syntax errors locally, which takes seconds
-   and costs no CI run. It then snapshots the task's worktree into a commit and pushes it to
-   `codingbrain/verify-<task>`. It starts `codingbrain-verify.yml` from the trusted ref with that
-   commit. A failure log goes to the repair loop, exactly like a local sandbox failure.
-3. **Accept:** you accept the result. Coding Brain creates the local branch and opens a **draft pull
-   request** into `pr_base`, with the goal, plan, files and test evidence.
-4. **Merge:** Coding Brain watches the pull request's checks. Only when **every check is green** does it
-   ask you: *"All N checks are green on … Merge it?"*. It asks in the desktop with Merge / Not now, or
-   in `codingbrain pr <task> --wait`. It merges only after your yes.
+2. **Quick local checks, then GitHub:**
+   - Coding Brain checks changed Python files for syntax errors locally. This takes seconds and costs
+     no CI run. A failure goes straight to the repair loop.
+   - It then snapshots the task's worktree into a commit, pushes it to `codingbrain/verify-<task>`,
+     and starts `codingbrain-verify.yml` from the trusted ref.
+   - It does **not** wait for the run. The task is ready for you, and the run is recorded on it.
+3. **Accept:** accepting creates the local branch and a **draft pull request** into `pr_base`. That
+   is never a merge. The accept prompt says plainly that the full tests are still running.
+4. **Background watcher:** the desktop, or `codingbrain pr`, follows every open pull request. It
+   watches the task's GitHub runs together with the PR's own checks. A run only counts for the PR
+   if it tested exactly the PR head's files, apart from its own requirement-check files.
+   - **All green:** *"All N checks are green on … Merge it?"* with **Merge / Not now**. It merges
+     only after your yes.
+   - **Something failed:** the failure log and **Fix it**. Fix it starts a normal task whose plan
+     you approve first.
+5. **Release:** `codingbrain pr --wait` waits until no check is still running. It then asks about
+   each green pull request, so the release contains only validated work.
+
+To wait for GitHub inside each task instead, which lets the repair loop see remote failures
+directly, set `"wait": true`.
 
 ## Fixed rules (governance)
 
@@ -34,8 +48,8 @@ codingbrain verify off                         # back to the local sandbox
 - The worktree, its index and HEAD are never touched by verification. Requirement checks travel only
   inside the verification commit.
 - A merge is refused unless:
-  - every check succeeded;
-  - there is at least one check;
+  - every check and counted run succeeded;
+  - there is at least one;
   - the PR is mergeable;
   - the head is still the commit you were asked about (`--match-head-commit`).
   A new push means a new question. Branch protection is never bypassed (no `--admin`).
@@ -51,10 +65,13 @@ change them. They sit under `verification.projects["<project path>"]`:
 | `trusted_ref` | branch the workflow is read from (default `main`) |
 | `pr_base` | branch pull requests target (default: the trusted ref) |
 | `tests` | test paths to run (default: the whole suite) |
-| `timeout_minutes` | how long to wait for a run (default 40) |
+| `wait` | `false` (default): validate in the background; `true`: wait inside the task |
+| `timeout_minutes` | how long a waiting task waits for a run (default 40) |
 | `merge_method` | `squash` (default), `merge` or `rebase` |
 
 The repository must contain `.github/workflows/codingbrain-verify.yml` on the trusted ref.
 
-Engine API: `tasks.pull_request` returns the checks, plus `ask_merge` and `question`. `tasks.merge`
-takes the confirmed `head`. Both are behind the feature flag `tasks.pull_requests`.
+Engine API, behind the feature flag `tasks.pull_requests`:
+- `pull_requests.list` returns the open PRs and their validation. It is what the watcher polls.
+- `tasks.pull_request` returns one PR's state, plus `ask_merge` and `question`.
+- `tasks.merge` takes the confirmed `head`.

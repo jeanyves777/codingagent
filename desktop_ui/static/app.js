@@ -1191,17 +1191,9 @@
       box.append(side);
       box.append(reveal);
     }
-    if (details?.kind === 'merge' && /^https:\/\/github\.com\//.test(details.url || '')) {
-      const link = document.createElement('button');
-      link.type = 'button'; link.className = 'secondary-button';
-      link.textContent = 'Open the pull request';
-      link.addEventListener('click', () => api('/api/open-url', 'POST', {url: details.url}).catch(e => toast(e.message)));
-      box.append(link);
-    }
     const buttons = document.createElement('div');
     buttons.className = 'decision-buttons';
-    const choices = details?.kind === 'merge' ? [['Merge', true], ['Not now', false]] : [['Approve', true], ['Decline', false]];
-    for (const [name, allow] of choices) {
+    for (const [name, allow] of [['Approve', true], ['Decline', false]]) {
       const button = document.createElement('button');
       button.textContent = name;
       if (!allow) button.className = 'no';
@@ -1489,6 +1481,69 @@
     heartbeatTimer = setTimeout(heartbeat, delay);
   }
 
+  // ---- Pull requests validating on GitHub in the background. They never block the active job; the
+  // window asks before merging once every check is green, and offers a fix when one fails.
+  const shownReviews = new Map();
+  let reviewsCheckedAt = 0;
+
+  function prButton(label, onClick, secondary) {
+    const button = document.createElement('button');
+    button.type = 'button'; button.textContent = label;
+    if (secondary) button.className = 'no';
+    button.addEventListener('click', onClick);
+    return button;
+  }
+
+  function showReview(item) {
+    const safeUrl = /^https:\/\/github\.com\//.test(item.url || '') ? item.url : null;
+    const row = document.createElement('div');
+    row.className = 'decision-buttons';
+    let box;
+    if (item.ask_merge) {
+      box = message('CODING BRAIN · READY TO MERGE', `${item.question}\n\n${item.goal || ''}`, 'system');
+      row.append(prButton('Merge', async () => {
+        row.replaceChildren();
+        try {
+          await api('/api/pull-requests/merge', 'POST', {task_id: item.task_id, head: item.head});
+          message('CODING BRAIN', 'Merged ' + item.url, 'system');
+        } catch (e) { message('CODING BRAIN', e.message, 'system'); }
+      }), prButton('Not now', () => { row.remove(); message('YOU', 'Not now: the pull request stays open', 'user'); }, true));
+    } else {
+      box = message('CODING BRAIN · CHECKS FAILED',
+        `${item.failed} check(s) failed on ${item.url} — ${item.goal || ''}\nNothing was merged.`, 'system');
+      if (item.failure_log) {
+        const reveal = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = 'Failure log';
+        reveal.append(summary, codeBlock(item.failure_log, 'text', {title: 'GitHub Actions'}));
+        box.append(reveal);
+      }
+      row.append(prButton('Fix it', () => {
+        row.remove();
+        // Starts planning only: the fix is shown for approval like any task.
+        startAction({kind: 'task', goal: `Fix the failing checks of pull request ${item.url} (for: ${item.goal || ''}). ` +
+          `Failure log:\n${(item.failure_log || '').slice(-3000)}`});
+      }));
+    }
+    if (safeUrl) row.append(prButton('Open the pull request', () => api('/api/open-url', 'POST', {url: safeUrl}).catch(e => toast(e.message)), true));
+    box.append(row);
+  }
+
+  async function checkReviews(force) {
+    if (!currentProject || (!force && Date.now() - reviewsCheckedAt < 30000)) return;
+    reviewsCheckedAt = Date.now();
+    try {
+      const data = await api('/api/pull-requests' + (force ? '?refresh=true' : ''));
+      for (const item of data.pull_requests || []) {
+        if (item.error || !(item.ask_merge || item.failed)) continue;
+        const key = `${item.head}:${item.ask_merge ? 'green' : 'failed'}`;
+        if (shownReviews.get(item.task_id) === key) continue;  // each state is asked once
+        shownReviews.set(item.task_id, key);
+        showReview(item);
+      }
+    } catch (e) { /* the next heartbeat tries again */ }
+  }
+
   async function heartbeat() {
     try {
       const health = await api('/api/health');
@@ -1508,6 +1563,7 @@
       }
       installedVersion = health.installed_version;
       if (recovered || restarted) { toast('Reconnected to Coding Brain'); refresh(); }
+      if (!document.hidden) checkReviews(false);
     } catch (error) {
       if (error.status === 403) {
         setConnection(false, 'Session expired — reopen Coding Brain');

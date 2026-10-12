@@ -86,6 +86,11 @@ class OpenUrl(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
 
 
+class MergeRequest(BaseModel):
+    task_id: str = Field(min_length=6, max_length=64, pattern=r"^[0-9a-f]+$")
+    head: str = Field(min_length=40, max_length=40, pattern=r"^[0-9a-f]{40}$")
+
+
 class OpenFile(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
 
@@ -184,6 +189,9 @@ class Workspace:
         self.lock = threading.Lock()
         self.use_core = True
         self.state_path = self._desktop_state_path()
+        # Background PR watcher: validation on GitHub never blocks the active job.
+        self.reviews = {"project": None, "project_id": None, "enabled": False, "items": [], "checked": 0.0}
+        self._reviews_running = False
 
     def _desktop_state_path(self) -> Path:
         # Desktop preferences are separate from brain configuration and its updater.
@@ -279,6 +287,47 @@ class Workspace:
         active = self.jobs.get(self.active) if self.active else None
         return {"ok": True, "boot": self.boot, "installed_version": self.installed_version(),
                 "active": {"id": active.id, "status": active.status} if active else None}
+
+    def pull_requests(self, refresh: bool = False) -> dict:
+        """Open pull requests of accepted tasks and their validation, from a cache refreshed in the
+        background: this never waits for GitHub, so it never blocks the window or the active job."""
+        project = str(self.project) if self.project else None
+        cache = self.reviews
+        if cache["project"] != project:
+            cache.update(project=project, project_id=None, enabled=False, items=[], checked=0.0)
+        every = 60 if cache["items"] else 300
+        if project and not self._reviews_running and (refresh or time.monotonic() - cache["checked"] > every):
+            self._reviews_running = True
+            threading.Thread(target=self._refresh_reviews, args=(project,), daemon=True,
+                             name="coding-brain-pr-watcher").start()
+        return {"enabled": cache["enabled"], "pull_requests": cache["items"]}
+
+    def _refresh_reviews(self, project: str):
+        try:
+            client = self.engine_client()
+            info = client.info or client.call("engine.info", {}, None, 60)
+            if "tasks.pull_requests" not in set(info.get("features") or []):
+                return
+            project_id = client.call("projects.register", {"path": project}, None, 120)["id"]
+            found = client.call("pull_requests.list", {"project_id": project_id}, None, 600)
+            if self.reviews["project"] == project:
+                self.reviews.update(project_id=project_id, enabled=bool(found.get("enabled")),
+                                    items=list(found.get("pull_requests") or [])[:50])
+        except Exception:
+            pass  # engine busy starting or GitHub unreachable: the next round tries again
+        finally:
+            self.reviews["checked"] = time.monotonic()
+            self._reviews_running = False
+
+    def merge_pull_request(self, task_id: str, head: str) -> dict:
+        """The user pressed Merge on a green pull request: merge exactly that head (the engine re-checks)."""
+        project_id = self.reviews.get("project_id")
+        if not project_id or not any(item.get("task_id") == task_id for item in self.reviews["items"]):
+            raise ValueError("That pull request is not open in this project")
+        result = self.engine_client().call("tasks.merge", {"project_id": project_id, "task_id": task_id, "head": head},
+                                           None, 300)
+        self.reviews["checked"] = 0.0
+        return result
 
     def engine_status(self, refresh: bool = False) -> dict:
         """Truthful installed-engine/model readiness; the local UI is a separate process.
@@ -1114,6 +1163,20 @@ def create_app(state: Workspace | None = None) -> FastAPI:
             return state.conversation()
         except (EngineError, ValueError, OSError) as error:
             raise HTTPException(503, f"Conversation history unavailable: {str(error)[:200]}") from error
+
+    @app.get("/api/pull-requests", dependencies=[Depends(auth)])
+    def pull_requests(refresh: bool = False):
+        return state.pull_requests(refresh=refresh)
+
+    @app.post("/api/pull-requests/merge", dependencies=[Depends(auth)])
+    def merge_pull_request(body: MergeRequest):
+        from .engine_client import EngineError
+        try:
+            return state.merge_pull_request(body.task_id, body.head)
+        except EngineError as error:
+            raise HTTPException(409, f"Not merged: {str(error)[:400]}")
+        except ValueError as error:
+            raise HTTPException(409, str(error))
 
     @app.post("/api/open-url", dependencies=[Depends(auth)])
     def open_url(body: OpenUrl):

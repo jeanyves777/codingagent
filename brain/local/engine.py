@@ -76,6 +76,9 @@ OPERATIONS = {
     "tasks.pull_request": ("read", {"project_id": ("str", True), "task_id": ("str", True)},
                            "the task's pull request and its checks; ask_merge and question once every check is "
                            "green (feature tasks.pull_requests)"),
+    "pull_requests.list": ("read", {"project_id": ("str", True)},
+                           "open pull requests of accepted tasks with their validation (GitHub run + PR checks); "
+                           "polled in the background so validation never blocks other work"),
     "tasks.merge": ("action", {"project_id": ("str", True), "task_id": ("str", True), "head": ("str", True)},
                     "merges the task's pull request after the user confirmed: refused unless every check is "
                     "green and the head is still the commit the user was asked about"),
@@ -127,6 +130,7 @@ def task_summary(task: dict) -> dict:
             "diff": str(task.get("diff") or "")[:100000],
             "tests": {"passed": evidence.get("passed"), "exit_code": evidence.get("exit_code"),
                       "profile": evidence.get("profile"), "url": evidence.get("url"),
+                      "deferred": bool(evidence.get("deferred")),
                       "output_tail": str(evidence.get("output") or "")[-4000:]} if evidence else None,
             "requirements": (task.get("completion") or {}).get("status"),
             "failures": [{key: item.get(key) for key in ("attempt", "category", "diagnosis", "summary")}
@@ -515,6 +519,13 @@ class Engine:
             return pullrequests.status(self.context(project_id), task)
         except (ValueError, RemoteUnavailable) as error:
             raise ApiError("refused", str(error))
+
+    def op_pull_requests_list(self, project_id: str):
+        from . import pullrequests
+        context = self.context(project_id)
+        if not pullrequests.enabled(context):
+            return {"enabled": False, "pull_requests": []}
+        return {"enabled": True, "pull_requests": pullrequests.open_reviews(context, self.brain(project_id).store)}
 
     def op_tasks_merge(self, project_id: str, task_id: str, head: str, emit=None):
         """Governance: only after the user confirmed the question tasks.pull_request asked."""

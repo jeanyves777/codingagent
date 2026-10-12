@@ -250,9 +250,14 @@ async def handle(context: Context, task: dict, auto: bool) -> dict:
             quiet_live()
             evidence = task.get("test_evidence", {})
             completion = (task.get("completion") or {}).get("status", "unchecked")
-            where = "on GitHub Actions" if evidence.get("profile") == "github" else "in the sandbox"
-            print(f"\nTests passed {where} (exit {evidence.get('exit_code')}); "
-                  f"requirement checks: {completion}.")
+            if evidence.get("deferred"):
+                print(f"\nLocal checks passed; the full tests are running on GitHub in the background "
+                      f"({evidence.get('url')}). Accepting opens a draft pull request; nothing is merged until "
+                      "every check is green and you say yes.")
+            else:
+                where = "on GitHub Actions" if evidence.get("profile") == "github" else "in the sandbox"
+                print(f"\nTests passed {where} (exit {evidence.get('exit_code')}); "
+                      f"requirement checks: {completion}.")
             if task.get("review_disputed"):
                 print("Note: the reviewer objected; its reason is in `codingbrain status`.")
             if task.get("visual_verification"):
@@ -291,8 +296,9 @@ async def accept(context: Context, task: dict) -> dict:
         record = pullrequests.publish(context, task)
         if record:
             context.brain.store.save(task)
-            print(f"Draft pull request: {record['url']}\nWhen its checks are green, `codingbrain pr {task['id'][:8]} "
-                  "--wait` asks you before merging." if record.get("url") else f"Pull request not opened: {record['error']}")
+            print(f"Draft pull request: {record['url']}\nIt validates on GitHub in the background; keep working. "
+                  "`codingbrain pr` asks you before merging each one that is green." if record.get("url")
+                  else f"Pull request not opened: {record['error']}")
     if task["status"] == "accepted" and task.get("attachments"):
         from .evidence import remember_outcome
         remember_outcome(context, task)
@@ -709,35 +715,47 @@ def cmd_verify(args, layout):
 
 
 def cmd_pr(args, layout):
-    """A task's pull request: its checks, and - once all are green - asking before merging."""
+    """Open pull requests validating in the background: their state, and - for each one whose checks are
+    all green - asking before merging. --wait waits until none is still running (e.g. before a release)."""
     from . import pullrequests
     context = Context(layout, Path.cwd())
-    found = [task for task in context.tasks() if (task.get("pull_request") or {}).get("url")
-             and (not args.task or task["id"].startswith(args.task))]
-    if not found:
-        raise SystemExit("No task with a pull request" + (f" matches {args.task!r}." if args.task else "."))
-    task = context.brain.store.get(found[0]["id"])
+    store = context.brain.store
     while True:
-        try:
-            state = pullrequests.status(context, task)
-        except Exception as error:
-            raise SystemExit(f"Could not read the pull request: {error}")
-        print(f"{state['url']}  {state['state']}  checks: {len(state['checks'])}, "
-              f"{state['pending']} pending, {state['failed']} failed, mergeable={state['mergeable']}")
-        if state["state"] != "OPEN" or state["failed"] or not args.wait or state["ask_merge"]:
+        reviews = [item for item in pullrequests.open_reviews(context, store)
+                   if not args.task or item["task_id"].startswith(args.task)]
+        if not reviews:
+            print("No open pull request" + (f" matches {args.task!r}." if args.task else ": nothing is waiting."))
+            return 0
+        for item in reviews:
+            if item.get("error"):
+                print(f"{item['url']}  could not be read now: {item['error']}")
+            else:
+                print(f"{item['url']}  {item['goal'][:60]}  checks: {len(item['checks'])}, {item['pending']} running, "
+                      f"{item['failed']} failed")
+        running = [item for item in reviews if not item.get("error") and item["pending"] and not item["failed"]]
+        if not args.wait or not running:
             break
         time.sleep(30)
-    if not state["ask_merge"]:
-        return 1 if state["failed"] else 0
-    if not ask(state["question"]):
-        print("Not merged. The pull request stays open.")
-        return 0
-    try:
-        pullrequests.merge(context, task, state["head"])
-    except Exception as error:
-        raise SystemExit(f"Not merged: {error}")
-    context.brain.store.save(task)
-    print(f"Merged {state['url']}.")
+    status = 0
+    for item in reviews:
+        if item.get("failed"):
+            status = 1
+            print(f"\nChecks failed on {item['url']}:\n{item.get('failure_log', '')[-1500:]}")
+        if not item.get("ask_merge"):
+            continue
+        if not ask(item["question"]):
+            print("Not merged. The pull request stays open.")
+            continue
+        task = store.get(item["task_id"])
+        try:
+            pullrequests.merge(context, task, item["head"])
+        except Exception as error:
+            print(f"Not merged: {error}")
+            status = 1
+            continue
+        store.save(task)
+        print(f"Merged {item['url']}.")
+    return status
 
 
 def cmd_accept(args, layout):
@@ -1488,9 +1506,9 @@ def main(argv=None) -> int:
     verify_parser.add_argument("--pr-base", help="branch pull requests target (default: the trusted ref)")
     verify_parser.add_argument("--tests", help="test paths to run (default: the whole suite)")
     verify_parser.add_argument("--timeout-minutes", type=int, default=40)
-    pr_parser = commands.add_parser("pr", help="a task's pull request: checks, then asks before merging when all are green")
+    pr_parser = commands.add_parser("pr", help="open pull requests validating on GitHub; asks before merging each green one")
     pr_parser.add_argument("task", nargs="?")
-    pr_parser.add_argument("--wait", action="store_true", help="wait for pending checks")
+    pr_parser.add_argument("--wait", action="store_true", help="wait until no check is still running (before a release)")
     accept_parser = commands.add_parser("accept", help="accept a tested task as a new branch")
     accept_parser.add_argument("task", nargs="?")
     run = commands.add_parser("run", help="work on one goal")

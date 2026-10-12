@@ -33,6 +33,7 @@ on:
       - 'tests/smoke_stream_browser.py'
       - 'tests/smoke_conversation_browser.py'
       - 'tests/smoke_display_browser.py'
+      - 'tests/smoke_reviews_browser.py'
       - 'scripts/fetch_monaco.py'
       - 'brain/local/assistant.py'
       - 'tests/test_desktop_engine_installer_probe.py'
@@ -224,6 +225,8 @@ jobs:
         env:
           CB_DESKTOP_DISPLAY_SCREENSHOT: ${{ runner.temp }}/CodingBrain-Desktop-Display.png
         run: python tests/smoke_display_browser.py
+      - name: Verify background PR validation (merge when green, fix when failed)
+        run: python tests/smoke_reviews_browser.py
       - name: Verify the bundled Monaco editor, save conflicts and side-by-side review on the real bridge
         shell: pwsh
         env:

@@ -272,7 +272,13 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
             return run_tests
         from .remote_verify import GitHubVerifier
         verifier = GitHubVerifier(self.repository(task["repository"]), self.verification)
-        return lambda workspace, image, **options: verifier(workspace, image, label=task["id"][:8], **options)
+
+        def run(workspace, image, **options):
+            result = verifier(workspace, image, label=task["id"][:8], **options)
+            if result.get("run"):  # not waited for: the PR watcher checks it before any merge
+                task.setdefault("remote_runs", []).append(result["run"])
+            return result
+        return run
 
     def workspace(self, task_id: str) -> Path:
         task = self.store.get(task_id)
@@ -399,6 +405,10 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
             self._count(task, "requirement_check_runs")
             if evidence.get("cancelled"):
                 self._check_cancelled(task)
+            if evidence.get("deferred"):  # running on GitHub in the background; checked before any merge
+                self._completion(task, "pending_github", f"{checks['tests']} requirement check(s) running on GitHub: "
+                                 + str(evidence.get("url")))
+                return None
             if evidence["passed"]:
                 self._completion(task, "verified", f"{checks['tests']} requirement check(s) passed")
                 self.event(task, "completion_verified", task["completion"]["detail"])
@@ -1137,7 +1147,8 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
             self.store.remember(task_id, {
                 "repository": task["repository"], "content": summary, "evidence": task["test_evidence"],
                 "commit": task.get("commit"), "kind": kind,
-                "verification": "tests_passed_and_human_accepted",
+                "verification": "local_checks_and_human_accepted_github_pending"
+                if (task.get("test_evidence") or {}).get("deferred") else "tests_passed_and_human_accepted",
                 "supervision": [{"supervisor": item["supervisor"], "kind": item["kind"]}
                                 for item in task.get("supervision", [])],
             })

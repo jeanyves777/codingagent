@@ -1,74 +1,77 @@
-"""After a task is accepted as a pull request, the desktop watches its checks and asks before
-merging only once every check is green; the merge is bound to the head the user was asked about."""
-import asyncio
-import threading
+"""Pull requests validate on GitHub in the background: the desktop's watcher never blocks the window
+or the active job, offers Merge only for a pull request the engine reported, and passes exactly the
+head the user was shown (the engine re-checks that every check is green before merging)."""
+import time
 
-from desktop_ui import core
-from desktop_ui.engine_client import EngineError
-from desktop_ui.server import Job
+import pytest
+from fastapi.testclient import TestClient
+
+from desktop_ui.server import Workspace, create_app
+
+GREEN = {"task_id": "abcdef12", "state": "OPEN", "ask_merge": True, "failed": 0, "pending": 0, "head": "a" * 40,
+         "url": "https://github.com/o/r/pull/1", "question": "All 2 checks are green on https://github.com/o/r/pull/1. Merge it?"}
 
 
-class Client:
+class Engine:
     info = {"features": ["tasks.pull_requests"]}
 
-    def __init__(self, states):
-        self.states, self.calls = list(states), []
+    def __init__(self, delay=0.0):
+        self.calls, self.delay = [], delay
 
     def call(self, op, params=None, on_event=None, timeout=None):
         self.calls.append((op, params))
-        if op == "tasks.pull_request":
-            return self.states.pop(0) if len(self.states) > 1 else self.states[0]
+        if op == "projects.register":
+            return {"id": "proj1"}
+        if op == "pull_requests.list":
+            time.sleep(self.delay)  # GitHub is slow; the window must not wait for it
+            return {"enabled": True, "pull_requests": [GREEN]}
         if op == "tasks.merge":
-            return {"merged": True, "url": "https://github.com/o/r/pull/1"}
-        raise EngineError("unknown_op", op)
+            return {"merged": True, "url": GREEN["url"]}
+        raise AssertionError(op)
 
 
-GREEN = {"state": "OPEN", "ask_merge": True, "failed": 0, "pending": 0, "head": "a" * 40,
-         "url": "https://github.com/o/r/pull/1", "question": "All 3 checks are green on https://github.com/o/r/pull/1. Merge it?"}
-PENDING = {**GREEN, "ask_merge": False, "pending": 2, "question": None}
+@pytest.fixture
+def desktop(tmp_path, monkeypatch):
+    engine = Engine(delay=0.3)
+    monkeypatch.setattr(Workspace, "engine_client", lambda self: engine)
+    workspace = Workspace(home=tmp_path, executable="unused")
+    workspace.project = tmp_path
+    http = TestClient(create_app(workspace))
+    return http, {"X-CodingBrain-Token": workspace.secret}, workspace, engine
 
 
-def decide(job, allow):
-    def answer():
-        while not job.awaiting_approval:
-            job.stop_requested.wait(.01)
-        assert job.pending_payload["kind"] == "merge" and "Merge it?" in job.pending_payload["summary"]
-        job.decision_allow = allow
-        job.decision_event.set()
-    thread = threading.Thread(target=answer, daemon=True)
-    thread.start()
-    return thread
+def settle(workspace):
+    deadline = time.monotonic() + 5
+    while workspace._reviews_running and time.monotonic() < deadline:
+        time.sleep(.02)
 
 
-def run(job, client):
-    asyncio.run(core.offer_merge(job, client, "p", "t", every=0))
+def test_the_watcher_never_blocks_and_reports_green_pull_requests(desktop):
+    http, headers, workspace, _ = desktop
+    started = time.monotonic()
+    first = http.get("/api/pull-requests", headers=headers).json()
+    assert time.monotonic() - started < 0.25 and first["pull_requests"] == []  # answered from the cache
+    settle(workspace)
+    found = http.get("/api/pull-requests", headers=headers).json()
+    assert found["enabled"] and found["pull_requests"][0]["ask_merge"]
 
 
-def test_asks_only_when_green_and_merges_the_confirmed_head():
-    job, client = Job("run", None, ["goal"]), Client([PENDING, PENDING, GREEN])
-    decide(job, True)
-    run(job, client)
-    assert [op for op, _ in client.calls] == ["tasks.pull_request"] * 3 + ["tasks.merge"]
-    assert client.calls[-1][1]["head"] == "a" * 40
+def test_merge_passes_the_shown_head_and_only_for_known_pull_requests(desktop):
+    http, headers, workspace, engine = desktop
+    http.get("/api/pull-requests", headers=headers)
+    settle(workspace)
+    unknown = http.post("/api/pull-requests/merge", json={"task_id": "ffffff99", "head": "a" * 40}, headers=headers)
+    assert unknown.status_code == 409
+    bad = http.post("/api/pull-requests/merge", json={"task_id": "abcdef12", "head": "main"}, headers=headers)
+    assert bad.status_code == 422
+    assert http.post("/api/pull-requests/merge", json={"task_id": "abcdef12", "head": "a" * 40},
+                     headers=headers).json()["merged"]
+    assert ("tasks.merge", {"project_id": "proj1", "task_id": "abcdef12", "head": "a" * 40}) in engine.calls
 
 
-def test_declining_leaves_the_pull_request_open():
-    job, client = Job("run", None, ["goal"]), Client([GREEN])
-    decide(job, False)
-    run(job, client)
-    assert "tasks.merge" not in [op for op, _ in client.calls]
-    assert any("stays open" in event["message"] for event in job.dump())
-
-
-def test_failed_checks_are_reported_and_never_offered():
-    job, client = Job("run", None, ["goal"]), Client([{**PENDING, "pending": 0, "failed": 1}])
-    run(job, client)
-    assert not job.awaiting_approval and "tasks.merge" not in [op for op, _ in client.calls]
-    assert any("failed" in event["message"] for event in job.dump() if event["kind"] == "error")
-
-
-def test_older_engines_are_not_asked():
-    job, client = Job("run", None, ["goal"]), Client([GREEN])
-    client.info = {"features": []}
-    run(job, client)
-    assert client.calls == []
+def test_older_engines_are_not_asked(desktop):
+    http, headers, workspace, engine = desktop
+    engine.info = {"features": []}
+    http.get("/api/pull-requests", headers=headers)
+    settle(workspace)
+    assert [op for op, _ in engine.calls] == []
