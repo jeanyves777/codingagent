@@ -44,6 +44,7 @@ def _summary(task: dict, kind: str) -> dict:
     if kind == "proposal":
         return {"kind": kind, "task_id": task["id"], "summary": str(task.get("plan", ""))[:4000],
                 "files": list(task.get("files") or [])[:100], "diff": str(task.get("diff") or "")[:100000],
+                "diff_truncated": len(str(task.get("diff") or "")) > 100000,
                 "digest": task.get("digest")}
     if kind == "accept":
         tests = task.get("tests") or {}
@@ -290,7 +291,12 @@ def chat(job):
             for item in client.call("projects.list", {}, None, 60):
                 if Path(item["root"]).resolve() == selected:
                     params["project_id"] = item["id"]
-        answer = client.call("conversation.send", params, None, 300)
+        def streamed(event):  # engines with conversation.stream send steps, then the reply as it is written
+            if event.get("event_type") == "reply_delta" and event.get("text"):
+                job.emit("delta", str(event["text"])[:4000])
+            elif event.get("event_type") == "reply_step" and event.get("text"):
+                job.emit("step", str(event["text"])[:300])
+        answer = client.call("conversation.send", params, streamed, 300)
         if answer.get("reply"):
             job.emit("output", answer["reply"])
         action = answer.get("action")

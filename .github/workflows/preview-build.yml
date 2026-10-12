@@ -90,6 +90,8 @@ jobs:
           $env:CODINGBRAIN_DESKTOP_VERSION = $env:version
           python -c "import json,os,pathlib;pathlib.Path('desktop_ui/release-version.json').write_text(json.dumps({'version':os.environ['CODINGBRAIN_DESKTOP_VERSION']}),encoding='utf-8')"
           if ($LASTEXITCODE -ne 0) { throw 'Desktop preview version metadata failed' }
+          python scripts/fetch_monaco.py
+          if ($LASTEXITCODE -ne 0) { throw 'Monaco editor fetch failed (pinned checksum)' }
           python -m PyInstaller --noconfirm --clean --onedir --windowed --name CodingBrainDesktop --collect-all webview --add-data 'desktop_ui;desktop_ui' desktop_ui/launch_native.py
           if ($LASTEXITCODE -ne 0) { throw 'Preview desktop binary failed to build' }
           $exe = (Resolve-Path 'dist/CodingBrainDesktop/CodingBrainDesktop.exe').Path

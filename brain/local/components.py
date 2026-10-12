@@ -377,6 +377,34 @@ def recommend(models: list, ram: float | None, vram: float | None = None) -> tup
     return fitting[-1] if fitting else models[0]
 
 
+def hardware_plan(facts: dict, gpu: dict | None) -> dict:
+    """Coding and chat models sized to this computer. A model that fits in memory is not enough: on a
+    processor without a supported GPU, generation is several times slower, so chat and routing get
+    a smaller fast model while coding keeps the best model that fits. Returns main, fast and why."""
+    ram = (facts.get("ram") or 8 * GB) / GB
+    vram = ((gpu or {}).get("vram") or 0) / GB
+    cores = facts.get("cores") or 4
+    apple = facts.get("platform") == "darwin" and str(facts.get("arch", "")).lower() in {"arm64", "aarch64"}
+    names = [name for name, _, _ in CODING_MODELS]
+    small, mini, mid, large = names[1], names[0], names[2], names[3]  # 3b, 1.5b, 7b, 14b
+    if vram >= 12:
+        main, fast, why = large, mid, f"GPU {gpu.get('name', '')} with {vram:.0f} GB: 14B coding model, 7B for chat"
+    elif vram >= 6:
+        main, fast, why = mid, mid, f"GPU {gpu.get('name', '')} with {vram:.0f} GB: the 7B model is fast enough for everything"
+    elif apple:
+        main, fast = (large, mid) if ram >= 32 else (mid, small) if ram >= 16 else (small, mini)
+        why = f"Apple silicon with {ram:.0f} GB of unified memory"
+    elif ram >= 14:
+        main, fast = mid, small
+        why = (f"no supported GPU (models run on the {cores}-thread processor) and {ram:.0f} GB of memory: "
+               "7B for coding quality, 3B for responsive chat")
+    elif ram >= 8:
+        main, fast, why = small, mini, f"no supported GPU and {ram:.0f} GB of memory: 3B for coding, 1.5B for chat"
+    else:
+        main, fast, why = mini, mini, f"{ram:.0f} GB of memory: the 1.5B model only"
+    return {"main": main, "fast": fast, "reason": why, "gpu": bool(vram) or apple}
+
+
 def stamp(env) -> str:
     import time
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(env.system.time()))
@@ -394,13 +422,17 @@ class Model(Component):
         if chosen:
             return chosen
         facts = env.system.facts()
+        if self.kind == "coding":
+            return hardware_plan(facts, env.system.gpu())["main"]
         return recommend(self.models, facts.get("ram"), (env.system.gpu() or {}).get("vram"))[0]
 
     def plan_lines(self, env, status):
         lines = super().plan_lines(env, status)
         if status.action == "pull":
             facts = env.system.facts()
-            lines.insert(1, f"  model: {self.wanted(env)} (chosen for {facts.get('ram', 0) / GB:.0f} GB of memory); "
+            why = (hardware_plan(facts, env.system.gpu())["reason"] if self.kind == "coding"
+                   else f"{facts.get('ram', 0) / GB:.0f} GB of memory")
+            lines.insert(1, f"  model: {self.wanted(env)} (chosen for {why}); "
                          "alternatives: " + ", ".join(f"{name} ~{size} GB" for name, size, _ in self.models))
         return lines
 
@@ -472,6 +504,53 @@ class Model(Component):
             env.config[section][key] = name
             env.save_config()
         return self.check(env, deep=True)
+
+
+class FastModel(Model):
+    """The model for chat, routing and simple steps. On a computer without a supported GPU a smaller
+    model keeps conversation responsive while coding tasks keep the main model. A fast model the
+    user chose (different from the main model) is always kept."""
+    id, title, profiles = "fast_model", "Fast model (chat and routing)", ("local", "full")
+    requires = ("model",)
+    config_key = ("models", "fast_model")
+
+    def wanted(self, env) -> str:
+        models = env.config["models"]
+        main = models.get("model") or Model().wanted(env)
+        chosen = models.get("fast_model")
+        if chosen and chosen != main:
+            return chosen
+        return hardware_plan(env.system.facts(), env.system.gpu())["fast"]
+
+    def check(self, env, deep=False):
+        name = self.wanted(env)
+        main = env.config["models"].get("model") or Model().wanted(env)
+        if name == main:
+            return Status("ready", f"uses the main model {main} (fast enough on this computer)", verified=True,
+                          data={"model": name})
+        status = super().check(env, deep)
+        if status.ready and env.config["models"].get("fast_model") != name:
+            # Downloaded but not selected yet (e.g. an older setup copied the main model here).
+            return Status("missing", f"{name} is downloaded; not yet used for chat", action="pull", data={"model": name})
+        return status
+
+    def plan_lines(self, env, status):
+        lines = Component.plan_lines(self, env, status)
+        if status.action == "pull":
+            lines.insert(1, "  why: " + hardware_plan(env.system.facts(), env.system.gpu())["reason"])
+        return lines
+
+    def install(self, env, status):
+        name = status.data.get("model") or self.wanted(env)
+        result = super().install(env, status)  # downloads (or finds) the model
+        if result.state in ("failed", "waiting"):
+            return result
+        env.config["models"]["fast_model"] = name
+        env.save_config()
+        result = self.check(env, deep=True)
+        if result.ready:
+            result.detail = f"{name} answers chat and routing; coding keeps {env.config['models'].get('model')} ({result.detail})"
+        return result
 
 
 class VisionModel(Model):
@@ -706,7 +785,7 @@ class Browser(Component):
 
 
 # The installation order: core, virtualization, Docker, models, subscriptions, sandbox, extras.
-COMPONENTS = [Python(), Git(), WSL(), Docker(), Ollama(), Model(), Claude(), Codex(), Sandbox(), Knowledge(),
+COMPONENTS = [Python(), Git(), WSL(), Docker(), Ollama(), Model(), FastModel(), Claude(), Codex(), Sandbox(), Knowledge(),
               OCR(), VisionModel(), Browser()]
 BY_ID = {component.id: component for component in COMPONENTS}
 PROFILES = {"local": [c.id for c in COMPONENTS if "local" in c.profiles], "full": [c.id for c in COMPONENTS]}

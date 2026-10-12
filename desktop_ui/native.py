@@ -231,6 +231,15 @@ def main(argv=None) -> int:
                 address = bridge.start()
             window = webview.create_window("Coding Brain", address, width=1360, height=850,
                                            min_size=(850, 560), background_color="#111315", text_select=True)
+            def confirm_close():
+                try:
+                    if window.evaluate_js("window.__codingBrainDirty ? window.__codingBrainDirty() : false"):
+                        return bool(window.create_confirmation_dialog(
+                            "Unsaved edits", "Some open files have unsaved edits. Close Coding Brain and discard them?"))
+                except Exception:
+                    pass  # never block closing because the page could not be asked
+                return True
+            window.events.closing += confirm_close
             if bridge:
                 # A crashed bridge comes back on a new port and token; the window follows it.
                 bridge.watch(on_restart=window.load_url,

@@ -103,6 +103,8 @@ with sync_playwright() as p:
     page.get_by_text('sample-project',exact=True).last.click()
     page.get_by_text('backend',exact=True).wait_for(timeout=2000)
     page.get_by_text('main.py',exact=True).click()
+    # This page has no bundled editor files, so the click falls back to the read-only preview.
+    page.locator('#preview:not([hidden])').wait_for(timeout=5000)
     assert 'print("hello")' in page.locator('#preview-content').inner_text()
     page.locator('#preview-close').click()
     assert page.locator('#profile-project').inner_text() == 'sample-project'

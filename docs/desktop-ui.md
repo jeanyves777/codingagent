@@ -258,3 +258,21 @@ premium supervisors, and recovery after upgrading an older engine.
   dropped files are staged in `%LOCALAPPDATA%\CodingBrain\desktop\attachments`. Files go to the engine with **Run task** and
   **New project**; Chat is read-only and refuses attachments instead of dropping them silently. Engines without the
   `tasks.start.attachments` feature are refused with an update message, and nothing starts.
+
+## Code editor, side-by-side review and streamed replies
+
+- **Editor.** Clicking a file opens it in Monaco (the editor inside VS Code), bundled with the desktop by
+  `scripts/fetch_monaco.py` (one pinned release, SHA-512 checked; nothing is loaded from the internet). Files
+  open read-only; **Edit** unlocks a file and **Save** / Ctrl+S writes it atomically only if it is still the
+  version that was opened (SHA-256 check; otherwise *changed on disk* and **Reload from disk**). Same path rules
+  as reading: no links, secrets or ignored folders, nothing outside the project, text files up to 1 MB.
+  Unmodified open tabs follow changes on disk. **Open in VS Code** starts `Code.exe` directly (no shell).
+  Without the bundled files the read-only preview is used.
+- **Side-by-side review.** A proposal waiting for approval has **Review side by side**: every changed file in
+  Monaco's diff view, with added/modified/deleted badges. When the file on disk matches the proposal's context
+  the whole file is shown; otherwise only the changed regions, never invented content. Secret files are never
+  read from disk for this view.
+- **Streamed replies.** Engines with the `conversation.stream` feature send `reply_step` events (understanding
+  the request, reading a project, writing the answer) and then `reply_delta` events while the local model
+  writes. The window shows the step in the *Thinking* bubble, grows the reply live, and replaces it with the
+  formatted reply when it is complete. Steps are observable actions; private model reasoning is never shown.

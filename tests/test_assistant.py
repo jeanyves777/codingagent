@@ -321,3 +321,23 @@ def test_real_model_conversation_and_routing(world):
     assert question.intent in {"question", "chat"} and create.intent == "create_project"
     assert fix.intent == "implement" and no_tasks_anywhere(world)
     assert "comprehension" in text_of(bot).lower()
+
+
+@pytest.mark.parametrize("message", ["how are you doing today ?", "how's it going", "what's up?", "who are you",
+                                     "what is a python decorator?", "explain recursion",
+                                     "what's the difference between a list and a tuple?"])
+def test_small_talk_and_general_questions_skip_the_routing_call(world, message):
+    model = FakeModel()
+    bot = assistant(world, model)
+    answer = bot.respond(message)
+    assert answer["reply"].startswith("(answer to:")       # still a real model answer, not canned text
+    assert [call["schema"] for call in model.calls] == [None]  # one model call: no routing request
+
+
+@pytest.mark.parametrize("message", ["explain calculator.py",
+                                     "what is the bug in calculator", "explain the code in src/app.js",
+                                     "fix the add function"])
+def test_messages_about_local_work_still_go_through_routing(world, message):
+    model = FakeModel()
+    assistant(world, model).respond(message)
+    assert model.calls and model.calls[0]["schema"] is not None

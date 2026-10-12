@@ -52,6 +52,23 @@
       </div>
       <div class="columns">
         <main class="conversation" aria-label="Coding Brain conversation">
+          <section class="editor-area" id="editor-area" aria-label="Code editor" hidden>
+            <div class="editor-tabs" id="editor-tabs" role="tablist" aria-label="Open files"></div>
+            <div class="editor-toolbar">
+              <span class="editor-path" id="editor-path"></span>
+              <span class="editor-state" id="editor-state"></span>
+              <span class="editor-actions">
+                <button type="button" id="editor-edit" class="editor-button">Edit</button>
+                <button type="button" id="editor-save" class="editor-button primary" disabled title="Save (Ctrl+S)">Save</button>
+                <button type="button" id="editor-reload" class="editor-button" hidden>Reload from disk</button>
+                <button type="button" id="editor-external" class="editor-button" title="Open this file in VS Code">Open in VS Code</button>
+              </span>
+            </div>
+            <div class="editor-body">
+              <nav class="diff-files" id="diff-files" aria-label="Changed files" hidden></nav>
+              <div class="editor-host" id="editor-host"></div>
+            </div>
+          </section>
           <div class="thread" id="thread" role="log" aria-live="polite" aria-relevant="additions text">
             <section class="welcome" id="welcome">
               <div class="brain-mark">◇</div>

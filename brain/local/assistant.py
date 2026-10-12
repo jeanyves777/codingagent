@@ -39,6 +39,15 @@ GREETING = re.compile(r"(?i)^\s*(hi|hello|hey|hiya|howdy|yo|greetings|good\s+(mo
 THANKS = re.compile(r"(?i)^\s*(thanks|thank\s+you|thx|merci|cheers|ok(ay)?|great|cool|nice|perfect)"
                     r"(\s+(so\s+much|a\s+lot|very\s+much))?\s*[!.]*\s*$")
 FAREWELL = re.compile(r"(?i)^\s*(bye|goodbye|see\s+you|exit|quit|q)\s*[!.]*\s*$")
+# Messages answered without the routing model call (one model call instead of two). Small talk and
+# general questions only; anything naming a project, a file or work to do still goes through routing.
+SMALL_TALK = re.compile(r"(?i)^\s*(how\s+are\s+you(\s+doing)?(\s+today)?|how('?s|\s+is)\s+it\s+going|what'?s\s+up|"
+                        r"how\s+have\s+you\s+been|good\s*(night|bye)|bye|see\s+you(\s+later)?|nice\s+to\s+meet\s+you|"
+                        r"who\s+are\s+you|are\s+you\s+there)\s*[?!.]*\s*$")
+QUESTION = re.compile(r"(?i)^\s*(what\s+(is|are)|what'?s\s+(a|an|the)\b|why\s+(is|are|do|does)|explain|define|"
+                      r"how\s+(does|do)\s+(a|an|the)?\s*\w+\s+work|what'?s\s+the\s+difference|difference\s+between)\b")
+LOCAL_REFERENCE = re.compile(r"(?i)\b(my|this|our|the)\s+(project|repo|repository|code|codebase|app|file|folder|function|"
+                             r"class|module|tests?)\b|\.(py|js|ts|tsx|jsx|json|md|java|go|rs|cs|cpp|c|h|html|css)\b|[/\\]")
 HELP = re.compile(r"(?i)^\s*(help|\?|what\s+can\s+you\s+do\??|how\s+do\s+(i|you)\s+use\s+(this|you)\??)\s*$")
 PROJECTS = re.compile(r"(?i)\b(what|which|list|show|my|all)\b[^?]*\bprojects?\b|^\s*projects?\s*\??\s*$"
                       r"|\bany\s+projects?\b|\bprojects?\s+(exists?|are\s+there)\b"
@@ -162,20 +171,49 @@ class LocalModel:
         self.model = config["models"].get("fast_model") or config["models"].get("model")
         self.timeout = timeout
 
-    def chat(self, messages: list[dict], schema: dict | None = None, max_tokens: int = 600) -> str:
+    def chat(self, messages: list[dict], schema: dict | None = None, max_tokens: int = 600, on_token=None) -> str:
+        """The model's reply. With on_token (and no schema) the reply is streamed: on_token receives
+        each piece as Ollama produces it, and the full text is still returned."""
         if not self.model:
             raise ModelUnavailable("no local model is configured (codingbrain install)")
         import httpx
-        payload = {"model": self.model, "messages": messages, "stream": False,
+        payload = {"model": self.model, "messages": messages, "stream": bool(on_token and not schema),
                    "options": {"num_predict": max_tokens, "temperature": 0.2}}
         if schema:
             payload["format"] = schema
+        if payload["stream"]:
+            return self._stream(payload, on_token)
         try:
             response = httpx.post(self.url + "/api/chat", json=payload, timeout=self.timeout, trust_env=False)
             response.raise_for_status()
             return response.json()["message"]["content"].strip()
         except (httpx.HTTPError, KeyError, ValueError) as error:
             raise ModelUnavailable(f"the local model at {self.url} did not answer ({type(error).__name__})") from error
+
+    def _stream(self, payload: dict, on_token) -> str:
+        import httpx
+        import json as _json
+        pieces = []
+        try:
+            with httpx.stream("POST", self.url + "/api/chat", json=payload, timeout=self.timeout, trust_env=False) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line.strip():
+                        continue
+                    chunk = _json.loads(line)
+                    piece = (chunk.get("message") or {}).get("content") or ""
+                    if piece:
+                        pieces.append(piece)
+                        try:
+                            on_token(piece)
+                        except Exception:
+                            pass  # a display problem never breaks the reply
+                    if chunk.get("done"):
+                        break
+        except (httpx.HTTPError, ValueError) as error:
+            if not pieces:
+                raise ModelUnavailable(f"the local model at {self.url} did not answer ({type(error).__name__})") from error
+        return "".join(pieces).strip()
 
 
 ROUTE_SCHEMA = {"type": "object", "properties": {
@@ -238,6 +276,10 @@ class Assistant:
             return f"{self.cwd} (inside the Git project {self.repository.name})"
         return f"{self.cwd} (not a project)"
 
+    def mentions_project(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(item["name"].lower() in lowered for item in self.projects() if len(item["name"]) > 2)
+
     def project_names(self) -> str:
         names = [item["name"] for item in self.projects() if item["exists"]][:30]
         return ", ".join(names) or "none yet"
@@ -256,6 +298,11 @@ class Assistant:
             return Route("chat", "rule", reply="You're welcome. What next?")
         if HELP.match(text):
             return Route("chat", "rule", reply=HELP_TEXT)
+        if SMALL_TALK.match(text):
+            return Route("chat", "rule")  # answered by the model directly, no routing call
+        if QUESTION.match(text) and not (CREATE.match(text) or CHANGE.match(text) or LOCAL_REFERENCE.search(text)
+                                         or self.mentions_project(text)):
+            return Route("question", "rule", goal=text)
         if PROJECTS.search(text) and not CREATE.match(text) and not CHANGE.match(text):
             return Route("projects", "rule")
         try:
@@ -267,6 +314,7 @@ class Assistant:
         system = ROUTER_PROMPT.format(projects=self.project_names(), folder=self.folder_description())
         messages = [{"role": "system", "content": system}, *self.history.recent(self.focus_id(), 6),
                     {"role": "user", "content": text}]
+        self.step("Understanding your request")
         raw = self.model.chat(messages, schema=ROUTE_SCHEMA, max_tokens=200)
         try:
             data = json.loads(raw)
@@ -336,6 +384,16 @@ class Assistant:
         return self.offer_task(project, route.goal or text)
 
     # conversation ------------------------------------------------------------------------------------
+    def step(self, text: str):
+        """An observable step of this turn, for a listening client (the engine API sets on_step).
+        Steps name what is being done; private model reasoning is never requested or shown."""
+        listener = getattr(self, "on_step", None)
+        if listener:
+            try:
+                listener(text)
+            except Exception:
+                pass
+
     def say(self, text: str, project_id: str | None = None):
         self.out(text)
         self.history.add("assistant", text, project_id or self.focus_id())
@@ -348,9 +406,12 @@ class Assistant:
         if earlier and earlier[-1] == {"role": "user", "content": text}:
             earlier = earlier[:-1]  # this message was just recorded; it is added below
         messages = [{"role": "system", "content": system}, *earlier[-10:], {"role": "user", "content": text}]
+        self.step(f"Writing the answer with {getattr(self.model, 'model', None) or 'the local model'}")
         try:
             with Thinking():
-                reply = self.model.chat(messages, max_tokens=800)
+                listener = getattr(self, "on_token", None)  # set by the engine API while a client listens
+                reply = (self.model.chat(messages, max_tokens=800, on_token=listener) if listener
+                         else self.model.chat(messages, max_tokens=800))
         except ModelUnavailable as error:
             reply = (f"I can't answer that right now: {error}. I can still list your projects (/projects), "
                      "create an application or work on a project. `codingbrain doctor` shows what is missing.")
@@ -503,6 +564,8 @@ class Assistant:
                 memory_text = render_profile(ProjectMemory(self.layout, info).profile())[:4000]
             except Exception:
                 memory_text = ""
+        self.step(f"Reading {info['name']}: {len(files)} files" + (", README" if readme else "")
+                  + (", project memory" if memory_text else ""))
         context = (f"Project {info['name']} at {info['root']}; languages {', '.join(info['languages'])}; "
                    f"frameworks {', '.join(info['frameworks'])}; branch {info.get('branch')}.\nFiles:\n" + "\n".join(files)
                    + (f"\nREADME:\n{readme.read_text(errors='replace')[:3000]}" if readme else "")

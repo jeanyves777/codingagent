@@ -73,8 +73,8 @@ OPERATIONS = {
     "tasks.resume": ("action", {"project_id": ("str", True), "task_id": ("str", True)}, "continues an unfinished task"),
 }
 # Additive capabilities within API 1.x that clients detect here rather than from a version number.
-FEATURES = {"tasks.start.attachments"}
-LONG = {"tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
+FEATURES = {"tasks.start.attachments", "conversation.stream"}
+LONG = {"conversation.send", "tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
 CHECK_TYPES = {"str": str, "bool": bool, "int": int, "list": list}
 
 
@@ -144,7 +144,8 @@ class Engine:
                 raise ApiError("bad_params", f"{op} needs '{key}'")
             if key in params and params[key] is not None and not isinstance(params[key], CHECK_TYPES[kind]):
                 raise ApiError("bad_params", f"{op}: '{key}' must be {kind}")
-            if kind == "list" and key in params and params[key] is not None and                     not all(isinstance(item, str) for item in params[key]):
+            if kind == "list" and key in params and params[key] is not None and \
+                    not all(isinstance(item, str) for item in params[key]):
                 raise ApiError("bad_params", f"{op}: '{key}' must be a list of strings")
         unknown = set(params) - set(spec)
         if unknown:
@@ -226,9 +227,18 @@ class Engine:
                                         read=lambda prompt="": "", interactive=False)
         return self._assistant
 
-    def op_conversation_send(self, message: str, project_id: str | None = None):
+    def op_conversation_send(self, message: str, project_id: str | None = None, emit=None):
+        """The reply also streams as {"event_type": "reply_delta", "text": ...} events while the
+        local model writes it, after {"event_type": "reply_step", "text": ...} events naming each
+        observable step (feature conversation.stream); the result still carries the full reply."""
         with self.lock:  # one conversation turn at a time keeps the context ordered
-            return self.assistant().respond(message, project_id)
+            assistant = self.assistant()
+            assistant.on_token = (lambda text: emit({"event_type": "reply_delta", "text": text})) if emit else None
+            assistant.on_step = (lambda text: emit({"event_type": "reply_step", "text": text})) if emit else None
+            try:
+                return assistant.respond(message, project_id)
+            finally:
+                assistant.on_token = assistant.on_step = None
 
     def op_conversation_history(self, project_id: str | None = None, limit: int = 50):
         from .assistant import ConversationLog
