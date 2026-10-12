@@ -276,3 +276,67 @@ premium supervisors, and recovery after upgrading an older engine.
   the request, reading a project, writing the answer) and then `reply_delta` events while the local model
   writes. The window shows the step in the *Thinking* bubble, grows the reply live, and replaces it with the
   formatted reply when it is complete. Steps are observable actions; private model reasoning is never shown.
+
+## Directing work from the conversation, and context control
+
+- **One conversation per project** (and one for general chat), owned by the engine. The window loads it when the
+  app opens and whenever the selected project changes. Task milestones (planned, tested, accepted on a branch) are
+  written into that project's conversation, so follow-ups such as "now add tests for it" are understood. Selecting
+  a Git folder registers it (read-only to the folder) so chat knows it.
+- **Explicit scope.** Every message says which project is selected, or that none is (`conversation.send` scope
+  `global`); the engine never keeps an earlier project in focus.
+- **Context budget.** The local models get a window sized to the computer (`models.context`, set by the installer:
+  4K/8K on a processor, 16K/32K with a GPU). Each turn is filled in priority order: instructions and your message
+  always, then the project context, then the newest earlier messages. What does not fit is left out visibly. The
+  context bar above the message box says what the model saw ("calc · 6 earlier messages (2 older left out) ·
+  project files · 8K window"). Secret file names (`.env`, keys, credentials) are never part of the project context.
+- **New conversation** starts fresh for the selected project; earlier messages stay saved but are no longer sent.
+- **Doing the work from chat.** When a reply proposes work, it shows **Run as task in <project>** or **Create as new
+  project**; clicking it, or replying "yes" / "do it" / "go ahead", starts it in the normal flow: you still review
+  and approve the plan before anything changes. Requests phrased as questions or with typos ("can u creat ...") are
+  recognized as requests.
+
+## Documents on request (not coding projects)
+
+"Make me a PDF / Word file / spreadsheet / letter / email about …" is a deliverable, not software. Coding Brain
+asks only what is missing, proposes it, and writes it in the background **after you confirm** (the
+**Create the PDF** button or "yes"), then returns the file in the chat with **Open** and **Show in folder**. No
+project, no Git, no code review. Engine operation `documents.create` (feature `documents.create`).
+
+- Formats: PDF (printed offline by the system Edge/Chromium with JavaScript disabled), Word `.docx` (plain
+  WordprocessingML, no macros), Excel `.xlsx` (values only — a model "formula" stays text), CSV, plain text
+  (emails), Markdown and HTML. A presentation becomes a PDF handout. Images, logos, slide decks, audio and
+  video are refused with an explanation: the local models cannot produce them.
+- The model's text is converted by Coding Brain itself and escaped: it can never become markup or script.
+- Files go to `Documents\Coding Brain` (`CODINGBRAIN_DOCUMENTS` overrides) and are never overwritten. The
+  desktop opens only files in that folder. Each document is recorded in the conversation.
+- Requests that ask for code ("a script that generates a PDF") are still coding tasks.
+
+## Understanding and governance
+
+The local model decides what a message means, with the conversation and any pending questions as context:
+chat, a question, a **capability** question ("can you make PDFs?"), a document, a coding task, a new project,
+an answer to its own questions, or "never mind". It also judges whether a request says enough to do well, and
+writes its own follow-up questions when it does not. Keyword rules no longer decide intent; only "hello",
+"thanks", "help" and small talk are answered instantly, and those can never start anything.
+
+Fixed rules govern what may happen, whatever the model concludes:
+- Nothing is created, written or started without the user's confirmation: tasks, new projects and documents
+  are proposals with the exact spec, confirmed with a button or "yes".
+- Every chat and routing call carries one fixed statement of what Coding Brain can and cannot do, so it never
+  claims abilities it lacks (images, slide decks, audio, video, acting outside the user's projects).
+- Moving on ("I was just asking", a new question) drops a pending request; nothing is made from it.
+
+## Display library (rich answers)
+
+The model may answer with display blocks, a fenced ```cb-ui block holding one JSON object, chosen from a fixed
+library that its instructions describe: **table**, **stats**, **chart** (bar, line, pie), **options** (cards with
+title, subtitle, price, badges, details, a source and actions), **steps**, **compare**, **callout** and **actions**
+(next steps). The model decides whether and which; no rule picks for it.
+
+The window draws every block itself from text nodes and SVG (no HTML from the model, no external chart
+library). Malformed or unknown blocks fall back to readable text. Governance: real-world data needs a source;
+a price or availability without one is labelled **Unverified example**; actions are limited to *ask* (send a
+follow-up message) and *open link* (http/https only, opened in the browser after the user confirms the address).
+Coding Brain cannot browse the internet, so it says so for live data (fares, prices, news) instead of making
+options up; the same components show such data when a source tool is connected.

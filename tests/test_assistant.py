@@ -323,17 +323,6 @@ def test_real_model_conversation_and_routing(world):
     assert "comprehension" in text_of(bot).lower()
 
 
-@pytest.mark.parametrize("message", ["how are you doing today ?", "how's it going", "what's up?", "who are you",
-                                     "what is a python decorator?", "explain recursion",
-                                     "what's the difference between a list and a tuple?"])
-def test_small_talk_and_general_questions_skip_the_routing_call(world, message):
-    model = FakeModel()
-    bot = assistant(world, model)
-    answer = bot.respond(message)
-    assert answer["reply"].startswith("(answer to:")       # still a real model answer, not canned text
-    assert [call["schema"] for call in model.calls] == [None]  # one model call: no routing request
-
-
 @pytest.mark.parametrize("message", ["explain calculator.py",
                                      "what is the bug in calculator", "explain the code in src/app.js",
                                      "fix the add function"])
@@ -341,3 +330,75 @@ def test_messages_about_local_work_still_go_through_routing(world, message):
     model = FakeModel()
     assistant(world, model).respond(message)
     assert model.calls and model.calls[0]["schema"] is not None
+
+
+def test_document_titles_never_repeat_the_question():
+    from brain.documents import title_of
+    assert title_of("## Sales Q1\n| a | b |", "can you generate an excel with some data ?") == "Sales Q1"
+    assert title_of("no heading", "make me an excel budget for a wedding") == "Excel budget for a wedding"
+
+
+# The model understands; fixed rules only govern what may happen (nothing is made without confirmation).
+
+def route(intent, goal, enough=True, missing=(), fmt=None, language=None):
+    return {"intent": intent, "goal": goal, "enough_detail": enough, "missing": list(missing),
+            "format": fmt, "language": language}
+
+
+@pytest.mark.parametrize("message", ["how are you doing today ?", "how's it going", "what's up?", "who are you"])
+def test_small_talk_skips_the_routing_call(world, message):
+    model = FakeModel()
+    answer = assistant(world, model).respond(message)
+    assert answer["reply"].startswith("(answer to:") and [call["schema"] for call in model.calls] == [None]
+
+
+def test_a_capability_question_is_answered_never_acted_on(world):
+    model = FakeModel(routes={"can you generate PDF ?": route("capability", "Can Coding Brain make PDFs?")},
+                      replies=["Yes - I can write PDFs, Word and Excel files when you ask for one."])
+    bot = assistant(world, model)
+    answer = bot.respond("can you generate PDF ?")
+    assert answer["action"] is None and answer["needs"] is None and bot.scoping is None
+    system = model.calls[-1]["messages"][0]["content"]
+    assert "cannot do: create or edit images" in system  # the fixed capability statement reaches the model
+
+
+def test_a_clear_document_request_is_proposed_and_waits_for_confirmation(world, tmp_path, monkeypatch):
+    monkeypatch.setenv("CODINGBRAIN_DOCUMENTS", str(tmp_path / "docs"))
+    model = FakeModel(routes={"write a one page PDF about the history of Rome in French":
+                              route("document", "A one-page history of Rome", fmt="pdf", language="French")})
+    answer = assistant(world, model).respond("write a one page PDF about the history of Rome in French")
+    assert answer["action"]["kind"] == "document" and answer["needs"] == "confirmation"
+    assert answer["action"]["language"] == "French" and "Confirm to create it" in answer["reply"]
+    assert not (tmp_path / "docs").exists()  # nothing is written before the user confirms
+
+
+def test_vague_requests_get_the_models_own_questions_and_just_asking_drops_them(world):
+    model = FakeModel(routes={
+        "can you generate and excel with some data ?": route("document", "An Excel file with data", enough=False,
+                                                             missing=["What should the data be about?"], fmt="xlsx"),
+        "i was just asking": route("cancel", "never mind")})
+    bot = assistant(world, model)
+    first = bot.respond("can you generate and excel with some data ?")
+    assert first["needs"] == "scope" and "What should the data be about?" in first["reply"] and first["action"] is None
+    second = bot.respond("i was just asking")
+    assert second["action"] is None and bot.scoping is None and "nothing was started" in second["reply"]
+
+
+def test_answers_become_a_proposal_with_the_details(world):
+    model = FakeModel(routes={
+        "make an app": route("create_project", "An app", enough=False, missing=["What should it do?"]),
+        "track my water intake with reminders": route("answer", "A web app to track daily water intake with reminders")})
+    bot = assistant(world, model)
+    assert bot.respond("make an app")["needs"] == "scope"
+    answer = bot.respond("track my water intake with reminders")
+    assert answer["action"] == {"kind": "create_project", "goal": "A web app to track daily water intake with reminders"}
+    assert no_tasks_anywhere(world)
+
+
+def test_moving_on_drops_a_pending_request(world):
+    model = FakeModel(routes={"make a report": route("document", "A report", enough=False, missing=["About what?"]),
+                              "what is a decorator?": route("question", "decorators")})
+    bot = assistant(world, model)
+    bot.respond("make a report")
+    answer = bot.respond("what is a decorator?")
+    assert bot.scoping is None and answer["action"] is None

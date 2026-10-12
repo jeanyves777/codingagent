@@ -402,7 +402,9 @@ def hardware_plan(facts: dict, gpu: dict | None) -> dict:
         main, fast, why = small, mini, f"no supported GPU and {ram:.0f} GB of memory: 3B for coding, 1.5B for chat"
     else:
         main, fast, why = mini, mini, f"{ram:.0f} GB of memory: the 1.5B model only"
-    return {"main": main, "fast": fast, "reason": why, "gpu": bool(vram) or apple}
+    # The window (tokens) the local models get: bigger windows cost memory and, on a processor, time.
+    context = 32768 if vram >= 12 else 16384 if (vram >= 6 or (apple and ram >= 16)) else 8192 if ram >= 8 else 4096
+    return {"main": main, "fast": fast, "context": context, "reason": why, "gpu": bool(vram) or apple}
 
 
 def stamp(env) -> str:
@@ -502,6 +504,9 @@ class Model(Component):
         section, key = self.config_key
         if not env.config[section].get(key):
             env.config[section][key] = name
+            env.save_config()
+        if self.kind == "coding" and not env.config["models"].get("context"):
+            env.config["models"]["context"] = hardware_plan(env.system.facts(), env.system.gpu())["context"]
             env.save_config()
         return self.check(env, deep=True)
 

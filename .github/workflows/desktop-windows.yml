@@ -31,6 +31,8 @@ on:
       - 'tests/test_desktop_editor.py'
       - 'tests/smoke_editor_browser.py'
       - 'tests/smoke_stream_browser.py'
+      - 'tests/smoke_conversation_browser.py'
+      - 'tests/smoke_display_browser.py'
       - 'scripts/fetch_monaco.py'
       - 'brain/local/assistant.py'
       - 'tests/test_desktop_engine_installer_probe.py'
@@ -216,6 +218,12 @@ jobs:
         run: python tests/smoke_live_flow_browser.py
       - name: Verify streamed chat replies with engine steps
         run: python tests/smoke_stream_browser.py
+      - name: Verify the project conversation, context bar and directing work from chat
+        run: python tests/smoke_conversation_browser.py
+      - name: Verify the display library (tables, charts, option cards, sources, actions) and its safety
+        env:
+          CB_DESKTOP_DISPLAY_SCREENSHOT: ${{ runner.temp }}/CodingBrain-Desktop-Display.png
+        run: python tests/smoke_display_browser.py
       - name: Verify the bundled Monaco editor, save conflicts and side-by-side review on the real bridge
         shell: pwsh
         env:

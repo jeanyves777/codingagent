@@ -2,6 +2,7 @@
 engine (brain.local.engine) together. The model and sandbox are fakes; the engine, its approvals,
 Git and the task store are real. The out-of-process client is tested against a real
 `codingbrain api --stdio` process too."""
+import json
 import os
 import subprocess
 import sys
@@ -149,7 +150,10 @@ def test_chat_goes_through_the_engine_and_never_executes(world, desktop):
     create = http.post("/api/start", json={"message": "Create a task management application", "mode": "chat"},
                        headers=headers).json()
     wait_for(http, headers, create["id"], lambda j: j["status"] == "completed")
-    assert any("use New project to review and authorize" in text for text in messages(http, headers, create["id"]))
+    # Proposed work comes back as an action the window shows as a button; nothing is started here.
+    events = http.get(f"/api/jobs/{create['id']}", headers=headers).json()["events"]
+    actions = [json.loads(event["message"]) for event in events if event["kind"] == "action"]
+    assert actions and actions[0]["kind"] == "create_project" and actions[0]["goal"]
     assert not (world["home"] / "Projects" / "task-management").exists()
     assert world["engine"].call("tasks.list", {"project_id": world["project"]["id"]}) == []
     history = world["engine"].call("conversation.history", {"project_id": world["project"]["id"]})
@@ -217,3 +221,15 @@ def test_a_typed_engine_without_the_operation_refuses_before_a_job(world, deskto
                          headers=headers)
     assert response.status_code == 409 and "projects.create" in response.json()["detail"]
     assert not workspace.jobs
+
+
+def test_the_window_loads_and_resets_the_selected_projects_conversation(world, desktop):
+    http, headers, workspace = desktop
+    pid = world["project"]["id"]
+    world["engine"].call("conversation.send", {"message": "hello", "project_id": pid})
+    loaded = http.get("/api/conversation", headers=headers).json()
+    assert loaded["available"] and loaded["project"] == world["root"].name
+    assert {"role": "user", "content": "hello"} in loaded["turns"]
+    assert http.post("/api/conversation/reset", headers=headers).json()["reset"] is True
+    assert http.get("/api/conversation", headers=headers).json()["turns"] == []
+    assert http.get("/api/conversation").status_code == 403

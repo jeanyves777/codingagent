@@ -69,6 +69,10 @@ class StartRequest(BaseModel):
     message: str = Field(min_length=1, max_length=16000)
     mode: str = "chat"
     attachments: list[str] = Field(default_factory=list, max_length=MAX_ATTACHMENTS)
+    # mode "document": what the user confirmed in chat
+    details: str = Field(default="", max_length=4000)
+    format: str | None = Field(default=None, max_length=10)
+    language: str | None = Field(default=None, max_length=60)
 
 
 class SaveFile(BaseModel):
@@ -76,6 +80,10 @@ class SaveFile(BaseModel):
     content: str = Field(max_length=MAX_EDIT_BYTES)
     sha256: str = Field(min_length=64, max_length=64)  # the version the editor opened
     project: str | None = Field(default=None, max_length=8192)  # the project the file was opened from
+
+
+class OpenUrl(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
 
 
 class OpenFile(BaseModel):
@@ -157,6 +165,7 @@ REQUIRED_OPERATIONS = {
     "chat": ("conversation.send",),
     "run": ("projects.register", "tasks.start", "tasks.approve", "tasks.accept", "tasks.stop"),
     "new": ("conversation.send", "projects.create", "tasks.start", "tasks.approve", "tasks.accept"),
+    "document": ("documents.create",),
 }
 
 
@@ -504,7 +513,59 @@ class Workspace:
         if not path.is_dir():
             raise ValueError("Choose a directory")
         self.project = path
+        if self.git_branch(path):
+            # Make the conversation know this project: registering is read-only to the folder.
+            threading.Thread(target=self._register, args=(path,), daemon=True).start()
         return {"name": path.name, "path": str(path), "git": self.git_branch(path)}
+
+    def _register(self, path: Path):
+        try:
+            if self.engine_status()["engine"].get("typed_api"):
+                self.engine_client().call("projects.register", {"path": str(path)}, None, 120)
+        except Exception:
+            pass  # chat then answers without project context, as before
+
+    def _project_id(self, client) -> str | None:
+        if not self.project:
+            return None
+        for item in client.call("projects.list", {}, None, 60):
+            if Path(item["root"]).resolve() == self.project:
+                return item["id"]
+        return None
+
+    def conversation(self, limit: int = 60) -> dict:
+        """The conversation of the selected project (or global chat), as the engine stored it."""
+        if not self.engine_status()["engine"].get("typed_api"):
+            return {"project": None, "turns": [], "available": False}
+        client = self.engine_client()
+        project_id = self._project_id(client)
+        params = {"limit": limit, **({"project_id": project_id} if project_id else {})}
+        turns = client.call("conversation.history", params, None, 60)
+        return {"project": self.project.name if project_id else None, "turns": turns, "available": True}
+
+    def documents_folder(self) -> Path:
+        from brain.documents import output_folder
+        return output_folder().resolve()
+
+    def open_document(self, raw: str, reveal: bool = False) -> dict:
+        """Open (or show in Explorer) a file Coding Brain wrote into its documents folder; nothing else."""
+        path = Path(raw).resolve(strict=True)
+        if not path.is_file() or not path.is_relative_to(self.documents_folder()):
+            raise ValueError("Only documents Coding Brain created can be opened from here")
+        if os.name != "nt":
+            raise ValueError("Opening files is supported on Windows")
+        if reveal:
+            subprocess.Popen(["explorer.exe", "/select,", str(path)])
+        else:
+            os.startfile(str(path))  # noqa: S606 - a file in the Coding Brain documents folder
+        return {"opened": str(path)}
+
+    def reset_conversation(self) -> dict:
+        client = self.engine_client()
+        if "conversation.reset" not in set(client.call("engine.info", {}, None, 60).get("features") or []):
+            raise ValueError("Update Coding Brain to start a new conversation from the desktop")
+        project_id = self._project_id(client)
+        return client.call("conversation.reset", {"project_id": project_id} if project_id else {}, None, 60)
 
     @staticmethod
     def git_branch(root: Path) -> str | None:
@@ -719,7 +780,7 @@ class Workspace:
         if attachments and mode == "chat":
             raise ValueError("Chat only reads your message; attachments are used by Run task and New project. "
                              "Switch mode to send these files. Nothing was started.")
-        if mode not in {"chat", "run", "new"}:
+        if mode not in {"chat", "run", "new", "document"}:
             raise ValueError("Unknown mode")
         if mode == "run" and (not self.project or not self.git_branch(self.project)):
             raise ValueError("Select an existing Git repository to run a coding task")
@@ -753,12 +814,15 @@ class Workspace:
                 )
         # Never treat chat as a coding task. Newer CLIs provide chat; older ones
         # return a clear unsupported-command error instead of running code.
-        command = [*self.cli_command(), "chat" if mode == "chat" else "new" if mode == "new" else "run", body.message]
+        command = [*self.cli_command(), "chat" if mode in {"chat", "document"} else "new" if mode == "new" else "run", body.message]
         with self.lock:
             if self.active and self.jobs[self.active].status in {"starting", "running", "approval_required"}:
                 raise ValueError("Another task is active; finish or stop it first")
             job = Job(mode, str(self.project) if self.project else None, command)
             job.attachments = attachments
+            if mode == "document":
+                job.document = {"request": body.message, "details": body.details, "format": body.format,
+                                "language": body.language}
             self.jobs[job.id] = job
             self.active = job.id
         # Chat, new projects and tasks go through the installed engine's typed API (one transport,
@@ -783,14 +847,15 @@ class Workspace:
                                  "attachments from the desktop. Update Coding Brain, or send without files. "
                                  "Nothing was started.")
             if status["engine"].get("typed_api"):
-                from .core import run as core_run, chat as core_chat, create_new
+                from .core import run as core_run, chat as core_chat, create_new, document as core_document
                 job.core = True
                 job.engine = self.engine_client()
                 job.on_project_created = lambda p: self.choose(p)
-                target = core_run if mode == "run" else create_new if mode == "new" else core_chat
+                target = (core_run if mode == "run" else create_new if mode == "new" else
+                          core_document if mode == "document" else core_chat)
                 threading.Thread(target=target, args=(job,), daemon=True).start()
                 return job
-            if mode in {"new", "run"} or attachments or not status["engine"].get("conversation"):
+            if mode in {"new", "run", "document"} or attachments or not status["engine"].get("conversation"):
                 del self.jobs[job.id]
                 if self.active == job.id:
                     self.active = None
@@ -1041,6 +1106,40 @@ def create_app(state: Workspace | None = None) -> FastAPI:
             return {"entries": state.tree(path)}
         except (ValueError, OSError) as e:
             raise HTTPException(400, str(e)) from e
+
+    @app.get("/api/conversation", dependencies=[Depends(auth)])
+    def conversation():
+        from .engine_client import EngineError
+        try:
+            return state.conversation()
+        except (EngineError, ValueError, OSError) as error:
+            raise HTTPException(503, f"Conversation history unavailable: {str(error)[:200]}") from error
+
+    @app.post("/api/open-url", dependencies=[Depends(auth)])
+    def open_url(body: OpenUrl):
+        """A link from a display block, after the user confirmed it in the window: web links only."""
+        from urllib.parse import urlsplit
+        parts = urlsplit(body.url)
+        if parts.scheme not in {"http", "https"} or not parts.netloc or any(ch in body.url for ch in "\r\n\"<>"):
+            raise HTTPException(400, "Only http(s) links can be opened")
+        import webbrowser
+        webbrowser.open(body.url, new=2)
+        return {"opened": body.url}
+
+    @app.post("/api/documents/open", dependencies=[Depends(auth)])
+    def open_document(body: OpenFile, reveal: bool = False):
+        try:
+            return state.open_document(body.path, reveal)
+        except (ValueError, OSError) as error:
+            raise HTTPException(400, str(error)) from error
+
+    @app.post("/api/conversation/reset", dependencies=[Depends(auth)])
+    def conversation_reset():
+        from .engine_client import EngineError
+        try:
+            return state.reset_conversation()
+        except (EngineError, ValueError, OSError) as error:
+            raise HTTPException(409, str(error)[:300]) from error
 
     @app.post("/api/file", dependencies=[Depends(auth)])
     def save_file(body: SaveFile):

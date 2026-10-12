@@ -83,6 +83,10 @@
             </section>
           </div>
           <section class="composer-wrap" aria-label="Message input">
+            <div class="context-bar" id="context-bar">
+              <span class="context-text" id="context-text" title="What the model sees with your next message">Context: general chat</span>
+              <button type="button" class="context-new" id="new-conversation" title="Start a new conversation for this project; earlier messages stay saved">＋ New conversation</button>
+            </div>
             <div class="status-strip" id="run-status" hidden>
               <span class="pulse"></span><span id="status-label">Working</span>
               <span class="run-progress" id="run-progress" hidden title="Estimated from the stages the engine has completed"><span class="progress-track"><span class="progress-fill" id="run-progress-fill"></span></span><span id="run-progress-label">0%</span></span>

@@ -9,6 +9,7 @@ and bound to the task and to the digest of the proposal that was shown. There is
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 import uuid
@@ -37,8 +38,8 @@ def _summary(task: dict, kind: str) -> dict:
     """What the user approves, from the engine's task summary (or the goal, for a new project)."""
     if kind == "new":
         return {"kind": kind, "task_id": task["id"],
-                "summary": "Create a NEW local project from this goal and begin work? "
-                           "Coding Brain will initialize Git and propose the implementation. "
+                "summary": "Create a NEW local project for:\n\n" + str(task.get("goal", ""))[:1500] + "\n\n"
+                           "Coding Brain will initialize Git and propose the implementation for your review. "
                            "It will not reuse or overwrite an existing directory.",
                 "goal": task.get("goal", "")[:2000]}
     if kind == "proposal":
@@ -237,6 +238,10 @@ def create_new(job):
         if action.get("kind") != "create_project":
             if answer.get("reply"):
                 job.emit("output", answer["reply"])
+            if answer.get("needs") in {"scope", "clarification"}:
+                job.status = "completed"
+                job.emit("finish", "Waiting for your answers; nothing was created")
+                return
             job.emit("output", "That is not a request to create a new project, so nothing was created.")
             job.status = "completed"
             job.emit("finish", "No project created")
@@ -279,18 +284,50 @@ def run(job):
         job.decision_event.set()
 
 
+def document(job):
+    """Write a document the user confirmed (documents.create), streaming its steps and text."""
+    job.status = "running"
+    try:
+        client = client_for(job)
+        spec = getattr(job, "document", None) or {"request": job.goal}
+
+        def streamed(event):
+            if event.get("event_type") == "reply_delta" and event.get("text"):
+                job.emit("delta", str(event["text"])[:4000])
+            elif event.get("event_type") == "reply_step" and event.get("text"):
+                job.emit("step", str(event["text"])[:300])
+        made = client.call("documents.create", {key: value for key, value in spec.items() if value}, streamed, 1800)
+        pages = f", {made['pages']} page{'s' if made['pages'] != 1 else ''}" if made.get("pages") else ""
+        job.emit("output", f"Created {made['format'].upper()} \"{made['title']}\"{pages}:\n{made['path']}")
+        job.emit("file", json.dumps({"path": made["path"], "format": made["format"], "title": made["title"]}))
+        job.status = "completed"
+    except Exception as exc:
+        job.error = (f"{exc.code}: {str(exc)[:500]}" if isinstance(exc, EngineError)
+                     else f"{type(exc).__name__}: {str(exc)[:500]}")
+        job.status = "failed"
+        job.emit("error", job.error)
+    finally:
+        job.emit("finish", f"Document {job.status}")
+
+
 def chat(job):
     """A conversation turn through the engine. It never executes: proposed work is shown with
     how to authorize it (Run task or New project), and nothing is changed."""
     job.status = "running"
     try:
         client = client_for(job)
+        if hasattr(client, "ensure"):
+            client.ensure()
+        features = set((getattr(client, "info", None) or {}).get("features") or [])
         params = {"message": job.goal}
         if job.project:  # read-only lookup: a conversation never registers or changes anything
             selected = Path(job.project).resolve()
             for item in client.call("projects.list", {}, None, 60):
                 if Path(item["root"]).resolve() == selected:
                     params["project_id"] = item["id"]
+        if "conversation.scope" in features:
+            # Say which project is selected, or that none is: the engine never keeps an old focus.
+            params["scope"] = "project" if params.get("project_id") else "global"
         def streamed(event):  # engines with conversation.stream send steps, then the reply as it is written
             if event.get("event_type") == "reply_delta" and event.get("text"):
                 job.emit("delta", str(event["text"])[:4000])
@@ -299,8 +336,18 @@ def chat(job):
         answer = client.call("conversation.send", params, streamed, 300)
         if answer.get("reply"):
             job.emit("output", answer["reply"])
+        if answer.get("context"):
+            job.emit("context", json.dumps(answer["context"])[:2000])  # what the model saw this turn
         action = answer.get("action")
-        if action:
+        if action and action.get("kind") == "document" and "documents.create" in features:
+            # Offered, never written by itself: the user confirms with the button or "yes".
+            job.emit("action", json.dumps({key: action.get(key) for key in ("kind", "request", "details", "format", "language")}))
+            action = None
+        if action and action.get("kind") in {"create_project", "task"}:
+            # Shown as a button; starting it still goes through the normal reviewed and approved flow.
+            job.emit("action", json.dumps({"kind": action["kind"], "goal": str(action.get("goal") or job.goal)[:2000],
+                                           "project": action.get("project"), "root": action.get("root")}))
+        elif action:
             where = "New project" if action.get("kind") == "create_project" else "Run task"
             job.emit("output", f"To do this, use {where} to review and authorize it. Nothing was changed.")
         job.status = "completed"
