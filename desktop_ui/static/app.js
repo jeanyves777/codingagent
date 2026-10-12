@@ -643,12 +643,14 @@
     row.className = 'action-buttons';
     const go = document.createElement('button');
     go.type = 'button';
-    go.textContent = action.kind === 'create_project' ? 'Create as new project' :
+    go.textContent = action.kind === 'document' ? `Create the ${(action.format || 'pdf').toUpperCase()}` :
+      action.kind === 'create_project' ? 'Create as new project' :
       `Run as task in ${action.project || currentProject?.name || 'this project'}`;
     go.addEventListener('click', () => { row.remove(); startAction(action); });
     const note = document.createElement('span');
     note.className = 'note';
-    note.textContent = 'You review and approve the plan before anything changes · or reply “yes”';
+    note.textContent = action.kind === 'document' ? 'Written in the background; you get the file here · or reply “yes”' :
+      'You review and approve the plan before anything changes · or reply “yes”';
     row.append(go, note);
     host.append(row);
   }
@@ -674,6 +676,17 @@
 
   async function startAction(action) {
     lastAction = null;
+    if (action.kind === 'document') {
+      try {
+        const job = await api('/api/start', 'POST', {message: action.request, mode: 'document', details: action.details || '',
+          format: action.format || null, language: action.language || null});
+        activeJob = job.id; cursor = 0; displayedEvents = new Set(); startedAt = job.started;
+        resetFlow('chat'); chatStep = ''; showTyping(); busySend(true); $('run-status').hidden = false;
+        await poll();
+        if (activeJob && !pollTimer) pollTimer = setInterval(poll, 300);
+      } catch (e) { toast(e.message); }
+      return;
+    }
     try {
       if (action.kind === 'task' && action.root && currentProject?.path !== action.root) {
         updateProject(await api('/api/project', 'POST', {path: action.root}));

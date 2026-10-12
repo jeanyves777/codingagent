@@ -299,8 +299,8 @@ premium supervisors, and recovery after upgrading an older engine.
 ## Documents on request (not coding projects)
 
 "Make me a PDF / Word file / spreadsheet / letter / email about …" is a deliverable, not software. Coding Brain
-asks only what is missing (what it is about, the format, the language and length), then writes it in the
-background with the local model and returns the file in the chat with **Open** and **Show in folder**. No
+asks only what is missing, proposes it, and writes it in the background **after you confirm** (the
+**Create the PDF** button or "yes"), then returns the file in the chat with **Open** and **Show in folder**. No
 project, no Git, no code review. Engine operation `documents.create` (feature `documents.create`).
 
 - Formats: PDF (printed offline by the system Edge/Chromium with JavaScript disabled), Word `.docx` (plain
@@ -311,3 +311,18 @@ project, no Git, no code review. Engine operation `documents.create` (feature `d
 - Files go to `Documents\Coding Brain` (`CODINGBRAIN_DOCUMENTS` overrides) and are never overwritten. The
   desktop opens only files in that folder. Each document is recorded in the conversation.
 - Requests that ask for code ("a script that generates a PDF") are still coding tasks.
+
+## Understanding and governance
+
+The local model decides what a message means, with the conversation and any pending questions as context:
+chat, a question, a **capability** question ("can you make PDFs?"), a document, a coding task, a new project,
+an answer to its own questions, or "never mind". It also judges whether a request says enough to do well, and
+writes its own follow-up questions when it does not. Keyword rules no longer decide intent; only "hello",
+"thanks", "help" and small talk are answered instantly, and those can never start anything.
+
+Fixed rules govern what may happen, whatever the model concludes:
+- Nothing is created, written or started without the user's confirmation: tasks, new projects and documents
+  are proposals with the exact spec, confirmed with a button or "yes".
+- Every chat and routing call carries one fixed statement of what Coding Brain can and cannot do, so it never
+  claims abilities it lacks (images, slide decks, audio, video, acting outside the user's projects).
+- Moving on ("I was just asking", a new question) drops a pending request; nothing is made from it.

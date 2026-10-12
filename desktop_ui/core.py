@@ -284,6 +284,32 @@ def run(job):
         job.decision_event.set()
 
 
+def document(job):
+    """Write a document the user confirmed (documents.create), streaming its steps and text."""
+    job.status = "running"
+    try:
+        client = client_for(job)
+        spec = getattr(job, "document", None) or {"request": job.goal}
+
+        def streamed(event):
+            if event.get("event_type") == "reply_delta" and event.get("text"):
+                job.emit("delta", str(event["text"])[:4000])
+            elif event.get("event_type") == "reply_step" and event.get("text"):
+                job.emit("step", str(event["text"])[:300])
+        made = client.call("documents.create", {key: value for key, value in spec.items() if value}, streamed, 1800)
+        pages = f", {made['pages']} page{'s' if made['pages'] != 1 else ''}" if made.get("pages") else ""
+        job.emit("output", f"Created {made['format'].upper()} \"{made['title']}\"{pages}:\n{made['path']}")
+        job.emit("file", json.dumps({"path": made["path"], "format": made["format"], "title": made["title"]}))
+        job.status = "completed"
+    except Exception as exc:
+        job.error = (f"{exc.code}: {str(exc)[:500]}" if isinstance(exc, EngineError)
+                     else f"{type(exc).__name__}: {str(exc)[:500]}")
+        job.status = "failed"
+        job.emit("error", job.error)
+    finally:
+        job.emit("finish", f"Document {job.status}")
+
+
 def chat(job):
     """A conversation turn through the engine. It never executes: proposed work is shown with
     how to authorize it (Run task or New project), and nothing is changed."""
@@ -314,12 +340,8 @@ def chat(job):
             job.emit("context", json.dumps(answer["context"])[:2000])  # what the model saw this turn
         action = answer.get("action")
         if action and action.get("kind") == "document" and "documents.create" in features:
-            job.emit("step", "Writing the document")
-            made = client.call("documents.create", {key: action[key] for key in ("request", "details", "format", "language")
-                                                    if action.get(key)}, streamed, 1800)
-            pages = f", {made['pages']} page{'s' if made['pages'] != 1 else ''}" if made.get("pages") else ""
-            job.emit("output", f"Created {made['format'].upper()} \"{made['title']}\"{pages}:\n{made['path']}")
-            job.emit("file", json.dumps({"path": made["path"], "format": made["format"], "title": made["title"]}))
+            # Offered, never written by itself: the user confirms with the button or "yes".
+            job.emit("action", json.dumps({key: action.get(key) for key in ("kind", "request", "details", "format", "language")}))
             action = None
         if action and action.get("kind") in {"create_project", "task"}:
             # Shown as a button; starting it still goes through the normal reviewed and approved flow.

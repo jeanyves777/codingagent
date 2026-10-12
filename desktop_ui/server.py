@@ -69,6 +69,10 @@ class StartRequest(BaseModel):
     message: str = Field(min_length=1, max_length=16000)
     mode: str = "chat"
     attachments: list[str] = Field(default_factory=list, max_length=MAX_ATTACHMENTS)
+    # mode "document": what the user confirmed in chat
+    details: str = Field(default="", max_length=4000)
+    format: str | None = Field(default=None, max_length=10)
+    language: str | None = Field(default=None, max_length=60)
 
 
 class SaveFile(BaseModel):
@@ -157,6 +161,7 @@ REQUIRED_OPERATIONS = {
     "chat": ("conversation.send",),
     "run": ("projects.register", "tasks.start", "tasks.approve", "tasks.accept", "tasks.stop"),
     "new": ("conversation.send", "projects.create", "tasks.start", "tasks.approve", "tasks.accept"),
+    "document": ("documents.create",),
 }
 
 
@@ -771,7 +776,7 @@ class Workspace:
         if attachments and mode == "chat":
             raise ValueError("Chat only reads your message; attachments are used by Run task and New project. "
                              "Switch mode to send these files. Nothing was started.")
-        if mode not in {"chat", "run", "new"}:
+        if mode not in {"chat", "run", "new", "document"}:
             raise ValueError("Unknown mode")
         if mode == "run" and (not self.project or not self.git_branch(self.project)):
             raise ValueError("Select an existing Git repository to run a coding task")
@@ -805,12 +810,15 @@ class Workspace:
                 )
         # Never treat chat as a coding task. Newer CLIs provide chat; older ones
         # return a clear unsupported-command error instead of running code.
-        command = [*self.cli_command(), "chat" if mode == "chat" else "new" if mode == "new" else "run", body.message]
+        command = [*self.cli_command(), "chat" if mode in {"chat", "document"} else "new" if mode == "new" else "run", body.message]
         with self.lock:
             if self.active and self.jobs[self.active].status in {"starting", "running", "approval_required"}:
                 raise ValueError("Another task is active; finish or stop it first")
             job = Job(mode, str(self.project) if self.project else None, command)
             job.attachments = attachments
+            if mode == "document":
+                job.document = {"request": body.message, "details": body.details, "format": body.format,
+                                "language": body.language}
             self.jobs[job.id] = job
             self.active = job.id
         # Chat, new projects and tasks go through the installed engine's typed API (one transport,
@@ -835,14 +843,15 @@ class Workspace:
                                  "attachments from the desktop. Update Coding Brain, or send without files. "
                                  "Nothing was started.")
             if status["engine"].get("typed_api"):
-                from .core import run as core_run, chat as core_chat, create_new
+                from .core import run as core_run, chat as core_chat, create_new, document as core_document
                 job.core = True
                 job.engine = self.engine_client()
                 job.on_project_created = lambda p: self.choose(p)
-                target = core_run if mode == "run" else create_new if mode == "new" else core_chat
+                target = (core_run if mode == "run" else create_new if mode == "new" else
+                          core_document if mode == "document" else core_chat)
                 threading.Thread(target=target, args=(job,), daemon=True).start()
                 return job
-            if mode in {"new", "run"} or attachments or not status["engine"].get("conversation"):
+            if mode in {"new", "run", "document"} or attachments or not status["engine"].get("conversation"):
                 del self.jobs[job.id]
                 if self.active == job.id:
                     self.active = None

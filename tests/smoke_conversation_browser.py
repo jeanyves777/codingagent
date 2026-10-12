@@ -49,10 +49,17 @@ with sync_playwright() as p:
           const body = JSON.parse(opts.body); demo.starts.push(body);
           const id = 'j' + demo.starts.length;
           const ev = (seq, kind, message) => ({seq, kind, message, at: at + seq, job_id: id});
-          if (body.mode === 'chat' && body.message.includes('pdf')) {
-            demo.jobs[id] = [ev(1, 'step', 'Writing the document'), ev(2, 'output', 'Created PDF "Rome": C:/Users/me/Documents/Coding Brain/rome.pdf'),
-              ev(3, 'file', JSON.stringify({path: 'C:/Users/me/Documents/Coding Brain/rome.pdf', format: 'pdf', title: 'Rome'})), ev(4, 'finish', 'Chat completed')];
+          if (body.mode === 'chat' && body.message.includes('pdf')) {  // chat only proposes the document
+            demo.jobs[id] = [ev(1, 'output', 'I will write a PDF: A two-page history of Rome. Confirm to create it.'),
+              ev(2, 'action', JSON.stringify({kind: 'document', request: 'A two-page history of Rome', format: 'pdf', language: null})),
+              ev(3, 'finish', 'Chat completed')];
             return response({id, kind: 'chat', status: 'running', started: at});
+          }
+          if (body.mode === 'document') {  // written only after the user confirmed
+            demo.documents = (demo.documents || 0) + 1;
+            demo.jobs[id] = [ev(1, 'step', 'Writing the document'), ev(2, 'output', 'Created PDF "Rome": C:/Users/me/Documents/Coding Brain/rome.pdf'),
+              ev(3, 'file', JSON.stringify({path: 'C:/Users/me/Documents/Coding Brain/rome.pdf', format: 'pdf', title: 'Rome'})), ev(4, 'finish', 'Document completed')];
+            return response({id, kind: 'document', status: 'running', started: at});
           }
           demo.jobs[id] = body.mode === 'chat' ? [
             ev(1, 'output', 'Yes — I can add that as a task in calc.'),
@@ -100,11 +107,15 @@ with sync_playwright() as p:
     page.click('#mode-chat')
     page.fill('#prompt', 'make me a pdf about the history of Rome in two pages')
     page.click('#send')
+    page.locator('.action-buttons button', has_text='Create the PDF').wait_for()
+    assert page.evaluate("window.__demo.documents || 0") == 0  # nothing written from chat alone
+    page.locator('.action-buttons button', has_text='Create the PDF').click()
     page.locator('.action-buttons button', has_text='Open PDF').click()
+    assert page.evaluate("window.__demo.documents") == 1
     page.wait_for_function("window.__demo.opened && window.__demo.opened[1] === false")
     page.locator('.action-buttons button', has_text='Show in folder').click()
     page.wait_for_function("window.__demo.opened[1] === true")
 
     assert not errors, errors
     browser.close()
-print("Conversation browser PASS: saved conversation + task milestones load, context bar, action button, 'yes' starts the task, new conversation, document Open / Show in folder")
+print("Conversation browser PASS: saved conversation + task milestones load, context bar, action button, 'yes' starts the task, new conversation, document proposed, created only after confirmation, Open / Show in folder")

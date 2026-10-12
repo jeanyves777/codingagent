@@ -30,24 +30,20 @@ from pathlib import Path
 from . import config as settings
 from .paths import Layout
 
-INTENTS = ("chat", "question", "projects", "status", "investigate", "plan", "review", "create_project",
-           "implement")
+INTENTS = ("chat", "question", "capability", "projects", "status", "investigate", "plan", "review",
+           "create_project", "implement", "document", "answer", "cancel")
 EXECUTING = {"create_project", "implement"}
+PROPOSING = EXECUTING | {"document"}  # intents that end in a confirmation, never in an action by themselves
 
 GREETING = re.compile(r"(?i)^\s*(hi|hello|hey|hiya|howdy|yo|greetings|good\s+(morning|afternoon|evening|day)|"
                       r"bonjour|salut|hola|ciao)(\s+(there|coding\s*brain|again|friend))?\s*[!.,:)]*\s*$")
 THANKS = re.compile(r"(?i)^\s*(thanks|thank\s+you|thx|merci|cheers|ok(ay)?|great|cool|nice|perfect)"
                     r"(\s+(so\s+much|a\s+lot|very\s+much))?\s*[!.]*\s*$")
 FAREWELL = re.compile(r"(?i)^\s*(bye|goodbye|see\s+you|exit|quit|q)\s*[!.]*\s*$")
-# Messages answered without the routing model call (one model call instead of two). Small talk and
-# general questions only; anything naming a project, a file or work to do still goes through routing.
+# Pure small talk is answered without the routing call; it can never start anything.
 SMALL_TALK = re.compile(r"(?i)^\s*(how\s+are\s+you(\s+doing)?(\s+today)?|how('?s|\s+is)\s+it\s+going|what'?s\s+up|"
                         r"how\s+have\s+you\s+been|good\s*(night|bye)|bye|see\s+you(\s+later)?|nice\s+to\s+meet\s+you|"
                         r"who\s+are\s+you|are\s+you\s+there)\s*[?!.]*\s*$")
-QUESTION = re.compile(r"(?i)^\s*(what\s+(is|are)|what'?s\s+(a|an|the)\b|why\s+(is|are|do|does)|explain|define|"
-                      r"how\s+(does|do)\s+(a|an|the)?\s*\w+\s+work|what'?s\s+the\s+difference|difference\s+between)\b")
-LOCAL_REFERENCE = re.compile(r"(?i)\b(my|this|our|the)\s+(project|repo|repository|code|codebase|app|file|folder|function|"
-                             r"class|module|tests?)\b|\.(py|js|ts|tsx|jsx|json|md|java|go|rs|cs|cpp|c|h|html|css)\b|[/\\]")
 HELP = re.compile(r"(?i)^\s*(help|\?|what\s+can\s+you\s+do\??|how\s+do\s+(i|you)\s+use\s+(this|you)\??)\s*$")
 PROJECTS = re.compile(r"(?i)\b(what|which|list|show|my|all)\b[^?]*\bprojects?\b|^\s*projects?\s*\??\s*$"
                       r"|\bany\s+projects?\b|\bprojects?\s+(exists?|are\s+there)\b"
@@ -59,14 +55,6 @@ CREATE = re.compile(ASKING + r"(create|creat|crate|craete|build|buid|bulid|biuld
                     r"program|script|cli|dashboard|bot|project|page|pdf|report|document|component|module|extension)s?\b")
 CHANGE = re.compile(ASKING + r"(fix|fx|add|implement|refactor|update|change|remove|"
                     r"rename|delete|optimi[sz]e|migrate|upgrade|write\s+tests|debug|repair|improve)\b")
-# Requests too vague to build or change anything yet: an object with nothing about what it should be
-# ("generate a PDF", "make an app") or a bare instruction ("fix it"). These get scoping questions first.
-VAGUE_CREATE = re.compile(ASKING + r"(create|creat|build|buid|make|generate|write|develop|start|do)?\s*(me\s+)?"
-                          r"(a|an|the|some|my)?\s*(new\s+|simple\s+|basic\s+|small\s+)?(?P<thing>pdf|app|application|"
-                          r"website|web\s*site|site|web\s*page|page|tool|program|script|game|bot|dashboard|api|project|"
-                          r"report|document|cli|software)s?(\s+file)?\s*(for\s+me)?\s*[?.!]*\s*$")
-VAGUE_CHANGE = re.compile(ASKING + r"(fix|fx|add|change|update|improve|do)\s*(it|this|that|something|the\s+bug|"
-                          r"a\s+feature|a\s+bug|everything|the\s+code|my\s+code)?\s*[?.!]*\s*$")
 SCOPE_QUESTIONS = {
     "document": ["What is it about, and what should it contain (sections, key points, any figures)?",
                  "Which format: PDF (default), Word, Excel/CSV, plain text, Markdown or HTML?",
@@ -77,47 +65,6 @@ SCOPE_QUESTIONS = {
     "change": ["What exactly should change, and in which part of the project (file, function or feature)?",
                "How will we know it works: what should happen afterwards that does not happen now?"],
 }
-
-
-# "Make me a PDF / report / letter about ..." is a document to write, not software to build.
-DOCUMENT_REQUEST = re.compile(ASKING + r"(create|creat|generate|make|mak|write|produce|prepare|draft|give\s+me)\s+"
-                              r"(me\s+)?.{0,40}?\b(pdf|document|report|letter|cv|resume|résumé|brochure|flyer|essay|"
-                              r"article|summary|memo|proposal|guide|handout|cover\s+letter|word\s+(file|doc)|docx|"
-                              r"spreadsheet|excel|xlsx|workbook|csv|table|budget|invoice|timesheet|schedule|"
-                              r"e-?mail|newsletter|presentation|slides?)s?\b", re.S)
-CODE_WORDS = re.compile(r"(?i)\b(script|program|code|function|app|application|api|website|project|class|module|"
-                        r"generator|tool|cli|repository|repo|test|endpoint)s?\b")
-DOC_NOISE = {"create", "creat", "generate", "make", "write", "produce", "prepare", "draft", "give", "me", "a", "an",
-             "the", "some", "my", "please", "can", "could", "would", "you", "u", "pdf", "document", "report", "file",
-             "new", "simple", "about", "on", "for", "of", "in", "to", "it", "i", "want", "need", "word", "excel",
-             "spreadsheet", "docx", "xlsx", "csv", "table", "email", "e-mail", "doc", "workbook"}
-
-
-def document_request(text: str) -> bool:
-    return bool(DOCUMENT_REQUEST.match(text)) and not CODE_WORDS.search(text)
-
-
-# Words that sound like content but say nothing about it ("some data", "random stuff", "an example").
-DOC_VAGUE = {"and", "with", "some", "any", "data", "stuff", "things", "thing", "info", "information", "content",
-             "example", "examples", "sample", "samples", "random", "test", "dummy", "fake", "basic", "simple",
-             "nice", "good", "quick", "little", "something", "anything", "whatever", "few", "lot", "lots", "useful",
-             "interesting", "cool", "generic", "text", "numbers", "values", "rows", "columns", "pages", "page",
-             "one", "two", "short", "long", "please", "thanks", "now", "just", "that", "this", "is", "are", "be"}
-
-
-def document_is_specific(text: str) -> bool:
-    """Enough to write without asking: at least two words that say what the document is about."""
-    words = [word for word in re.findall(r"[\w'-]+", text.lower())
-             if word not in DOC_NOISE and word not in DOC_VAGUE and len(word) > 1]
-    return len(words) >= 2
-
-
-def scope_kind(text: str) -> str | None:
-    """'document' / 'app' / 'change' when the request is too vague to act on, else None."""
-    match = VAGUE_CREATE.match(text)
-    if match:
-        return "document" if match.group("thing").lower() in {"pdf", "report", "document"} else "app"
-    return "change" if VAGUE_CHANGE.match(text) else None
 
 
 AFFIRM = re.compile(r"(?i)^\s*(y|yes|yeah|yep|sure|ok(ay)?|do\s+it|go\s+ahead|run\s+it|proceed|please\s+do)\s*[!.]*\s*$")
@@ -136,6 +83,10 @@ class Route:
     project: str | None = None
     clarification: str | None = None
     reply: str | None = None
+    enough_detail: bool = True        # the model's judgement: can this be done without asking more?
+    missing: list = field(default_factory=list)  # the model's own follow-up questions when it cannot
+    fmt: str | None = None            # documents: pdf, docx, xlsx, csv, txt, md, html
+    language: str | None = None
 
 
 @dataclass
@@ -282,30 +233,57 @@ class LocalModel:
         return "".join(pieces).strip()
 
 
+CAPABILITIES = """What Coding Brain can do (answer questions about yourself from this list only):
+- Chat and answer programming questions; explain and review code in the user's projects.
+- Change the user's projects: fix bugs, add features, write tests, refactor - as a task the user approves
+  before anything is written; tests run in an offline Docker sandbox; results land on a new Git branch.
+- Create new software projects from a description, after the user confirms.
+- Write documents: PDF, Word (.docx), Excel (.xlsx), CSV, plain text (emails), Markdown, HTML - after the
+  user confirms what it should contain.
+- Read attached screenshots, images, PDFs, Word and Excel files as input for a task.
+What Coding Brain cannot do: create or edit images, logos, drawings or photos; slide decks (PowerPoint);
+audio or video; browse or post on the internet for the user; send emails or messages; act outside the
+user's projects and its own Documents folder."""
+
 ROUTE_SCHEMA = {"type": "object", "properties": {
     "intent": {"type": "string", "enum": list(INTENTS)},
     "project": {"type": ["string", "null"]},
     "goal": {"type": "string"},
-    "clarification": {"type": ["string", "null"]}}, "required": ["intent", "goal"]}
+    "clarification": {"type": ["string", "null"]},
+    "enough_detail": {"type": "boolean"},
+    "missing": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+    "format": {"type": ["string", "null"], "enum": ["pdf", "docx", "xlsx", "csv", "txt", "md", "html", None]},
+    "language": {"type": ["string", "null"]}}, "required": ["intent", "goal", "enough_detail"]}
 
-ROUTER_PROMPT = """You route messages for Coding Brain, a coding assistant on the user's computer.
-Classify the user's latest message into exactly one intent:
-- chat: greetings, small talk, opinions, anything conversational
-- question: a general question that can be answered from knowledge (programming concepts, how-to)
-- projects: asks which projects exist or about the list of projects
-- status: asks about the progress or tasks of a project
-- investigate: asks to look at or explain an existing project's code, without changing it
-- plan: asks how something should be done in a project, without doing it yet
-- review: asks to review or assess existing code
-- create_project: asks to create/build a NEW application, website, tool or project from scratch
-- implement: asks to change existing code: fix a bug, add a feature, refactor, write tests
-Rules: questions and discussion are never implement. Only choose implement or create_project when
-the user clearly asks for work to be done. A request phrased as a question ("can you build ...",
-"could you add ...", "can u creat a ...") IS a request for work; typos do not change that. "project" is the name of a known project the message
-refers to, or null. "goal" restates the request as one clear sentence. If the request is too vague
-to act on, set "clarification" to one short question; otherwise null.
+ROUTER_PROMPT = """You understand messages for Coding Brain, a coding agent on the user's computer.
+Decide what the user's latest message means, using the conversation so far. Exactly one intent:
+- chat: greetings, small talk, opinions, reactions, "I was just asking", anything conversational
+- question: a general question answered from knowledge (programming concepts, how-to)
+- capability: asks WHETHER Coding Brain can do something ("can you generate PDFs?", "do you make
+  images?", "are you able to write tests?") without asking it to do it now with specifics
+- projects: asks which projects exist; status: progress or tasks of a project
+- investigate / plan / review: look at, plan or assess an existing project's code without changing it
+- create_project: asks to build NEW software (an app, website, tool, script project) now
+- implement: asks to change existing code now: fix a bug, add a feature, refactor, write tests
+- document: asks to produce a document file now (PDF, Word, Excel, CSV, letter, report, email draft)
+- answer: replies to questions Coding Brain just asked (see "Waiting for" below) with the details
+- cancel: drops the pending request ("never mind", "cancel", "forget it", "I was just asking" when
+  Coding Brain was waiting for details)
+How to decide:
+- A question about ability is capability, not a request. "can you generate a PDF?" is capability;
+  "generate a PDF of my sales report from sales.csv" is document. If unsure, prefer capability or chat:
+  asking costs nothing, doing the wrong thing costs a lot.
+- enough_detail: for create_project, implement and document only. true when the request says WHAT to
+  make with enough substance to do it well (topic and content for a document; purpose and main
+  features for software; what and where for a change). Otherwise false, and put up to three short,
+  specific follow-up questions in "missing" (in the user's language). Never invent the missing parts.
+- "goal" restates the request as one clear sentence; for "answer", restate the whole request with the
+  details just given. "format" and "language" only for documents, when known.
+- "project" is the name of a known project the message refers to, or null.
+Waiting for: {pending}
 Known projects: {projects}
-Current folder: {folder}"""
+Current folder: {folder}
+""" + CAPABILITIES
 
 CHAT_PROMPT = """You are Coding Brain, a coding agent running on the user's own computer with a local
 model. Be friendly, concise and accurate; say so when you are unsure.
@@ -318,7 +296,9 @@ and that they can start it with the "Run as task" / "Create as new project" butt
 New project mode). If the request is not a coding job (for example writing a letter), say so plainly
 and offer what you can do instead, such as a program that generates it.
 Known projects: {projects}
-Current folder: {folder}"""
+Current folder: {folder}
+""" + CAPABILITIES + """
+Never claim an ability that is not in this list, and say plainly when something is not possible."""
 
 
 # The assistant ----------------------------------------------------------------------------------------
@@ -349,10 +329,6 @@ class Assistant:
             return f"{self.cwd} (inside the Git project {self.repository.name})"
         return f"{self.cwd} (not a project)"
 
-    def mentions_project(self, text: str) -> bool:
-        lowered = text.lower()
-        return any(item["name"].lower() in lowered for item in self.projects() if len(item["name"]) > 2)
-
     def project_names(self) -> str:
         names = [item["name"] for item in self.projects() if item["exists"]][:30]
         return ", ".join(names) or "none yet"
@@ -373,9 +349,7 @@ class Assistant:
             return Route("chat", "rule", reply=HELP_TEXT)
         if SMALL_TALK.match(text):
             return Route("chat", "rule")  # answered by the model directly, no routing call
-        if QUESTION.match(text) and not (CREATE.match(text) or CHANGE.match(text) or LOCAL_REFERENCE.search(text)
-                                         or self.mentions_project(text)):
-            return Route("question", "rule", goal=text)
+
         if PROJECTS.search(text) and not CREATE.match(text) and not CHANGE.match(text):
             return Route("projects", "rule")
         try:
@@ -384,7 +358,11 @@ class Assistant:
             return self.fallback_route(text)
 
     def model_route(self, text: str) -> Route:
-        system = ROUTER_PROMPT.format(projects=self.project_names(), folder=self.folder_description())
+        pending = "nothing"
+        if self.scoping:
+            pending = (f"details for this {self.scoping['intent'].replace('_', ' ')} request: \"{self.scoping['goal']}\""
+                       f" (questions asked: {' | '.join(self.scoping.get('questions') or [])})")
+        system = ROUTER_PROMPT.format(projects=self.project_names(), folder=self.folder_description(), pending=pending)
         messages = [{"role": "system", "content": system}, *self.history.recent(self.focus_id(), 6),
                     {"role": "user", "content": text}]
         self.step("Understanding your request")
@@ -399,8 +377,12 @@ class Assistant:
         if intent in EXECUTING and not (CREATE.match(text) or CHANGE.match(text) or re.search(
                 r"(?i)\b(fix|build|create|implement|add|refactor|make|write|change|update|remove)\b", text)):
             intent = "question"  # no action without an action verb: answer it instead
+        missing = [str(item)[:300] for item in (data.get("missing") or []) if str(item).strip()][:3]
         return Route(intent, "model", goal=str(data.get("goal") or text)[:2000],
-                     project=data.get("project") or None, clarification=data.get("clarification") or None)
+                     project=data.get("project") or None, clarification=data.get("clarification") or None,
+                     enough_detail=bool(data.get("enough_detail", True)) and not (intent in EXECUTING | {"document"} and missing
+                                                                               and data.get("enough_detail") is False),
+                     missing=missing, fmt=data.get("format") or None, language=data.get("language") or None)
 
     def fallback_route(self, text: str) -> Route:
         """Without the model: act only on unmistakable requests; everything else is conversation."""
@@ -569,14 +551,19 @@ class Assistant:
         speak, self.out = self.out, (lambda line="": captured.append(str(line)))
         result = {"action": None, "needs": None, "options": [], "project_id": self.focus_id()}
         try:
-            if self.scoping and not (CREATE.match(text) or CHANGE.match(text)) or self.scoping and DENY.match(text):
-                return self.answer_scoping(text, result, captured)
-            self.scoping = None
-            if document_request(text):
-                return self.document(text, result, captured)
-            kind = scope_kind(text)  # vague requests get scoping questions, whatever the model would route
-            route = (Route("create_project" if kind in ("document", "app") else "implement", "rule", goal=text)
-                     if kind else self.route(text))
+            route = self.route(text)
+            if self.scoping and route.intent == "answer":
+                return self.answer_scoping(text, route, result, captured)
+            if self.scoping and route.intent in {"cancel", "chat", "capability", "question"}:
+                self.scoping = None  # the user moved on: nothing is made from the earlier request
+                if route.intent == "cancel":
+                    self.history.add("user", text, self.focus_id(), {"intent": "cancel"})
+                    self.say("OK, nothing was started.")
+                    result.update(intent="cancel", source=route.source)
+                    self.out_restore(result, captured)
+                    return result
+            elif route.intent != "answer":
+                self.scoping = None
             result.update(intent=route.intent, source=route.source)
             self.history.add("user", text, self.focus_id(), {"intent": route.intent, "source": route.source})
             if route.reply:
@@ -586,10 +573,12 @@ class Assistant:
             elif route.clarification and route.intent not in {"chat", "question"}:
                 self.say(route.clarification)
                 result["needs"] = "clarification"
-            elif route.intent in {"chat", "question"}:
-                self.converse(text)
-            elif route.intent in {"create_project", "implement"} and scope_kind(text):
+            elif route.intent in {"chat", "question", "capability", "answer", "cancel"}:
+                self.converse(text)  # "answer"/"cancel" with nothing pending is just conversation
+            elif route.intent in PROPOSING and not route.enough_detail:
                 self.ask_scope(route, text, result)
+            elif route.intent == "document":
+                self.propose_document(route, text, result)
             elif route.intent == "create_project":
                 result["action"] = {"kind": "create_project", "goal": route.goal or text}
                 self.say(f"That sounds like a new application: \"{route.goal or text}\". Confirm to create it.")
@@ -625,54 +614,40 @@ class Assistant:
         return result
 
     def ask_scope(self, route: Route, text: str, result: dict):
-        """A request too vague to build ("generate a PDF") gets a few questions instead of a project."""
-        kind = scope_kind(text)
-        self.scoping = {"intent": route.intent, "goal": route.goal or text, "kind": kind, "project": self.focus}
-        questions = SCOPE_QUESTIONS[kind]
-        what = {"document": "the document", "app": "it", "change": "the change"}[kind]
-        self.say(f"Before I build {what}, a few quick questions so it is what you want:\n"
+        """Not enough detail to do it well: ask the model's own questions (fixed ones only as a fallback)."""
+        kind = "document" if route.intent == "document" else "change" if route.intent == "implement" else "app"
+        questions = route.missing or SCOPE_QUESTIONS[kind]
+        self.scoping = {"intent": route.intent, "goal": route.goal or text, "kind": kind, "project": self.focus,
+                        "questions": questions, "format": route.fmt, "language": route.language}
+        self.say("Happy to. A few quick questions first:\n"
                  + "\n".join(f"{index}. {question}" for index, question in enumerate(questions, 1))
-                 + "\nAnswer in one message (or say \"cancel\").")
-        result.update(intent=route.intent, needs="scope", source="rule")
+                 + "\nAnswer in one message, or say \"cancel\".")
+        result.update(intent=route.intent, needs="scope", source=route.source)
 
-    def document(self, text: str, result: dict, captured: list) -> dict:
-        """A document request: written now if it says enough, otherwise three quick questions first."""
+    def propose_document(self, route: Route, text: str, result: dict, details: str = ""):
+        """A document is proposed with what it will contain; it is written only after the user confirms."""
         from ..documents import detect_format, detect_language
-        self.history.add("user", text, self.focus_id(), {"intent": "document"})
-        try:
-            result.update(intent="document", source="rule")
-            if not document_is_specific(text):
-                self.scoping = {"intent": "document", "goal": text, "kind": "document", "project": self.focus}
-                self.say("Happy to write it. A few quick questions first:\n"
-                         + "\n".join(f"{index}. {question}" for index, question in enumerate(SCOPE_QUESTIONS["document"], 1))
-                         + "\nAnswer in one message (or say \"cancel\").")
-                result["needs"] = "scope"
-                return result
-            result["action"] = {"kind": "document", "request": text, "details": "",
-                                "format": detect_format(text), "language": detect_language(text)}
-            self.say("Writing it now; the file will appear here when it is ready.")
-            return result
-        finally:
-            self.out_restore(result, captured)
+        both = f"{route.goal or text}\n{details}"
+        fmt = route.fmt or detect_format(both)
+        result.update(intent="document", needs="confirmation")
+        result["action"] = {"kind": "document", "request": route.goal or text, "details": details[:2000],
+                            "format": fmt, "language": route.language or detect_language(both)}
+        self.say(f"I will write a {fmt.upper()}: {route.goal or text}" + (f"\nDetails: {details}" if details else "")
+                 + "\nConfirm to create it.")
 
-    def answer_scoping(self, text: str, result: dict, captured: list) -> dict:
+    def answer_scoping(self, text: str, route: Route, result: dict, captured: list) -> dict:
         scoping, self.scoping = self.scoping, None
         self.history.add("user", text, self.focus_id(), {"intent": "scope_answer"})
         try:
-            if DENY.match(text):
-                self.say("OK, nothing was started.")
-                result.update(intent="chat", source="rule")
+            goal = route.goal if route.goal and route.goal != text else \
+                f"{scoping['goal'].rstrip('.?! ')}. Details from the user: {text.strip()}"
+            goal = goal[:2000]
+            result.update(intent=scoping["intent"], source=route.source, needs="confirmation")
+            if scoping["intent"] == "document":
+                merged = Route("document", route.source, goal=scoping["goal"], fmt=route.fmt or scoping.get("format"),
+                               language=route.language or scoping.get("language"))
+                self.propose_document(merged, scoping["goal"], result, details=text.strip())
                 return result
-            if scoping["kind"] == "document":
-                from ..documents import detect_format, detect_language
-                both = f"{scoping['goal']}\n{text}"
-                result.update(intent="document", source="rule")
-                result["action"] = {"kind": "document", "request": scoping["goal"], "details": text.strip()[:2000],
-                                    "format": detect_format(both), "language": detect_language(both)}
-                self.say("Thanks. Writing it now; the file will appear here when it is ready.")
-                return result
-            goal = f"{scoping['goal'].rstrip('.?! ')}. Details from the user: {text.strip()}"[:2000]
-            result.update(intent=scoping["intent"], source="rule", needs="confirmation")
             project = scoping.get("project")
             if scoping["intent"] == "create_project" or not project:
                 result["action"] = {"kind": "create_project", "goal": goal}
