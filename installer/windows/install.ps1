@@ -259,6 +259,10 @@ if ($provision) {
   & (Join-Path $versionDir 'venv\Scripts\python.exe') @provisionArguments
   $code = $LASTEXITCODE
   Write-Host ''
+  if ($code -eq 3010) {
+    Write-Host "Environment setup is paused for a required Windows restart. Save your work, restart Windows, then run 'codingbrain install --resume'."
+    exit $code
+  }
   Write-Host 'Open a new terminal, then: codingbrain doctor --full   (readiness level), cd C:\path\to\project; codingbrain'
   exit $code
 }

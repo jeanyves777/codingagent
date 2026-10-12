@@ -100,6 +100,7 @@ if (-not $installed) {
   Write-Step "Installing the Coding Brain engine $bundled and preparing the full environment"
   & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Bundle 'install.ps1') -From $Bundle -InstallDir $InstallDir -Full @installYes
   $code = $LASTEXITCODE
+  if ($code -eq 3010) { Finish $code "Setup is paused for a required Windows restart. Save your work and restart Windows, then continue with 'codingbrain install --resume'." }
   if ($code -ne 0) { Finish $code "Setup stopped (exit $code). Fix the step above, then run 'codingbrain install --resume' or re-run this installer." }
   $installed = (Get-Content -Raw -LiteralPath $current | ConvertFrom-Json).version
   $python = Join-Path $InstallDir "app\versions\$installed\venv\Scripts\python.exe"
@@ -165,6 +166,9 @@ if ($older -eq '1') {
 Write-Step 'Preparing the full environment (models, sandbox, OCR, vision, knowledge, supervisors)'
 & $python -I -m brain.local install --full @cliYes
 $code = $LASTEXITCODE
+if ($code -eq 3010) {
+  Finish $code "Environment setup is paused for a required Windows restart. Save your work and restart Windows, then continue with 'codingbrain install --resume'."
+}
 if ($code -ne 0) {
   Finish $code "Full environment setup failed (exit $code). Run 'codingbrain install --resume' to continue."
 }

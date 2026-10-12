@@ -367,6 +367,27 @@ class Installer:
         self.say("\n" + render(report))
         return report
 
+    def refresh_model_after_selftest(self, report: dict) -> dict:
+        """Recheck a failed model probe after a real task has successfully warmed the model."""
+        if not report.get("selftest", {}).get("passed"):
+            return report
+        previous = self.env.results.get("model")
+        if previous is None or (previous.ready and not previous.data.get("unverified")):
+            return report
+        self.say("\nThe end-to-end test passed. Rechecking local model readiness after startup.")
+        with self.operation("verify", "local model readiness after the end-to-end test"):
+            check_all(self.env, ["model"], deep=True)
+        current = self.env.results["model"]
+        self.state.step("model", "done" if current.ready else current.state, current.detail)
+        report.update(readiness_report(self.layout, self.env, report["profile"], PROFILES[report["profile"]],
+                                       self.state.data.get("declined", [])))
+        self.state.data["last"] = {"at": time.time(), "level": report["level"], "profile": report["profile"]}
+        self.state.save()
+        self.event("stage", None, "BLOCKED" if report["level"] == "blocked" else "COMPLETED",
+                   f"Readiness: {report['label']}", data={"level": report["level"], "reached": report["reached"]})
+        self.say("\n" + render(report))
+        return report
+
     # one installation at a time ------------------------------------------------------------------------
     def _lock_path(self) -> Path:
         return self.layout.locks / "install.json"

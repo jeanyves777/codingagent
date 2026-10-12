@@ -215,6 +215,98 @@ def test_downloaded_model_that_cannot_generate_blocks_core(layout):
     assert report["level"] == "blocked"
 
 
+@pytest.mark.parametrize("recovers, other_failure", [(True, False), (False, False), (True, True)])
+def test_successful_selftest_rechecks_model_without_hiding_other_failures(layout, recovers, other_failure):
+    machine = FakeMachine(programs={"winget", "git", "ollama"}, ollama_running=True,
+                          models={"qwen2.5-coder:7b"}, generation_ok=False)
+    installer = make(layout, machine, yes=True)
+    report = installer.install("local")
+    report["selftest"] = {"passed": True, "model": "qwen2.5-coder:7b"}
+    machine.generation_ok = recovers
+    if other_failure:
+        installer.env.results["python"] = Status("failed", "Python is unavailable")
+    refreshed = installer.refresh_model_after_selftest(report)
+    assert refreshed["components"]["model"]["state"] == ("ready" if recovers else "failed")
+    assert refreshed["levels"]["core"]["ready"] == (recovers and not other_failure)
+    assert refreshed["selftest"]["passed"]
+    assert InstallState(layout).evidence["generation"]["qwen2.5-coder:7b"]["ok"] == recovers
+    assert InstallState(layout).data["last"]["level"] == refreshed["level"]
+
+
+@pytest.mark.parametrize("passed, initially_ready, expected_exit", [(True, False, 0), (False, False, 1), (False, True, 1)])
+def test_install_cli_uses_readiness_after_selftest(layout, monkeypatch, passed, initially_ready, expected_exit):
+    from types import SimpleNamespace
+    from brain.local import cli
+    machine = FakeMachine(programs={"winget", "git", "ollama"}, ollama_running=True,
+                          models={"qwen2.5-coder:7b"}, generation_ok=initially_ready)
+    installer = make(layout, machine, yes=True)
+    report = installer.install("local")
+    report["levels"]["sandbox"]["ready"] = True
+    monkeypatch.setattr(installer, "install", lambda *a, **kw: report)
+    monkeypatch.setattr("brain.local.installer.Installer", lambda *a, **kw: installer)
+    machine.generation_ok = True
+    monkeypatch.setattr(cli, "run_selftest", lambda *a: {"passed": passed})
+    args = SimpleNamespace(full=False, profile="local", json=True, yes=True, non_interactive=True,
+                           only=None, skip=(), resume=False, plan=False, retry_declined=False,
+                           no_auto_resume=True, selftest=True)
+    assert cli.cmd_install(args, layout) == expected_exit
+    assert report["levels"]["core"]["ready"] == (passed or initially_ready)
+
+
+@pytest.mark.parametrize("code, state", [(4294967295, "failed"), (3010, "needs_restart"), (0, "needs_restart")])
+def test_wsl_unknown_failure_is_not_reported_as_a_required_restart(layout, code, state):
+    machine = FakeMachine()
+    machine.run_elevated = lambda *a, **kw: code
+    env = Env(machine, layout, settings.load(layout))
+    result = BY_ID["wsl"].install(env, Status("missing"))
+    assert result.state == state
+    assert (env.evidence.get("pending_restart") == "wsl") == (state == "needs_restart")
+
+
+def test_install_cli_returns_restart_code_for_a_confirmed_restart(layout, monkeypatch):
+    from types import SimpleNamespace
+    from brain.local import cli
+    installer = make(layout, FakeMachine(), yes=True)
+    report = installer.install("full")
+    assert report["restart_required"] == "wsl"
+    monkeypatch.setattr(installer, "install", lambda *a, **kw: report)
+    monkeypatch.setattr("brain.local.installer.Installer", lambda *a, **kw: installer)
+    args = SimpleNamespace(full=True, profile=None, json=True, yes=True, non_interactive=True,
+                           only=None, skip=(), resume=False, plan=False, retry_declined=False,
+                           no_auto_resume=True, selftest=True)
+    assert cli.cmd_install(args, layout) == 3010
+
+
+def test_install_selftest_heartbeats_are_displayed_while_the_test_is_running(layout, monkeypatch):
+    import time
+    from types import SimpleNamespace
+    from brain.local import cli
+    machine = FakeMachine(programs={"winget", "git", "ollama"}, ollama_running=True,
+                          models={"qwen2.5-coder:7b"})
+    installer = make(layout, machine, yes=True)
+    report = installer.install("local")
+    report["levels"]["sandbox"]["ready"] = True
+    installer.out.seek(0)
+    installer.out.truncate(0)
+    monkeypatch.setattr(installer, "install", lambda *a, **kw: report)
+    monkeypatch.setattr("brain.local.installer.Installer", lambda *a, **kw: installer)
+
+    def slow_selftest(*args):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if 'still working:' in installer.out.getvalue():
+                return {"passed": True}
+            time.sleep(0.02)
+        pytest.fail('No progress heartbeat was displayed during the self-test')
+
+    monkeypatch.setattr(cli, "run_selftest", slow_selftest)
+    args = SimpleNamespace(full=False, profile="local", json=False, plain=True, yes=True, non_interactive=True,
+                           only=None, skip=(), resume=False, plan=False, retry_declined=False,
+                           no_auto_resume=True, selftest=True)
+    assert cli.cmd_install(args, layout) == 0
+    assert installer.view is None
+
+
 def test_quick_check_does_not_count_an_untested_model():
     results = {"python": Status("ready"), "git": Status("ready"), "ollama": Status("ready"),
                "model": Status("ready", "downloaded", data={"unverified": True})}
