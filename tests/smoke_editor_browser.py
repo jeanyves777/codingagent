@@ -96,6 +96,23 @@ try:
         assert (project / 'calc.py').read_text(encoding='utf-8') == '# changed elsewhere\n'
         assert page.locator('#editor-reload').is_visible()
 
+        # 3b. Review B2: a tab never saves into another project, even a byte-identical file.
+        page.click('#editor-reload')
+        page.locator('#action-approve').click()  # the app asks before replacing unsaved edits
+        page.locator('#editor-state', has_text='Editing').wait_for()
+        other = home / 'other'
+        other.mkdir()
+        (other / 'calc.py').write_text('# changed elsewhere\n', encoding='utf-8')
+        subprocess.run(['git', 'init', '-q', str(other)], check=True)
+        workspace.choose(str(other))  # the selected project changes behind the open tab
+        page.locator('#editor-host .monaco-editor textarea').focus()
+        page.keyboard.type('# into B?\n')
+        page.locator('.editor-tab .dirty').wait_for()
+        page.keyboard.press('Control+s')
+        page.locator('#editor-state', has_text='no longer selected').wait_for()
+        assert (other / 'calc.py').read_text(encoding='utf-8') == '# changed elsewhere\n'
+        workspace.choose(str(project))
+
         # 4. The waiting proposal opens side by side, file by file.
         page.locator('.editor-tab', has_text='Chat').click()
         page.get_by_text('Review side by side').click()

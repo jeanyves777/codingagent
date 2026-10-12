@@ -25,7 +25,8 @@ TARGET = ROOT / "desktop_ui" / "static" / "vendor" / "monaco"
 
 def main() -> int:
     marker = TARGET / "VERSION"
-    if marker.is_file() and marker.read_text().strip() == VERSION and (TARGET / "vs" / "loader.js").is_file():
+    if marker.is_file() and marker.read_text().strip() == VERSION and (TARGET / "vs" / "loader.js").is_file() \
+            and (TARGET / "LICENSE").is_file():
         print(f"Monaco {VERSION} already present")
         return 0
     print(f"Downloading Monaco {VERSION}")
@@ -40,6 +41,10 @@ def main() -> int:
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
         for member in archive.getmembers():
             name = member.name
+            if name in ("package/LICENSE", "package/ThirdPartyNotices.txt") and member.isfile():
+                (TARGET / Path(name).name).parent.mkdir(parents=True, exist_ok=True)
+                (TARGET / Path(name).name).write_bytes(archive.extractfile(member).read())
+                continue
             if not name.startswith("package/min/vs/") or name.endswith(".map") or not member.isfile():
                 continue
             relative = Path(name[len("package/min/"):])
@@ -48,7 +53,6 @@ def main() -> int:
             destination = TARGET / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(archive.extractfile(member).read())
-    (TARGET / "LICENSE.txt").write_text("Monaco Editor (MIT) https://github.com/microsoft/monaco-editor\n", encoding="utf-8")
     marker.write_text(VERSION + "\n", encoding="utf-8")
     size = sum(path.stat().st_size for path in TARGET.rglob("*") if path.is_file())
     print(f"Monaco {VERSION} extracted to {TARGET} ({size / 1e6:.1f} MB)")

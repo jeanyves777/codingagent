@@ -45,6 +45,7 @@ def _summary(task: dict, kind: str) -> dict:
     if kind == "proposal":
         return {"kind": kind, "task_id": task["id"], "summary": str(task.get("plan", ""))[:4000],
                 "files": list(task.get("files") or [])[:100], "diff": str(task.get("diff") or "")[:100000],
+                "diff_truncated": len(str(task.get("diff") or "")) > 100000,
                 "digest": task.get("digest")}
     if kind == "accept":
         tests = task.get("tests") or {}

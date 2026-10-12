@@ -576,6 +576,7 @@
     const switched = (currentProject?.path || '') !== (project?.path || '');
     currentProject = project;
     if (switched) {
+      if (tabs.size) closeTabsForProjectSwitch();  // never keep another project's files editable
       gitGeneration++;
       gitLastSignature = '';
       gitLatest = null;
@@ -810,6 +811,7 @@
     $('project-dialog').showModal();
   }
   async function choose(path) {
+    if ((currentProject?.path || '') !== path && !await confirmProjectSwitch()) return;
     try {
       const project = await api('/api/project', 'POST', {path});
       updateProject(project);
@@ -1275,6 +1277,7 @@
   $('nav-projects').addEventListener('click', openDialog);
   $('open-path').addEventListener('click', () => choose($('path-input').value));
   $('native-picker').addEventListener('click', async () => {
+    if (!await confirmProjectSwitch()) return;
     try {
       const result = await api('/api/project/pick', 'POST');
       if (!result.cancelled) {updateProject(result);$('project-dialog').close();}
@@ -1397,7 +1400,8 @@
     if (!tab || diffing) return;
     $('editor-edit').textContent = tab.editing ? 'Stop editing' : 'Edit';
     $('editor-save').disabled = !tab.dirty;
-    if (!tab.conflict) editorState(tab.dirty ? 'Unsaved changes' : tab.editing ? 'Editing' : 'Read-only', tab.dirty ? 'warn' : '');
+    if (tab.orphaned) editorState(`Unsaved edits from ${tab.project.split(/[\\/]/).pop()}: reopen that project to save`, 'warn');
+    else if (!tab.conflict) editorState(tab.dirty ? 'Unsaved changes' : tab.editing ? 'Editing' : 'Read-only', tab.dirty ? 'warn' : '');
     $('editor-reload').hidden = !tab.conflict;
   }
 
@@ -1433,9 +1437,11 @@
     if (tabs.has(path)) { activate(path); return true; }
     try {
       const file = await api('/api/file?path=' + encodeURIComponent(path));
-      const uri = monaco.Uri.from({scheme: 'file', path: '/' + path});
+      const owner = file.project || currentProject?.path || '';
+      const uri = monaco.Uri.from({scheme: 'file', path: '/' + owner.replace(/[:\\]/g, '_').replace(/^\/+/, '') + '/' + path});
       const model = monaco.editor.getModel(uri) || monaco.editor.createModel(file.content, undefined, uri);
-      const tab = {model, sha256: file.sha256, dirty: false, editing: false, view: null, conflict: false, saved: file.content};
+      const tab = {model, sha256: file.sha256, dirty: false, editing: false, view: null, conflict: false, saved: file.content,
+        project: owner, orphaned: false};
       model.onDidChangeContent(() => {
         const dirty = model.getValue() !== tab.saved;
         if (dirty !== tab.dirty) { tab.dirty = dirty; renderTabs(); }
@@ -1445,6 +1451,29 @@
       activate(path);
     } catch (e) { toast(e.message); }
     return true;
+  }
+
+  function dirtyTabs() { return [...tabs.values()].filter(tab => tab.dirty && !tab.orphaned); }
+
+  // Before a project switch the user started: unsaved edits are confirmed, never carried over.
+  async function confirmProjectSwitch() {
+    const dirty = dirtyTabs();
+    if (!dirty.length) return true;
+    return confirmAction('Discard unsaved edits?', `${dirty.length} open file${dirty.length === 1 ? ' has' : 's have'} unsaved edits in ` +
+      `${currentProject?.name || 'this project'}. Switching projects closes them without saving.`, 'Discard and switch', true);
+  }
+
+  // After the project changed: close its tabs. An automatic switch keeps unsaved tabs, locked to their own
+  // project (the bridge also refuses saves into another project), so no edit is lost or misplaced.
+  function closeTabsForProjectSwitch() {
+    for (const [path, tab] of [...tabs]) {
+      if (tab.dirty) { tab.orphaned = true; continue; }
+      tab.model.dispose();
+      tabs.delete(path);
+    }
+    if (activeTab && !tabs.has(activeTab)) { activeTab = null; editor?.setModel(null); }
+    if (!tabs.size && !diffEditor) showEditor(false);
+    renderTabs(); updateToolbar();
   }
 
   async function closeTab(path) {
@@ -1468,7 +1497,8 @@
     busyButton($('editor-save'), true);
     const content = tab.model.getValue();
     try {
-      const saved = await api('/api/file', 'POST', {path, content, sha256: tab.sha256});
+      if (tab.orphaned) throw Object.assign(new Error(`This tab belongs to ${tab.project}. Reopen that project to save it.`), {status: 409});
+      const saved = await api('/api/file', 'POST', {path, content, sha256: tab.sha256, project: tab.project});
       tab.sha256 = saved.sha256; tab.saved = content; tab.dirty = false; tab.conflict = false;
       editorState('Saved ' + new Date().toLocaleTimeString([], {hour: 'numeric', minute: '2-digit', second: '2-digit'}));
       renderTabs();
@@ -1498,7 +1528,7 @@
   // Files changed on disk (a task, a checkout, another editor): unmodified open tabs follow along.
   async function refreshOpenTabs() {
     for (const [path, tab] of tabs) {
-      if (tab.dirty || tab.editing) continue;
+      if (tab.dirty || tab.editing || tab.orphaned || tab.project !== (currentProject?.path || '')) continue;
       try {
         const file = await api('/api/file?path=' + encodeURIComponent(path));
         if (file.sha256 !== tab.sha256) { tab.saved = file.content; tab.sha256 = file.sha256; tab.model.setValue(file.content); tab.dirty = false; }
@@ -1528,7 +1558,8 @@
       const modified = monaco.editor.createModel(file.modified, language);
       models.push(original, modified);
       diffEditor.setModel({original, modified});
-      editorState(file.exact ? `${file.status} · full file` : `${file.status} · changed regions only (the file on disk differs from the proposal's base)`, file.exact ? '' : 'warn');
+      editorState(file.note ? `${file.status} · ${file.note}` : file.exact ? `${file.status} · full file` :
+        `${file.status} · changed regions only (the file on disk differs from the proposal's base)`, file.exact ? '' : 'warn');
     };
     files.forEach((file, index) => {
       const button = document.createElement('button');
@@ -1553,6 +1584,8 @@
     if (tab.editing) editor.focus();
     updateToolbar();
   });
+  // The native window asks before closing while edits are unsaved (pywebview 'closing' event).
+  window.__codingBrainDirty = () => dirtyTabs().length > 0;
   $('editor-save').addEventListener('click', saveActive);
   $('editor-reload').addEventListener('click', reloadActive);
   $('editor-external').addEventListener('click', async () => {

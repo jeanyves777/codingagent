@@ -332,7 +332,13 @@ def launch_interactive_windows(command: list[str], *, platform: str | None = Non
     platform = platform or os.name
     if platform != "nt":
         raise ValueError("Interactive installation/sign-in is available in the Windows desktop app only")
-    subprocess.Popen(command, creationflags=subprocess.CREATE_NEW_CONSOLE, close_fds=True)
+    env = None
+    if Path(command[0]).name.lower() in {"powershell.exe", "powershell"}:
+        # Started from PowerShell 7 (pwsh), the inherited PSModulePath points Windows PowerShell 5.1
+        # at modules it cannot load (Get-FileHash disappears, so every download would fail its
+        # checksum). Without the variable, it builds its own default module path.
+        env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+    subprocess.Popen(command, creationflags=subprocess.CREATE_NEW_CONSOLE, close_fds=True, env=env)
 
 
 def provider_auth_command(provider_id: str) -> list[str]:

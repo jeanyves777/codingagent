@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 
-from desktop_ui import updates
+from desktop_ui import management, updates
 from scripts.finalize_desktop_release import finalize
 
 
@@ -47,6 +47,22 @@ def test_release_contains_matching_desktop_version_and_checksums(tmp_path):
         finalize(root, installer, portable)
 
 
+def _windows_powershell_env() -> dict:
+    """As the desktop launches it: without PowerShell 7's PSModulePath (CI steps run in pwsh)."""
+    return {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+
+
+def test_the_updater_window_does_not_inherit_powershell_7_modules(monkeypatch):
+    seen = []
+    monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")
+    monkeypatch.setattr(management.subprocess, "CREATE_NEW_CONSOLE", 16, raising=False)
+    monkeypatch.setattr(management.subprocess, "Popen", lambda command, **kwargs: seen.append(kwargs.get("env")))
+    management.launch_interactive_windows(["powershell.exe", "-File", "Update-CodingBrain.ps1"], platform="nt")
+    management.launch_interactive_windows(["claude.exe", "login"], platform="nt")
+    assert seen[0] is not None and not any(key.upper() == "PSMODULEPATH" for key in seen[0]) and seen[0]
+    assert seen[1] is None  # other programs keep the environment as it is
+
+
 def _verify_asset(folder: Path, filename: str) -> subprocess.CompletedProcess:
     """Run the updater's own Verify-Asset (and Expected-Sha256) from Update-CodingBrain.ps1."""
     script = str(Path(__file__).resolve().parents[1] / "desktop_ui" / "Update-CodingBrain.ps1").replace("'", "''")
@@ -55,11 +71,8 @@ def _verify_asset(folder: Path, filename: str) -> subprocess.CompletedProcess:
                "$n.Name -in @('Expected-Sha256','Verify-Asset')}, $true)) { . ([scriptblock]::Create($f.Extent.Text)) };"
                f"Verify-Asset '{filename}' '{str(folder).replace(chr(39), chr(39) * 2)}' "
                f"'{str(folder / 'SHA256SUMS').replace(chr(39), chr(39) * 2)}'")
-    # Windows PowerShell must not inherit PowerShell 7's module path (CI runs pytest from pwsh), or it
-    # loads PS7's Microsoft.PowerShell.Utility and Get-FileHash is missing.
-    env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
     return subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-                          capture_output=True, text=True, timeout=60, env=env)
+                          capture_output=True, text=True, timeout=60, env=_windows_powershell_env())
 
 
 @pytest.mark.skipif(os.name != "nt", reason="runs the updater's PowerShell checksum check")
@@ -242,7 +255,7 @@ def test_updater_has_valid_windows_powershell_syntax():
                "[ref]$tokens,[ref]$errors);"
                "if($errors.Count){$errors|ForEach-Object{Write-Error $_.Message};exit 1}")
     result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-                            capture_output=True, text=True, timeout=30)
+                            capture_output=True, text=True, timeout=30, env=_windows_powershell_env())
     assert result.returncode == 0, result.stderr
 
 
