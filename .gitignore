@@ -10,3 +10,7 @@ brains.json
 *.egg-info/
 gauntlet-runs/
 desktop_ui/static/vendor/
+desktop_ui/release-version.json
+/dist/
+/build/
+/CodingBrainDesktop.spec

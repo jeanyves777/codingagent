@@ -26,14 +26,15 @@ def _backend_release(tmp_path, version="0.13.0"):
     return root
 
 
-def test_release_contains_matching_desktop_version_and_checksums(tmp_path):
-    root = _backend_release(tmp_path)
+@pytest.mark.parametrize("version", ["0.13.0", "0.13.0.dev5+desktop37"])
+def test_release_contains_matching_desktop_version_and_checksums(tmp_path, version):
+    root = _backend_release(tmp_path, version)
     installer = tmp_path / "setup.exe"
     portable = tmp_path / "portable.zip"
     installer.write_bytes(b"e" * 2048)
     portable.write_bytes(b"z" * 2048)
     info = finalize(root, installer, portable)
-    assert info["desktop"] == {"version": "0.13.0", "installer": "CodingBrain-Setup.exe",
+    assert info["desktop"] == {"version": version, "installer": "CodingBrain-Setup.exe",
                                 "portable": "CodingBrainDesktop-Windows.zip"}
     assert info["version"] == info["desktop"]["version"]
     entries = {}
@@ -42,7 +43,7 @@ def test_release_contains_matching_desktop_version_and_checksums(tmp_path):
         assert digest == hashlib.sha256((root / name).read_bytes()).hexdigest()
         entries[name] = digest
     assert {"CodingBrain-Setup.exe", "CodingBrainDesktop-Windows.zip", "release.json",
-            "coding_brain-0.13.0-py3-none-any.whl"} <= set(entries)
+            f"coding_brain-{version}-py3-none-any.whl"} <= set(entries)
     with pytest.raises(ValueError, match="already finalized"):
         finalize(root, installer, portable)
 
