@@ -250,7 +250,8 @@ async def handle(context: Context, task: dict, auto: bool) -> dict:
             quiet_live()
             evidence = task.get("test_evidence", {})
             completion = (task.get("completion") or {}).get("status", "unchecked")
-            print(f"\nTests passed in the sandbox (exit {evidence.get('exit_code')}); "
+            where = "on GitHub Actions" if evidence.get("profile") == "github" else "in the sandbox"
+            print(f"\nTests passed {where} (exit {evidence.get('exit_code')}); "
                   f"requirement checks: {completion}.")
             if task.get("review_disputed"):
                 print("Note: the reviewer objected; its reason is in `codingbrain status`.")
@@ -286,6 +287,12 @@ async def accept(context: Context, task: dict) -> dict:
         context.brain.store.save(task)
         print(f"Accepted. New branch {name} (your current branch is unchanged). Review it with "
               f"`git log {name}` and merge when ready.")
+        from . import pullrequests
+        record = pullrequests.publish(context, task)
+        if record:
+            context.brain.store.save(task)
+            print(f"Draft pull request: {record['url']}\nWhen its checks are green, `codingbrain pr {task['id'][:8]} "
+                  "--wait` asks you before merging." if record.get("url") else f"Pull request not opened: {record['error']}")
     if task["status"] == "accepted" and task.get("attachments"):
         from .evidence import remember_outcome
         remember_outcome(context, task)
@@ -671,6 +678,66 @@ def cmd_resume(args, layout):
             asyncio.run(go())
         except KeyboardInterrupt:
             print("\nPaused. Continue with `codingbrain resume`.")
+
+
+def cmd_verify(args, layout):
+    """Turn GitHub verification on or off for this project (the user's setting, outside the repo)."""
+    context = Context(layout, Path.cwd())
+    key = str(context.root.resolve())
+    projects = context.config.setdefault("verification", {}).setdefault("projects", {})
+    if args.action == "on":
+        from ..remote_verify import repo_slug, SAFE_TESTS
+        slug = repo_slug(context.root)
+        if not slug:
+            raise SystemExit("This project has no GitHub 'origin' remote.")
+        if args.tests and not SAFE_TESTS.match(args.tests):
+            raise SystemExit("--tests takes test paths or pytest node ids separated by spaces.")
+        projects[key] = {"enabled": True, "repository": slug, "trusted_ref": args.trusted_ref or "main",
+                         "pr_base": args.pr_base or args.trusted_ref or "main", "tests": args.tests or "",
+                         "timeout_minutes": args.timeout_minutes}
+        settings.save(layout, context.config)
+        print(f"GitHub verification on for {slug}: tests run on GitHub Actions (workflow codingbrain-verify.yml "
+              f"read from {projects[key]['trusted_ref']}), accepted tasks become draft PRs into "
+              f"{projects[key]['pr_base']}, and merging asks you first.")
+    elif args.action == "off":
+        projects.pop(key, None)
+        settings.save(layout, context.config)
+        print("GitHub verification off: tests run in the local sandbox.")
+    else:
+        found = settings.verification_for(context.config, context.root)
+        print(json.dumps(found, indent=2) if found else "GitHub verification is off for this project.")
+
+
+def cmd_pr(args, layout):
+    """A task's pull request: its checks, and - once all are green - asking before merging."""
+    from . import pullrequests
+    context = Context(layout, Path.cwd())
+    found = [task for task in context.tasks() if (task.get("pull_request") or {}).get("url")
+             and (not args.task or task["id"].startswith(args.task))]
+    if not found:
+        raise SystemExit("No task with a pull request" + (f" matches {args.task!r}." if args.task else "."))
+    task = context.brain.store.get(found[0]["id"])
+    while True:
+        try:
+            state = pullrequests.status(context, task)
+        except Exception as error:
+            raise SystemExit(f"Could not read the pull request: {error}")
+        print(f"{state['url']}  {state['state']}  checks: {len(state['checks'])}, "
+              f"{state['pending']} pending, {state['failed']} failed, mergeable={state['mergeable']}")
+        if state["state"] != "OPEN" or state["failed"] or not args.wait or state["ask_merge"]:
+            break
+        time.sleep(30)
+    if not state["ask_merge"]:
+        return 1 if state["failed"] else 0
+    if not ask(state["question"]):
+        print("Not merged. The pull request stays open.")
+        return 0
+    try:
+        pullrequests.merge(context, task, state["head"])
+    except Exception as error:
+        raise SystemExit(f"Not merged: {error}")
+    context.brain.store.save(task)
+    print(f"Merged {state['url']}.")
 
 
 def cmd_accept(args, layout):
@@ -1414,6 +1481,16 @@ def main(argv=None) -> int:
     resume = commands.add_parser("resume", help="continue the latest unfinished task, or the given one")
     resume.add_argument("task", nargs="?")
     resume.add_argument("--yes", action="store_true", help="run the plan without asking")
+    verify_parser = commands.add_parser("verify", help="GitHub verification for this project: tests on GitHub "
+                                        "Actions, accepted tasks as draft PRs, merge after you confirm")
+    verify_parser.add_argument("action", choices=["on", "off", "status"])
+    verify_parser.add_argument("--trusted-ref", help="branch the codingbrain-verify workflow is read from (default main)")
+    verify_parser.add_argument("--pr-base", help="branch pull requests target (default: the trusted ref)")
+    verify_parser.add_argument("--tests", help="test paths to run (default: the whole suite)")
+    verify_parser.add_argument("--timeout-minutes", type=int, default=40)
+    pr_parser = commands.add_parser("pr", help="a task's pull request: checks, then asks before merging when all are green")
+    pr_parser.add_argument("task", nargs="?")
+    pr_parser.add_argument("--wait", action="store_true", help="wait for pending checks")
     accept_parser = commands.add_parser("accept", help="accept a tested task as a new branch")
     accept_parser.add_argument("task", nargs="?")
     run = commands.add_parser("run", help="work on one goal")
@@ -1581,7 +1658,7 @@ def main(argv=None) -> int:
             stream.reconfigure(errors="replace")
     layout = Layout.default()
     handlers = {"init": cmd_init, "status": cmd_status, "tasks": cmd_tasks, "resume": cmd_resume,
-                "accept": cmd_accept, "run": cmd_run, "doctor": cmd_doctor, "setup": cmd_setup,
+                "accept": cmd_accept, "verify": cmd_verify, "pr": cmd_pr, "run": cmd_run, "doctor": cmd_doctor, "setup": cmd_setup,
                 "update": cmd_update, "rollback": cmd_rollback, "migrate": cmd_migrate,
                 "post-install": cmd_post_install, "memory": cmd_memory, None: cmd_shell, "chat": cmd_shell, "api": cmd_api,
                 "attachments": cmd_attachments, "inspect-ui": cmd_inspect_ui, "activity": cmd_activity,

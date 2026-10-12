@@ -79,7 +79,7 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
     def __init__(self, repositories: Path, data: Path, model, image, reviewer=None,
                  coordinator=None, memory=None, queue=None, approvals=None, telemetry=None, workers=3,
                  supervision=None, max_free_attempts=3, validation_retries=2, knowledge=None, web=None,
-                 gates=True, review_mode="advisory", requirement_checks=False):
+                 gates=True, review_mode="advisory", requirement_checks=False, verification=None):
         self.repositories, self.data = repositories.resolve(), data.resolve()
         # The data directory may sit below the repositories root (a project directly in the user's
         # home folder, with data in AppData), but a served repository never overlaps it: that is
@@ -90,6 +90,8 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
         self.store = Store(self.data / "brain.sqlite3")
         self.model, self.reviewer = model, reviewer or model
         self.coordinator, self.image = coordinator or model, image
+        # Opt-in per project: tests run on GitHub Actions instead of the local sandbox (remote_verify).
+        self.verification = verification
         self.memory = memory
         self.supervision = supervision
         self.max_free_attempts = max(1, min(10, max_free_attempts))
@@ -264,6 +266,14 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                 self.schedule(task["id"], "create_task")
         return task
 
+    def tester(self, task: dict):
+        """run_tests, or the GitHub verifier when the project opted in (same call shape and evidence)."""
+        if not self.verification:
+            return run_tests
+        from .remote_verify import GitHubVerifier
+        verifier = GitHubVerifier(self.repository(task["repository"]), self.verification)
+        return lambda workspace, image, **options: verifier(workspace, image, label=task["id"][:8], **options)
+
     def workspace(self, task_id: str) -> Path:
         task = self.store.get(task_id)
         return self.data / "tasks" / task["id"] / "workspace"
@@ -379,9 +389,13 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                 self._completion(task, "unchecked", "No requirement checks were written")
             return None
         for _ in range(3):
-            evidence = await asyncio.to_thread(
-                run_requirement_checks, workspace, checks, run_tests, self.image,
-                lambda: self.store.get(task["id"]).get("cancel_requested", False))
+            cancelled = lambda: self.store.get(task["id"]).get("cancel_requested", False)
+            if self.verification:  # the checks travel in the verification commit, never in the worktree
+                evidence = await asyncio.to_thread(self.tester(task), workspace, self.image, should_cancel=cancelled,
+                                                   extra={checks["path"]: checks["content"]})
+            else:
+                evidence = await asyncio.to_thread(
+                    run_requirement_checks, workspace, checks, run_tests, self.image, cancelled)
             self._count(task, "requirement_check_runs")
             if evidence.get("cancelled"):
                 self._check_cancelled(task)
@@ -877,10 +891,11 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                 task["status"] = "testing"
                 self.event(task, "tester", f"Isolated test attempt {attempt}")
                 self.snapshot(task, "before_tests")
+                where = "on GitHub Actions" if self.verification else "in the offline sandbox"
                 with self.stage(task, "sandbox" if attempt == 1 else "retest", agent="sandbox",
-                                summary=f"Running the tests in the offline sandbox (attempt {attempt})"):
+                                summary=f"Running the tests {where} (attempt {attempt})"):
                     evidence = await asyncio.to_thread(
-                        run_tests, workspace, self.image,
+                        self.tester(task), workspace, self.image,
                         should_cancel=lambda: self.store.get(task_id).get("cancel_requested", False))
                 if evidence.get("cancelled"):
                     self._check_cancelled(task)

@@ -39,6 +39,11 @@ DEFAULTS = {
     # codingbrain new: where new projects are created (empty = <home>/Projects).
     "create": {"projects_root": ""},
     "multimodal_budgets": {"max_ocr_images": 12, "max_vision_images": 6, "max_premium_vision_calls": 2},
+    # GitHub verification (opt-in per project, keyed by the resolved project path): tests run on GitHub
+    # Actions instead of the local sandbox; an accepted task becomes a draft pull request; Coding Brain
+    # asks before merging and merges only with every check green. Settings: trusted_ref (where the
+    # codingbrain-verify workflow is read from), pr_base, tests, timeout_minutes, merge_method.
+    "verification": {"projects": {}},
 }
 
 
@@ -99,6 +104,7 @@ def project_environment(layout: Layout, config: dict, project_root: Path, projec
     brains_file = layout.config / "brains.json"
     brains_file.write_text(json.dumps(brains_config(config), indent=2) + "\n", encoding="utf-8")
     sandbox = config["sandbox"]
+    verification = verification_for(config, project_root)
     return {
         "BRAIN_REPOSITORIES": str(project_root.parent),
         "BRAIN_DATA": str(project_data),
@@ -109,7 +115,16 @@ def project_environment(layout: Layout, config: dict, project_root: Path, projec
         "BRAIN_REQUIREMENT_CHECKS": "true" if config["autonomy"].get("requirement_checks", True) else "false",
         "BRAIN_PYTHON_SANDBOX_IMAGE": sandbox["python_image"],
         "BRAIN_NODE_SANDBOX_IMAGE": sandbox["node_image"],
+        # Always set (empty when off): one engine process serves several projects.
+        "BRAIN_GITHUB_VERIFICATION": json.dumps(verification) if verification else "",
     }
+
+
+def verification_for(config: dict, project_root: Path) -> dict | None:
+    """The project's GitHub verification settings when the user turned it on, else None."""
+    projects = (config.get("verification") or {}).get("projects") or {}
+    found = projects.get(str(Path(project_root).resolve()))
+    return found if isinstance(found, dict) and found.get("enabled") else None
 
 
 def permitted(config: dict, project_root: Path) -> bool:

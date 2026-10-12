@@ -88,7 +88,8 @@ def test_schema_and_info():
     assert schema["api_version"] == "1.0" and set(schema["operations"]) == set(OPERATIONS)
     assert {op for op, item in schema["operations"].items() if item["kind"] == "action"} == {
         "projects.register", "projects.create", "tasks.start", "tasks.approve", "tasks.accept", "tasks.stop",
-        "tasks.resume", "tasks.tool_decision", "conversation.reset", "documents.create"}
+        "tasks.resume", "tasks.tool_decision", "conversation.reset", "documents.create",
+        "tasks.merge"}
     assert schema["operations"]["conversation.send"]["kind"] == "read"
 
 

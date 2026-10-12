@@ -1191,9 +1191,17 @@
       box.append(side);
       box.append(reveal);
     }
+    if (details?.kind === 'merge' && /^https:\/\/github\.com\//.test(details.url || '')) {
+      const link = document.createElement('button');
+      link.type = 'button'; link.className = 'secondary-button';
+      link.textContent = 'Open the pull request';
+      link.addEventListener('click', () => api('/api/open-url', 'POST', {url: details.url}).catch(e => toast(e.message)));
+      box.append(link);
+    }
     const buttons = document.createElement('div');
     buttons.className = 'decision-buttons';
-    for (const [name, allow] of [['Approve', true], ['Decline', false]]) {
+    const choices = details?.kind === 'merge' ? [['Merge', true], ['Not now', false]] : [['Approve', true], ['Decline', false]];
+    for (const [name, allow] of choices) {
       const button = document.createElement('button');
       button.textContent = name;
       if (!allow) button.className = 'no';

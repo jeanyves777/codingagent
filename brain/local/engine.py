@@ -72,7 +72,13 @@ OPERATIONS = {
                                  "decision": ("str", True)},
                       "approve: review, apply in the isolated worktree and test; decline: cancel"),
     "tasks.accept": ("action", {"project_id": ("str", True), "task_id": ("str", True)},
-                     "accepts a tested task as a new branch"),
+                     "accepts a tested task as a new branch; with GitHub verification on, also opens a draft PR"),
+    "tasks.pull_request": ("read", {"project_id": ("str", True), "task_id": ("str", True)},
+                           "the task's pull request and its checks; ask_merge and question once every check is "
+                           "green (feature tasks.pull_requests)"),
+    "tasks.merge": ("action", {"project_id": ("str", True), "task_id": ("str", True), "head": ("str", True)},
+                    "merges the task's pull request after the user confirmed: refused unless every check is "
+                    "green and the head is still the commit the user was asked about"),
     "tasks.tool_decision": ("action", {"project_id": ("str", True), "task_id": ("str", True),
                                        "request_id": ("str", True), "decision": ("str", True)},
                             "approve or decline the protected tool request a task is waiting on "
@@ -82,9 +88,9 @@ OPERATIONS = {
 }
 # Additive capabilities within API 1.x that clients detect here rather than from a version number.
 FEATURES = {"tasks.start.attachments", "conversation.stream", "conversation.scope", "conversation.reset",
-            "documents.create"}
+            "documents.create", "tasks.pull_requests"}
 TASK_MILESTONES = {"tasks.start", "tasks.approve", "tasks.accept"}
-LONG = {"documents.create", "conversation.send", "tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
+LONG = {"tasks.merge", "documents.create", "conversation.send", "tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
 CHECK_TYPES = {"str": str, "bool": bool, "int": int, "list": list}
 
 
@@ -120,11 +126,12 @@ def task_summary(task: dict) -> dict:
             "files": [change.get("path") for change in proposal.get("changes", [])][:200],
             "diff": str(task.get("diff") or "")[:100000],
             "tests": {"passed": evidence.get("passed"), "exit_code": evidence.get("exit_code"),
+                      "profile": evidence.get("profile"), "url": evidence.get("url"),
                       "output_tail": str(evidence.get("output") or "")[-4000:]} if evidence else None,
             "requirements": (task.get("completion") or {}).get("status"),
             "failures": [{key: item.get(key) for key in ("attempt", "category", "diagnosis", "summary")}
                          for item in task.get("failure_log", [])][-6:],
-            "branch": task.get("branch"), "commit": task.get("commit"),
+            "branch": task.get("branch"), "commit": task.get("commit"), "pull_request": task.get("pull_request"),
             "pending_tool_approval": task.get("pending_approval_id"), "interrupted": interrupted(task)}
 
 
@@ -494,9 +501,33 @@ class Engine:
             task = await brain.accept(task_id, f"Accepted through the engine API: {brain.store.get(task_id)['goal'][:200]}")
             if task.get("commit") and task["status"] == "accepted" and not task.get("parent_id"):
                 task["branch"] = branch_for(context, task["commit"], f"{slug(task['goal'])}-{task['id'][:6]}")
+                from . import pullrequests
+                await asyncio.to_thread(pullrequests.publish, context, task)
                 brain.store.save(task)
             return task
         return task_summary(self.run(go()))
+
+    def op_tasks_pull_request(self, project_id: str, task_id: str, emit=None):
+        from . import pullrequests
+        from ..remote_verify import RemoteUnavailable
+        task = self.brain(project_id).store.get(task_id)
+        try:
+            return pullrequests.status(self.context(project_id), task)
+        except (ValueError, RemoteUnavailable) as error:
+            raise ApiError("refused", str(error))
+
+    def op_tasks_merge(self, project_id: str, task_id: str, head: str, emit=None):
+        """Governance: only after the user confirmed the question tasks.pull_request asked."""
+        from . import pullrequests
+        from ..remote_verify import RemoteUnavailable
+        brain = self.brain(project_id)
+        task = brain.store.get(task_id)
+        try:
+            url = pullrequests.merge(self.context(project_id), task, head)
+        except (ValueError, RemoteUnavailable) as error:
+            raise ApiError("refused", str(error))
+        brain.store.save(task)
+        return {"merged": True, "url": url}
 
     def op_tasks_tool_decision(self, project_id: str, task_id: str, request_id: str, decision: str, emit=None):
         """A protected tool request is single-use and bound to its task: the service refuses a
