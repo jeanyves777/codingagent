@@ -286,8 +286,9 @@ def write_docx(markdown: str, target: Path, title: str) -> None:
                              .replace("<w:r><w:t", "<w:r><w:rPr><w:b/></w:rPr><w:t"), 160))
         elif re.match(r"^([-*+]|\d+[.)])\s+", line):
             marker = "•" if line[0] in "-*+" else re.match(r"^\d+", line).group(0) + "."
+            item = re.sub(r"^([-*+]|\d+[.)])\s+", "", line)  # outside the f-string: Python 3.11 forbids "\" there
             body.append(f'<w:p><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr>{_docx_run(marker + " ")}'
-                        f'{_docx_inline(re.sub(r"^([-*+]|\d+[.)])\s+", "", line))}</w:p>')
+                        f'{_docx_inline(item)}</w:p>')
         elif line.startswith("|") and index + 1 < len(lines) and re.match(r"^\s*\|?\s*:?-{2,}", lines[index + 1]):
             rows, index = [_cells(line)], index + 2
             while index < len(lines) and lines[index].strip().startswith("|"):
