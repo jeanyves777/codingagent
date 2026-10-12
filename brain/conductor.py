@@ -682,7 +682,10 @@ class BrainExecutor:
         if base and subprocess.run(["git", "-C", str(self.brain.repository(self.repository)), "merge-base",
                                     "--is-ancestor", base, "HEAD"], capture_output=True, timeout=60).returncode == 0:
             base = None  # the project's branch already contains it: start from the newest work
-        task = self.brain.submit(self.repository, goal, base_commit=base, premium_plan=strategy == "premium_plan")
+        # Frozen acceptance files are the specification and the verifier: requirement checks written
+        # by the model would cost model time (37% of it in the backlog benchmark) and decide nothing.
+        task = self.brain.submit(self.repository, goal, base_commit=base, premium_plan=strategy == "premium_plan",
+                                 independent_verification=bool(acceptance.get("files")))
         return task["id"]
 
     async def poll(self, task_id: str) -> dict:

@@ -71,6 +71,12 @@ Each verdict is written to a hash-chained ledger with the command, exit code and
 output. `backlog status` reports whether the chain is intact. An item without acceptance tests
 can never be verified and is blocked when its task finishes.
 
+Because the frozen acceptance tests are both the specification and the verifier, an attempt at
+an item that has them does not ask the model to write requirement checks of its own (a plain
+`codingbrain` task does, when requirement checks are on). In the backlog benchmark that
+generation took 37% of all local model time and decided nothing for the item. The task's own
+completion status is then "unchecked"; whether the item is verified is decided only as above.
+
 These checks stop an agent from weakening the tests. They do not make the test process a
 security boundary: code under test runs in the same process as the tests, in the sandbox.
 

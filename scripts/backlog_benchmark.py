@@ -114,6 +114,35 @@ class Sampler(threading.Thread):
                 "cores": os.cpu_count()}
 
 
+def by_purpose(events, tasks):
+    """Where local model time goes: calls and seconds per role (implementer, reviewer, ...) from the
+    journal, and the requirement-check generation each attempt pays before its first proposal (task
+    metrics). Measured, so a change to model-call behaviour can be judged against it."""
+    roles = {}
+    for event in events:
+        if event["event_type"] != "model_response" or not event["duration"] or event["provider"] != "ollama":
+            continue
+        role = (event.get("data") or {}).get("role") or "unknown"
+        entry = roles.setdefault(role, {"calls": 0, "seconds": 0.0})
+        entry["calls"] += 1
+        entry["seconds"] = round(entry["seconds"] + event["duration"], 1)
+    for task in tasks:
+        for log in task.get("inference_log", []):
+            if log.get("type") == "inference" and log.get("provider") == "ollama":
+                entry = roles.setdefault(log.get("role") or "unknown", {"calls": 0, "seconds": 0.0})
+                entry["output_tokens"] = entry.get("output_tokens", 0) + (log.get("output_tokens") or 0)
+    metrics = [task.get("metrics") or {} for task in tasks]
+    total = sum(entry["seconds"] for entry in roles.values()) or 1.0
+    requirement_seconds = round(sum(m.get("requirement_generation_seconds", 0) for m in metrics), 1)
+    return {"by_role": roles,
+            "requirement_generation": {
+                "attempts": sum(1 for m in metrics if "requirement_generation_seconds" in m),
+                "seconds": requirement_seconds,
+                "output_tokens": sum(m.get("requirement_generation_output_tokens", 0) for m in metrics),
+                "share_of_local_model_seconds": round(requirement_seconds / total, 3)},
+            "review_share_of_local_model_seconds": round(roles.get("reviewer", {}).get("seconds", 0) / total, 3)}
+
+
 def peak_overlap(intervals):
     points = sorted([(start, 1) for start, _ in intervals] + [(end, -1) for _, end in intervals])
     active = peak = 0
@@ -217,8 +246,8 @@ def main():
     peak, together = peak_overlap(local)
     tokens = 0
     supervisor_kinds = {}
-    for attempt in attempts:
-        task = brain.store.get(attempt["task_id"])
+    tasks = [brain.store.get(attempt["task_id"]) for attempt in attempts]
+    for task in tasks:
         tokens += sum(entry.get("output_tokens") or 0 for entry in task.get("inference_log", [])
                       if entry.get("type") == "inference" and entry.get("provider") == "ollama")
         for entry in task.get("supervision", []):
@@ -239,7 +268,8 @@ def main():
         "model_calls": {"local": len(local), "premium": sum(1 for call in calls if call[2] != "ollama"),
                         "local_peak_in_flight": peak, "local_share_of_time_two_or_more_in_flight": together,
                         "local_output_tokens": tokens,
-                        "local_output_tokens_per_second": round(tokens / seconds, 2) if seconds else 0.0},
+                        "local_output_tokens_per_second": round(tokens / seconds, 2) if seconds else 0.0,
+                        "purpose": by_purpose(events, tasks)},
         "premium": {"supervisor_consultations": supervisor_kinds,
                     "premium_planned_attempts": sum(1 for a in attempts if a["strategy"] == "premium_plan")},
         "integration": [{"id": record["id"], "state": record["state"], "included": record["included"],

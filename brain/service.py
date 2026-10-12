@@ -243,7 +243,9 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
 
     def submit(self, repository: str, goal: str, parent_id=None, name=None,
                dependencies=None, base_commit=None, launch=True, premium_plan=False, attachments=None,
-               visual=None) -> dict:
+               visual=None, independent_verification=False) -> dict:
+        """`independent_verification`: the goal is verified by frozen acceptance tests outside this
+        task (a backlog item), so the model does not write requirement checks of its own."""
         self.repository(repository)
         task = {
             "id": uuid.uuid4().hex, "kind": "task", "repository": repository, "goal": goal,
@@ -256,6 +258,9 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
             task["attachments"] = attachments  # evidence with provenance (brain.attachments.evidence)
         if visual:
             task["visual"] = visual  # reference images and settings for visual verification
+        if independent_verification:
+            task["requirement_tests"] = {}  # completion stays "unchecked" here; the verifier decides
+            self.event(task, "requirement_checks_skipped", "Verified independently by frozen acceptance tests")
         self.journal_event(task, "stage", phase="goal", status="COMPLETED", agent="user", summary=goal[:500],
                            dedupe=f"{task['id']}:goal", data={"attachments": len((attachments or {}).get("attachments", []))})
         with self.telemetry.span(task["trace_id"], "api.submit", task["id"]):

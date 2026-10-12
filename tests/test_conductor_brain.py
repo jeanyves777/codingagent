@@ -228,3 +228,28 @@ def test_restart_and_worker_shutdown_are_interruptions_but_a_requested_cancel_is
         task["events"] += [{"kind": kind, "detail": ""} for kind in kinds]
         world["brain"].store.save(task)
         assert asyncio.run(executor.poll(task["id"]))["interrupted"] is expected, (status, kinds)
+
+
+def test_items_with_frozen_acceptance_tests_spend_no_model_call_on_requirement_checks(tmp_path, monkeypatch):
+    """The frozen acceptance files are the specification and the verifier, so the model is not asked
+    to write requirement checks for them (in the backlog benchmark that generation was 37% of all
+    local model time). An item without acceptance tests still gets them."""
+    monkeypatch.setattr(brain.service, "run_tests", local_pytest)
+    monkeypatch.setattr(brain.sandbox, "run_tests", local_pytest)
+    repository = make_repository(tmp_path / "repos" / "demo", use_git=True)
+    model = StandIn(latency=0.05)
+    the_brain = Brain(repository.parent, tmp_path / "data", model, "img", workers=2, requirement_checks=True)
+    backlog = Backlog(tmp_path / "data" / "backlog.sqlite3")
+    conductor = Conductor(backlog, BrainExecutor(the_brain, "demo"), auto_execute=True,
+                          resources=Resources(max_local=2), stall_seconds=120)
+    backlog.add("Create alpha.py with VALUE = 'alpha'", title="alpha", acceptance=acceptance("alpha"))
+    backlog.add("Create beta.py with VALUE = 'beta'", title="beta")  # no acceptance tests
+    asyncio.run(drive(conductor, seconds=30))
+    asked = [goal for goal in model.calls if goal.startswith("Do not implement anything")]
+    assert len(asked) == 1 and "beta" in asked[0] and "alpha" not in asked[0]
+    alpha, beta = (the_brain.store.get(item["task_id"]) for item in sorted(backlog.list(), key=lambda i: i["title"]))
+    assert alpha["requirement_tests"] == {} and "requirement_checks_skipped" in [e["kind"] for e in alpha["events"]]
+    assert alpha["completion"]["status"] == "unchecked"  # never "verified" by checks that were not run
+    assert "requirement_generation_seconds" not in alpha.get("metrics", {})
+    assert "requirement_generation_seconds" in beta.get("metrics", {})
+    assert {item["title"]: item["state"] for item in backlog.list()}["alpha"] == "verified"  # by the frozen tests
