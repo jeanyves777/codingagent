@@ -45,6 +45,8 @@ with sync_playwright() as p:
         if (path === '/api/conversation/reset') { demo.resets++; demo.turns = []; return response({reset: true}); }
         if (path === '/api/project') return response(project);
         if (path.startsWith('/api/documents/open')) { demo.opened = [JSON.parse(opts.body).path, path.includes('reveal')]; return response({opened: true}); }
+        if (path === '/api/attachments/upload') return response({path: 'C:/staging/' + decodeURIComponent(opts.headers['X-Filename']),
+          name: decodeURIComponent(opts.headers['X-Filename']), bytes: 2048});
         if (path === '/api/start') {
           const body = JSON.parse(opts.body); demo.starts.push(body);
           const id = 'j' + demo.starts.length;
@@ -64,7 +66,8 @@ with sync_playwright() as p:
           demo.jobs[id] = body.mode === 'chat' ? [
             ev(1, 'output', 'Yes — I can add that as a task in calc.'),
             ev(2, 'context', JSON.stringify({project: 'calc', history_turns: 3, history_left_out: 2, project_context: 900, project_context_trimmed: false, window: 8192})),
-            ev(3, 'action', JSON.stringify({kind: 'task', goal: 'add a multiply function with a test', project: 'calc', root: 'C:/p/calc'})),
+            ev(3, 'action', JSON.stringify({kind: 'task', goal: 'add a multiply function with a test', project: 'calc', root: 'C:/p/calc',
+              attachments: body.attachments || []})),
             ev(4, 'finish', 'Chat completed')] : [ev(1, 'stage', 'Planning'), ev(2, 'finish', 'done')];
           return response({id, kind: body.mode, status: 'running', started: at});
         }
@@ -82,9 +85,17 @@ with sync_playwright() as p:
     assert 'calc' in page.locator('#context-text').inner_text()
 
     # 2. Asking for work in chat: the reply proposes it as a button; the context bar shows what was sent.
+    # Chat is the entry point for files too: a screenshot goes with the message, no mode switch.
+    page.evaluate("""() => {
+      const data = new DataTransfer(); data.items.add(new File(['png'], 'sketch.png', {type: 'image/png'}));
+      document.querySelector('.composer').dispatchEvent(new DragEvent('drop', {dataTransfer: data, bubbles: true, cancelable: true}));
+    }""")
+    page.locator('#attachment-list .attachment-name', has_text='sketch.png').wait_for()
     page.fill('#prompt', 'can u add multiply too')
     page.click('#send')
     page.locator('.action-buttons button', has_text='Run as task in calc').wait_for()
+    first = page.evaluate("window.__demo.starts[0]")
+    assert first["mode"] == "chat" and first["attachments"] == ["C:/staging/sketch.png"], first
     context = page.locator('#context-text').inner_text()
     assert '3 earlier messages' in context and '2 older left out' in context and '8K window' in context, context
 
@@ -93,7 +104,9 @@ with sync_playwright() as p:
     page.click('#send')
     page.wait_for_function("window.__demo.starts.length === 2")
     second = page.evaluate("window.__demo.starts[1]")
-    assert second == {"message": "add a multiply function with a test", "mode": "run", "attachments": []}, second
+    # The file sent in chat travels with the work the chat proposed.
+    assert second == {"message": "add a multiply function with a test", "mode": "run",
+                      "attachments": ["C:/staging/sketch.png"]}, second
 
     # 4. New conversation clears what the model will see, after confirmation.
     page.locator('#footer-status', has_text='Task').wait_for()

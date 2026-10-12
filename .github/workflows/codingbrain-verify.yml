@@ -1,0 +1,67 @@
+# Coding Brain verification: runs the tests of a commit Coding Brain pushed to a codingbrain/verify-*
+# branch, so a task's tests run here instead of on the user's computer (`codingbrain verify on`).
+#
+# Trust model: Coding Brain starts this workflow with --ref <trusted branch>, so this definition always
+# comes from a branch only humans change; only the code under test comes from the agent's commit. The
+# run has read-only permissions, no secrets, and does not keep Git credentials.
+name: Coding Brain verify
+run-name: "Coding Brain verify ${{ inputs.request_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit to test (full SHA)
+        required: true
+      request_id:
+        description: Correlation id chosen by Coding Brain
+        required: true
+      tests:
+        description: Test paths or pytest node ids (empty = the whole suite)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codingbrain-verify-${{ inputs.request_id }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check inputs
+        env:
+          REF: ${{ inputs.ref }}
+          TESTS: ${{ inputs.tests }}
+        run: |
+          [[ "$REF" =~ ^[0-9a-f]{40}$ ]] || { echo "ref must be a full commit SHA"; exit 2; }
+          [[ -z "$TESTS" || "$TESTS" =~ ^[A-Za-z0-9_./:\[\]-]+(\ [A-Za-z0-9_./:\[\]-]+)*$ ]] || { echo "invalid tests"; exit 2; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --disable-pip-version-check -q --upgrade pip
+          python -m pip install --disable-pip-version-check -q -e ".[dev]"
+      - name: Tests
+        env:
+          TESTS: ${{ inputs.tests }}
+        run: |
+          read -ra selected <<< "$TESTS"
+          python -m pytest -q -p no:cacheprovider --junitxml=junit.xml "${selected[@]}"
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codingbrain-verify-${{ inputs.request_id }}
+          path: junit.xml
+          if-no-files-found: ignore
+          retention-days: 7

@@ -250,8 +250,14 @@ async def handle(context: Context, task: dict, auto: bool) -> dict:
             quiet_live()
             evidence = task.get("test_evidence", {})
             completion = (task.get("completion") or {}).get("status", "unchecked")
-            print(f"\nTests passed in the sandbox (exit {evidence.get('exit_code')}); "
-                  f"requirement checks: {completion}.")
+            if evidence.get("deferred"):
+                print(f"\nLocal checks passed; the full tests are running on GitHub in the background "
+                      f"({evidence.get('url')}). Accepting opens a draft pull request; nothing is merged until "
+                      "every check is green and you say yes.")
+            else:
+                where = "on GitHub Actions" if evidence.get("profile") == "github" else "in the sandbox"
+                print(f"\nTests passed {where} (exit {evidence.get('exit_code')}); "
+                      f"requirement checks: {completion}.")
             if task.get("review_disputed"):
                 print("Note: the reviewer objected; its reason is in `codingbrain status`.")
             if task.get("visual_verification"):
@@ -286,6 +292,13 @@ async def accept(context: Context, task: dict) -> dict:
         context.brain.store.save(task)
         print(f"Accepted. New branch {name} (your current branch is unchanged). Review it with "
               f"`git log {name}` and merge when ready.")
+        from . import pullrequests
+        record = pullrequests.publish(context, task)
+        if record:
+            context.brain.store.save(task)
+            print(f"Draft pull request: {record['url']}\nIt validates on GitHub in the background; keep working. "
+                  "`codingbrain pr` asks you before merging each one that is green." if record.get("url")
+                  else f"Pull request not opened: {record['error']}")
     if task["status"] == "accepted" and task.get("attachments"):
         from .evidence import remember_outcome
         remember_outcome(context, task)
@@ -671,6 +684,87 @@ def cmd_resume(args, layout):
             asyncio.run(go())
         except KeyboardInterrupt:
             print("\nPaused. Continue with `codingbrain resume`.")
+
+
+def cmd_verify(args, layout):
+    """Turn GitHub verification on or off for this project (the user's setting, outside the repo)."""
+    context = Context(layout, Path.cwd())
+    key = str(context.root.resolve())
+    projects = context.config.setdefault("verification", {}).setdefault("projects", {})
+    if args.action == "on":
+        from ..remote_verify import repo_slug, SAFE_TESTS
+        slug = repo_slug(context.root)
+        if not slug:
+            raise SystemExit("This project has no GitHub 'origin' remote.")
+        if args.tests and not SAFE_TESTS.match(args.tests):
+            raise SystemExit("--tests takes test paths or pytest node ids separated by spaces.")
+        projects[key] = {"enabled": True, "repository": slug, "trusted_ref": args.trusted_ref or "main",
+                         "pr_base": args.pr_base or args.trusted_ref or "main", "tests": args.tests or "",
+                         "timeout_minutes": args.timeout_minutes}
+        settings.save(layout, context.config)
+        print(f"GitHub verification on for {slug}: tests run on GitHub Actions (workflow codingbrain-verify.yml "
+              f"read from {projects[key]['trusted_ref']}), accepted tasks become draft PRs into "
+              f"{projects[key]['pr_base']}, and merging asks you first.")
+    elif args.action == "off":
+        projects.pop(key, None)
+        settings.save(layout, context.config)
+        print("GitHub verification off: tests run in the local sandbox.")
+    else:
+        found = settings.verification_for(context.config, context.root)
+        print(json.dumps(found, indent=2) if found else "GitHub verification is off for this project.")
+
+
+def cmd_pr(args, layout):
+    """Open pull requests validating in the background: their state, and - for each one whose checks are
+    all green - asking before merging. --wait waits until none is still running (e.g. before a release)."""
+    from . import pullrequests
+    context = Context(layout, Path.cwd())
+    store = context.brain.store
+    while True:
+        reviews = [item for item in pullrequests.open_reviews(context, store)
+                   if not args.task or item["task_id"].startswith(args.task)]
+        if not reviews:
+            print("No open pull request" + (f" matches {args.task!r}." if args.task else ": nothing is waiting."))
+            return 0
+        for item in reviews:
+            if item.get("error"):
+                print(f"{item['url']}  could not be read now: {item['error']}")
+            else:
+                print(f"{item['url']}  {item['goal'][:60]}  checks: {len(item['checks'])}, {item['pending']} running, "
+                      f"{item['failed']} failed")
+        running = [item for item in reviews if not item.get("error") and item["pending"] and not item["failed"]]
+        if not args.wait or not running:
+            break
+        time.sleep(30)
+    status = 0
+    for item in reviews:
+        if item.get("failed"):
+            status = 1
+            print(f"\nChecks failed on {item['url']}:\n{item.get('failure_log', '')[-1500:]}")
+            if ask("Fix it? Coding Brain plans a repair from this pull request's code (you approve the plan) "
+                   "and the accepted fix updates the same pull request."):
+                try:
+                    fix = pullrequests.prepare_fix(context, store, item["task_id"])
+                except Exception as error:
+                    print(f"Cannot fix it now: {error}")
+                    continue
+                run_goal(context, fix["goal"], on_task=lambda task, fix=fix: task.update(
+                    base_commit=fix["base_commit"], fixes=fix["fixes"]))
+        if not item.get("ask_merge"):
+            continue
+        if not ask(item["question"]):
+            print("Not merged. The pull request stays open.")
+            continue
+        task = store.get(item["task_id"])
+        try:
+            pullrequests.merge(context, task, item["head"])
+        except Exception as error:
+            print(f"Not merged: {error}")
+            status = 1
+            continue
+        store.save(task)
+        print(f"Merged {item['url']}.")
+    return status
 
 
 def cmd_accept(args, layout):
@@ -1414,6 +1508,16 @@ def main(argv=None) -> int:
     resume = commands.add_parser("resume", help="continue the latest unfinished task, or the given one")
     resume.add_argument("task", nargs="?")
     resume.add_argument("--yes", action="store_true", help="run the plan without asking")
+    verify_parser = commands.add_parser("verify", help="GitHub verification for this project: tests on GitHub "
+                                        "Actions, accepted tasks as draft PRs, merge after you confirm")
+    verify_parser.add_argument("action", choices=["on", "off", "status"])
+    verify_parser.add_argument("--trusted-ref", help="branch the codingbrain-verify workflow is read from (default main)")
+    verify_parser.add_argument("--pr-base", help="branch pull requests target (default: the trusted ref)")
+    verify_parser.add_argument("--tests", help="test paths to run (default: the whole suite)")
+    verify_parser.add_argument("--timeout-minutes", type=int, default=40)
+    pr_parser = commands.add_parser("pr", help="open pull requests validating on GitHub; asks before merging each green one")
+    pr_parser.add_argument("task", nargs="?")
+    pr_parser.add_argument("--wait", action="store_true", help="wait until no check is still running (before a release)")
     accept_parser = commands.add_parser("accept", help="accept a tested task as a new branch")
     accept_parser.add_argument("task", nargs="?")
     run = commands.add_parser("run", help="work on one goal")
@@ -1581,7 +1685,7 @@ def main(argv=None) -> int:
             stream.reconfigure(errors="replace")
     layout = Layout.default()
     handlers = {"init": cmd_init, "status": cmd_status, "tasks": cmd_tasks, "resume": cmd_resume,
-                "accept": cmd_accept, "run": cmd_run, "doctor": cmd_doctor, "setup": cmd_setup,
+                "accept": cmd_accept, "verify": cmd_verify, "pr": cmd_pr, "run": cmd_run, "doctor": cmd_doctor, "setup": cmd_setup,
                 "update": cmd_update, "rollback": cmd_rollback, "migrate": cmd_migrate,
                 "post-install": cmd_post_install, "memory": cmd_memory, None: cmd_shell, "chat": cmd_shell, "api": cmd_api,
                 "attachments": cmd_attachments, "inspect-ui": cmd_inspect_ui, "activity": cmd_activity,

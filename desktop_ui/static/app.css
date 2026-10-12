@@ -267,6 +267,8 @@ button.is-loading::before { content:'';display:inline-block;width:12px;height:12
 .tok-k{color:#8ec5ff}.tok-s{color:#c3e88d}.tok-n{color:#f5b971}.tok-c{color:#6b8580;font-style:italic}
 .diff-line{display:block}.diff-add{background:#1d3a2b;color:#b8f0c8}.diff-del{background:#3d2226;color:#f3b6b6}.diff-hunk{color:#8ec5ff}.diff-file{color:#e9c27a;font-weight:600}
 .inline-code{font-family:"Cascadia Code",Consolas,monospace;font-size:.92em;background:#16201e;border:1px solid #2c3d39;border-radius:5px;padding:1px 5px;color:#c9eadd}
+.message-bubble strong{font-weight:700;color:inherit}
+.md-heading{display:inline-block;font-size:1.05em;margin:4px 0 2px}
 .preview .code-block{margin:0;border:0;border-radius:0;flex:1;display:flex;flex-direction:column;min-height:0}
 .preview .code-block pre{max-height:none;flex:1}
 .proposal-diff.code-block{margin-top:8px}
@@ -402,6 +404,14 @@ button.is-loading::before { content:'';display:inline-block;width:12px;height:12
 .ui-actions{display:flex;flex-wrap:wrap;gap:6px}
 .ui-action{border:1px solid #4e8c79;background:#2a4d43;color:#ecfff8;border-radius:8px;font-size:11px;padding:5px 10px}
 .ui-action:hover{background:#346052}.ui-action.external::after{content:" ↗";color:#9fd8c6}
+.ui-flow{display:flex;flex-direction:column;align-items:stretch;gap:4px;padding:6px 0}
+.ui-flow-stage{display:grid;gap:12px}
+.ui-flow-item{display:flex;flex-direction:column;align-items:center;text-align:center;gap:4px;padding:10px 8px;border-radius:10px}
+.ui-flow-icon{font-size:20px;color:#8ad6c0;line-height:1.2;font-family:"Cascadia Code",Consolas,monospace}
+.ui-flow-item.success .ui-flow-icon{color:#5fd39f}
+.ui-flow-item strong{font-size:13px;color:#e6f3ee}.ui-flow-item p{margin:0;font-size:12px;color:#9fb5af;line-height:1.45}
+.ui-flow-arrow{text-align:center;color:#6f8f87;font-size:14px}
+@media (max-width:640px){.ui-flow-stage{grid-template-columns:1fr !important}}
 .ui-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
 .ui-step{display:flex;gap:10px;padding:6px 4px;position:relative}
 .ui-step-mark{flex:none;width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:11px;border:1px solid #3f5a54;color:#9fbab3}

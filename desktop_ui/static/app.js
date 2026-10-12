@@ -319,16 +319,37 @@
     return block;
   }
 
-  function inlineText(parent, text) {
-    const parts = text.split(/(`[^`\n]+`)/g);
-    for (const part of parts) {
+  // Light Markdown for model replies: `code`, **bold**, headings and bullets. Text nodes only, so
+  // nothing the model writes becomes HTML; anything else stays as written.
+  function inlineSpans(parent, text) {
+    for (const part of text.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__)/g)) {
       if (part.length > 2 && part.startsWith('`') && part.endsWith('`')) {
         const code = document.createElement('code');
         code.className = 'inline-code';
         code.textContent = part.slice(1, -1);
         parent.append(code);
+      } else if (part.length > 4 && (/^\*\*.*\*\*$/.test(part) || /^__.*__$/.test(part))) {
+        const strong = document.createElement('strong');
+        strong.textContent = part.slice(2, -2);
+        parent.append(strong);
       } else if (part) parent.append(part);
     }
+  }
+
+  function inlineText(parent, text) {
+    const lines = text.split('\n');
+    lines.forEach((line, index) => {
+      const heading = line.match(/^\s{0,3}#{1,4}\s+(.+?)\s*#*\s*$/);
+      if (heading) {
+        const strong = document.createElement('strong');
+        strong.className = 'md-heading';
+        inlineSpans(strong, heading[1].replace(/^\*\*(.*)\*\*$/, '$1'));
+        parent.append(strong);
+      } else {
+        inlineSpans(parent, line.replace(/^(\s*)[-*+]\s+/, '$1• '));
+      }
+      if (index < lines.length - 1) parent.append('\n');
+    });
   }
 
   // ---- Display library: rich blocks the model chooses (```cb-ui {json}). Everything is drawn here from
@@ -414,6 +435,9 @@
     return frame;
   }
 
+  const FLOW_ICONS = {goal: '◎', plan: '◇', research: '⌕', code: '</>', execute: '</>', validate: '⛨', test: '⛨',
+    review: '◉', deliver: '✓', done: '✓', data: '▤', document: '▭', user: '☺', idea: '✦', warning: '⚠',
+    cloud: '☁', git: '⑂', merge: '⑂', step: '•'};
   const UI_COMPONENTS = {
     table(block) {
       const columns = (block.columns || []).slice(0, UI_LIMITS.columns);
@@ -512,6 +536,30 @@
         list.append(card);
       }
       frame.append(list);
+      return finishFrame(frame, block);
+    },
+    // A process at a glance: stages top to bottom, a stage's items side by side, arrows between.
+    flow(block) {
+      const stages = (block.stages || []).slice(0, 8)
+        .map(stage => (Array.isArray(stage) ? stage : stage?.items || [stage]).filter(item => item && typeof item === 'object').slice(0, 4))
+        .filter(items => items.length);
+      if (stages.length < 2) return null;
+      const frame = uiFrame(block, 'flow');
+      const board = el('div', 'ui-flow');
+      stages.forEach((items, index) => {
+        if (index) board.append(el('div', 'ui-flow-arrow', '↓'));
+        const row = el('div', 'ui-flow-stage');
+        row.style.gridTemplateColumns = `repeat(${items.length}, minmax(0, 1fr))`;
+        for (const item of items) {
+          const cell = el('div', 'ui-flow-item' + (item.tone === 'success' ? ' success' : ''));
+          cell.append(el('span', 'ui-flow-icon', FLOW_ICONS[item.icon] || FLOW_ICONS.step));
+          cell.append(el('strong', '', item.title || ''));
+          if (item.text) cell.append(el('p', '', item.text));
+          row.append(cell);
+        }
+        board.append(row);
+      });
+      frame.append(board);
       return finishFrame(frame, block);
     },
     steps(block) {
@@ -1011,6 +1059,10 @@
         updateProject(await api('/api/project', 'POST', {path: action.root}));
       }
       setMode(action.kind === 'create_project' ? 'new' : 'run');
+      if (action.attachments?.length && !attachments.length) {  // files sent in chat travel with the work
+        attachments = action.attachments.map(path => ({path, name: path.split(/[\\/]/).pop(), size: 0}));
+        renderAttachments();
+      }
       $('prompt').value = action.goal;
       await submit();
     } catch (e) { toast(e.message); }
@@ -1481,6 +1533,77 @@
     heartbeatTimer = setTimeout(heartbeat, delay);
   }
 
+  // ---- Pull requests validating on GitHub in the background. They never block the active job; the
+  // window asks before merging once every check is green, and offers a fix when one fails.
+  const shownReviews = new Map();
+  let reviewsCheckedAt = 0;
+
+  function prButton(label, onClick, secondary) {
+    const button = document.createElement('button');
+    button.type = 'button'; button.textContent = label;
+    if (secondary) button.className = 'no';
+    button.addEventListener('click', onClick);
+    return button;
+  }
+
+  function showReview(item) {
+    const safeUrl = /^https:\/\/github\.com\//.test(item.url || '') ? item.url : null;
+    const row = document.createElement('div');
+    row.className = 'decision-buttons';
+    let box;
+    if (item.ask_merge) {
+      box = message('CODING BRAIN · READY TO MERGE', `${item.question}\n\n${item.goal || ''}`, 'system');
+      row.append(prButton('Merge', async () => {
+        row.replaceChildren();
+        try {
+          await api('/api/pull-requests/merge', 'POST', {task_id: item.task_id, head: item.head});
+          message('CODING BRAIN', 'Merged ' + item.url, 'system');
+        } catch (e) { message('CODING BRAIN', e.message, 'system'); }
+      }), prButton('Not now', () => { row.remove(); message('YOU', 'Not now: the pull request stays open', 'user'); }, true));
+    } else {
+      box = message('CODING BRAIN · CHECKS FAILED',
+        `${item.failed} check(s) failed on ${item.url} — ${item.goal || ''}\nNothing was merged.`, 'system');
+      if (item.failure_log) {
+        const reveal = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = 'Failure log';
+        reveal.append(summary, codeBlock(item.failure_log, 'text', {title: 'GitHub Actions'}));
+        box.append(reveal);
+      }
+      row.append(prButton('Fix it', async () => {
+        // Plans a repair from the PR's own head; the plan is shown for approval like any task, and the
+        // accepted fix updates this same pull request.
+        if (activeJob || submitting) { toast('Finish or stop the current session first.'); return; }
+        row.remove();
+        try {
+          const job = await api('/api/start', 'POST', {message: `Fix the failing checks of ${item.url}`, mode: 'run', fix_of: item.task_id});
+          message('YOU', `Fix the failing checks of ${item.url}`, 'user');
+          activeJob = job.id; cursor = 0; displayedEvents = new Set(); startedAt = job.started;
+          resetFlow('run'); showTyping(); busySend(true); $('run-status').hidden = false;
+          await poll();
+          if (activeJob && !pollTimer) pollTimer = setInterval(poll, 300);
+        } catch (e) { toast(e.message); }
+      }));
+    }
+    if (safeUrl) row.append(prButton('Open the pull request', () => api('/api/open-url', 'POST', {url: safeUrl}).catch(e => toast(e.message)), true));
+    box.append(row);
+  }
+
+  async function checkReviews(force) {
+    if (!currentProject || (!force && Date.now() - reviewsCheckedAt < 30000)) return;
+    reviewsCheckedAt = Date.now();
+    try {
+      const data = await api('/api/pull-requests' + (force ? '?refresh=true' : ''));
+      for (const item of data.pull_requests || []) {
+        if (item.error || !(item.ask_merge || item.failed)) continue;
+        const key = `${item.head}:${item.ask_merge ? 'green' : 'failed'}`;
+        if (shownReviews.get(item.task_id) === key) continue;  // each state is asked once
+        shownReviews.set(item.task_id, key);
+        showReview(item);
+      }
+    } catch (e) { /* the next heartbeat tries again */ }
+  }
+
   async function heartbeat() {
     try {
       const health = await api('/api/health');
@@ -1500,6 +1623,7 @@
       }
       installedVersion = health.installed_version;
       if (recovered || restarted) { toast('Reconnected to Coding Brain'); refresh(); }
+      if (!document.hidden) checkReviews(false);
     } catch (error) {
       if (error.status === 403) {
         setConnection(false, 'Session expired — reopen Coding Brain');
@@ -1527,10 +1651,6 @@
       $('prompt').value = '';
       message('YOU', text, 'user');
       await startAction(lastAction);
-      return;
-    }
-    if (attachments.length && mode === 'chat') {
-      toast('Attachments are read by Run task and New project. Switch mode to send these files.');
       return;
     }
     submitting = true;
@@ -1944,7 +2064,7 @@
       chip.className = 'attachment';
       chip.title = item.path;
       const name = document.createElement('span'); name.className = 'attachment-name'; name.textContent = item.name;
-      const size = document.createElement('span'); size.className = 'attachment-size'; size.textContent = formatBytes(item.bytes);
+      const size = document.createElement('span'); size.className = 'attachment-size'; size.textContent = item.bytes ? formatBytes(item.bytes) : '';
       const remove = document.createElement('button');
       remove.type = 'button'; remove.className = 'attachment-remove'; remove.textContent = '×';
       remove.setAttribute('aria-label', 'Remove ' + item.name);

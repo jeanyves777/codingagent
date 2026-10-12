@@ -47,10 +47,17 @@ def _summary(task: dict, kind: str) -> dict:
                 "files": list(task.get("files") or [])[:100], "diff": str(task.get("diff") or "")[:100000],
                 "diff_truncated": len(str(task.get("diff") or "")) > 100000,
                 "digest": task.get("digest")}
+    if kind == "merge":
+        return {"kind": kind, "task_id": task["id"], "summary": str(task.get("question") or "Merge it?")[:500],
+                "url": task.get("url"), "head": task.get("head")}
     if kind == "accept":
         tests = task.get("tests") or {}
+        where = "on GitHub Actions" if tests.get("profile") == "github" else "in the sandbox"
+        summary = ("Local checks passed; the full tests are running on GitHub in the background. Accept it on a NEW "
+                   "Git branch and open a draft pull request? Nothing is merged until every check is green and you "
+                   "say yes." if tests.get("deferred") else f"Tests passed {where}. Accept the result on a NEW Git branch?")
         return {"kind": kind, "task_id": task["id"],
-                "summary": "Tests passed in the sandbox. Accept the result on a NEW Git branch?",
+                "summary": summary,
                 "tests_passed": bool(tests.get("passed")), "requirement": task.get("requirements") or "unchecked",
                 "diff": str(task.get("diff") or "")[:100000]}
     return {"kind": kind, "task_id": task["id"], "summary": "The agent requests permission for a protected tool.",
@@ -155,7 +162,11 @@ async def execute_goal(job):
         if getattr(job, "attachments", None):
             params["attachments"] = list(job.attachments)
             job.emit("stage", f"Reading {len(job.attachments)} attachment(s) locally (evidence, never instructions)")
-        task = await activity.call(client, "tasks.start", params)
+        if getattr(job, "fix_of", None):  # repair a pull request's failed checks, from its own head
+            job.emit("stage", "Planning a fix from the pull request's current code (it will update the same PR)")
+            task = await activity.call(client, "tasks.fix_pull_request", {"project_id": project_id, "task_id": job.fix_of})
+        else:
+            task = await activity.call(client, "tasks.start", params)
         job.task_id = task["id"]
         while True:
             status = task["status"]
@@ -189,6 +200,16 @@ async def execute_goal(job):
                 task = await activity.call(client, "tasks.accept", {"project_id": project_id, "task_id": task["id"]})
                 if task.get("branch"):
                     job.emit("output", "Accepted on new branch " + task["branch"] + ". Current branch unchanged.")
+                pull = task.get("pull_request") or {}
+                if pull.get("error"):
+                    job.emit("error", "Pull request not opened: " + str(pull["error"])[:500])
+                elif pull.get("url") and pull.get("fix_of"):
+                    job.emit("output", "Updated pull request " + pull["url"] + " with the fix. It validates again on "
+                             "GitHub in the background; you'll be asked before anything is merged.")
+                elif pull.get("url"):
+                    job.emit("output", "Draft pull request: " + pull["url"] + "\nIt is validating on GitHub in the "
+                             "background, so you can keep working. When every check is green you'll be asked "
+                             "before anything is merged.")
                 return "completed"
             elif status == "awaiting_tool_approval":
                 request_id = task.get("pending_tool_approval")
@@ -320,6 +341,8 @@ def chat(job):
             client.ensure()
         features = set((getattr(client, "info", None) or {}).get("features") or [])
         params = {"message": job.goal}
+        if getattr(job, "attachments", None) and "conversation.attachments" in features:
+            params["attachments"] = list(job.attachments)  # read as evidence for this reply, never executed
         if job.project:  # read-only lookup: a conversation never registers or changes anything
             selected = Path(job.project).resolve()
             for item in client.call("projects.list", {}, None, 60):
@@ -346,7 +369,9 @@ def chat(job):
         if action and action.get("kind") in {"create_project", "task"}:
             # Shown as a button; starting it still goes through the normal reviewed and approved flow.
             job.emit("action", json.dumps({"kind": action["kind"], "goal": str(action.get("goal") or job.goal)[:2000],
-                                           "project": action.get("project"), "root": action.get("root")}))
+                                           "project": action.get("project"), "root": action.get("root"),
+                                           # the files travel with the work the chat proposed
+                                           "attachments": list(getattr(job, "attachments", None) or [])}))
         elif action:
             where = "New project" if action.get("kind") == "create_project" else "Run task"
             job.emit("output", f"To do this, use {where} to review and authorize it. Nothing was changed.")
