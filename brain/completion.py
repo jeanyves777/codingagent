@@ -26,10 +26,17 @@ PROMPTS = {
     "python": REQUIREMENT_PROMPT,
     "node": REQUIREMENT_PROMPT.replace(
         "Write pytest tests", "Write tests for Node's built-in test runner as an ES module (import test from "
-        "'node:test' and assert from 'node:assert/strict'; one test(...) call per check; no skip, todo or only)"),
+        "'node:test' and assert from 'node:assert/strict'; one test(...) call per check; no skip, todo or only)").replace(
+        "Put them in exactly one new file named {name}.", "Put them in exactly one new file named {name}, "
+        "either in the project root or in the folder of the existing tests (for example test/{name}); "
+        "import the code with paths relative to where you put that file.").replace(
+        "import the code the way the existing tests do, ", ""),
 }
 SUFFIXES = {"python": ".py", "node": ".test.mjs"}
-NAME = re.compile(r"^test_requirements_[a-f0-9]{8}(\.py|\.test\.mjs)$")
+# Python checks sit in the project root; Node checks may also sit next to the project's tests
+# (a model writing for test/ imports '../src/x.js'). Directory names only: no '.', '..' or links.
+NAME = re.compile(r"^(?:(?:[A-Za-z0-9_-]+/){0,3}test_requirements_[a-f0-9]{8}\.test\.mjs|"
+                  r"test_requirements_[a-f0-9]{8}\.py)$")
 NODE_TEST_CALL = re.compile(r"^\s*(?:test|it)\s*\(", re.M)
 NODE_TEST_IMPORT = re.compile(r"""(?:from|require\()\s*['"]node:test['"]""")
 
@@ -86,10 +93,16 @@ def accept_requirement_tests(task: dict, raw: str) -> dict | None:
     if language not in SUFFIXES:
         return None
     expected = requirement_file_name(task["id"], language)
-    chosen = [change for change in changes if isinstance(change, dict) and change.get("path") == expected]
-    if len(chosen) != 1 or not NAME.match(expected):
+    chosen = [change for change in changes if isinstance(change, dict) and isinstance(change.get("path"), str)
+              and NAME.match(change["path"]) and change["path"].rsplit("/", 1)[-1] == expected]
+    if len(chosen) != 1:
         return None
+    path = chosen[0]["path"]
     content = str(chosen[0].get("content", ""))
+    from .validators import FENCED
+    fenced = FENCED.match(content)  # small models often wrap the whole file in one Markdown fence
+    if fenced:
+        content = fenced.group(1) + "\n"
     if len(content) > 20_000:
         return None
     if language == "node":
@@ -97,7 +110,7 @@ def accept_requirement_tests(task: dict, raw: str) -> dict | None:
         count = len(NODE_TEST_CALL.findall(content))
         if not count or not NODE_TEST_IMPORT.search(content):
             return None
-        return {"path": expected, "content": content, "tests": count, "language": "node"}
+        return {"path": path, "content": content, "tests": count, "language": "node"}
     try:
         tree = ast.parse(content)
     except SyntaxError:
@@ -123,8 +136,13 @@ def run_requirement_checks(workspace: Path, checks: dict, run_tests, image, shou
         copy = Path(scratch) / "workspace"
         shutil.copytree(workspace, copy, ignore=shutil.ignore_patterns(".git"))
         target = copy / checks["path"]
-        if target.is_symlink() or target.is_dir():
+        # every existing part of the path must be a real folder inside the copy, and the file itself
+        # must not be a link or a folder: the work under test cannot redirect where the checks go
+        parts = [copy.joinpath(*Path(checks["path"]).parts[:index]) for index in range(1, len(Path(checks["path"]).parts))]
+        if target.is_symlink() or target.is_dir() or any(part.is_symlink() or (part.exists() and not part.is_dir())
+                                                          for part in parts):
             return {"passed": False, "exit_code": None, "output": "The requirement checks path is taken by the work"}
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(checks["content"], encoding="utf-8")
         for path in [copy, *copy.rglob("*")]:
             path.chmod(0o755 if path.is_dir() else 0o644)
@@ -156,8 +174,7 @@ def execution_gap(evidence: dict, checks: dict) -> str | None:
             return "pytest reported " + ", ".join(f"{count} {kind}" for kind, count in weakened.items())
         ran = counts.get("passed", 0)
     elif language == "node":
-        name = Path(checks.get("path", "")).name
-        if re.search(rf"^\s*(?:not )?ok \d+ - {re.escape(name)}\s*$", output, re.M):
+        if re.search(rf"^\s*(?:not )?ok \d+ - {_file_entry(checks)}\s*$", output, re.M):
             return "the checks file produced no tests of its own"  # node --test reports a file without tests
         counts = {kind: int(number) for kind, number in TAP_COUNT.findall(output)}
         if "tests" not in counts or "pass" not in counts:
@@ -178,9 +195,14 @@ def execution_gap(evidence: dict, checks: dict) -> str | None:
 def load_failure(evidence: dict, checks: dict) -> bool:
     """A Node checks file that failed as a whole (it did not load: syntax, missing import, a
     top-level error) is the check's own defect, like a pytest collection error."""
-    name = Path(checks.get("path", "")).name
     return (checks.get("language") or checks_language(checks.get("path", ""))) == "node" and bool(
-        re.search(rf"^\s*not ok \d+ - {re.escape(name)}\s*$", str(evidence.get("output") or ""), re.M))
+        re.search(rf"^\s*not ok \d+ - {_file_entry(checks)}\s*$", str(evidence.get("output") or ""), re.M))
+
+
+def _file_entry(checks: dict) -> str:
+    """node --test names a file-level entry by the path it was given (or just its name)."""
+    path = str(checks.get("path", ""))
+    return "(?:" + "|".join(sorted({re.escape(path), re.escape(Path(path).name)})) + ")"
 
 
 # Validating a failing check before it may drive a repair -------------------------------------

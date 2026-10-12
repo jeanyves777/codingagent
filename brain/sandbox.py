@@ -66,7 +66,8 @@ def _supervise(command: list[str], name: str, output, should_cancel) -> int | st
 NODE_ID = re.compile(r"[\w./-]+\.py::[\w.\[\]-]+")
 # Requirement checks run explicitly with their language's runner, never through the project's own
 # test script (which may not collect them): pytest for Python, node --test for Node.
-REQUIREMENT_FILE = re.compile(r"test_requirements_[a-f0-9]{8}(\.py|\.test\.mjs)")
+REQUIREMENT_FILE = re.compile(r"(?:(?:[A-Za-z0-9_-]+/){0,3}test_requirements_[a-f0-9]{8}(\.test\.mjs)|"
+                              r"test_requirements_[a-f0-9]{8}(\.py))")
 REQUIREMENT_RUNNERS = {
     ".py": ("python", ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]),
     ".test.mjs": ("node", ["node", "--test", "--test-reporter=tap"]),
@@ -82,8 +83,9 @@ def run_tests(workspace: Path, images: str | dict, should_cancel=None, only=None
         found = REQUIREMENT_FILE.fullmatch(checks) if isinstance(checks, str) else None
         if not found:
             return {"passed": False, "exit_code": None, "profile": None,
-                    "output": "Requirement checks must be one file named test_requirements_<id>.py or .test.mjs"}
-        language, runner = REQUIREMENT_RUNNERS[found.group(1)]
+                    "output": "Requirement checks must be one file named test_requirements_<id>.py (project root) or "
+                              ".test.mjs"}
+        language, runner = REQUIREMENT_RUNNERS[found.group(1) or found.group(2)]
         selected = {"name": language, "command": [*runner, checks]}
     else:
         selected = profile(workspace)

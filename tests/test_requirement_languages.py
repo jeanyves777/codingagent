@@ -335,8 +335,11 @@ def test_checks_are_generated_for_the_project_language(tmp_path):
     task = {"id": "0123456789abcdef", "goal": "add must add", "requirement_language": "node"}
     assert "node:test" in requirement_goal(task) and "test_requirements_01234567.test.mjs" in requirement_goal(task)
     assert "pytest" not in requirement_goal(task)
+    # a real model put the file next to the existing tests and imported '../src/x.js' from there
+    assert "folder of the existing tests" in requirement_goal(task) and "relative to where" in requirement_goal(task)
     python_task = {"id": "0123456789abcdef", "goal": "add must add"}
     assert "pytest" in requirement_goal(python_task) and "test_requirements_01234567.py" in requirement_goal(python_task)
+    assert "folder of the existing tests" not in requirement_goal(python_task)  # Python checks stay in the root
     node = {"changes": [{"path": "test_requirements_01234567.test.mjs", "content": NODE_PASS}]}
     accepted = accept_requirement_tests(task, json.dumps(node))
     assert accepted == {"path": "test_requirements_01234567.test.mjs", "content": NODE_PASS, "tests": 1, "language": "node"}
@@ -424,3 +427,93 @@ def test_check_runs_that_show_no_execution_are_unverified_not_verified(tmp_path,
     assert task["status"] == "passed" and task["completion_verified"] is False
     assert task["completion"]["status"] == "unverified" and "pytest ran no tests" in task["completion"]["detail"]
     assert task["requirement_audit"][-1]["stage"] == "not_executed"
+
+
+# What a real small model writes: checks next to the existing tests, wrapped in a Markdown fence --
+
+NODE_IN_TEST_DIR = NODE_HEAD.replace("'./src/add.js'", "'../src/add.js'")
+
+
+class NextToTests(StandIn):
+    """Puts the checks in test/ (where the project's tests are) and wraps them in a code fence, as
+    qwen2.5-coder:3b did in real runs."""
+    async def propose(self, root, goal, memories, repository_context=None, **kwargs):
+        raw = await super().propose(root, goal, memories, repository_context, **kwargs)
+        if not goal.startswith("Do not implement anything"):
+            return raw
+        proposal = json.loads(raw)
+        change = proposal["changes"][0]
+        change.update(path="test/" + change["path"], content="```javascript\n" + change["content"] + "```")
+        return json.dumps(proposal)
+
+
+@needs_node
+@pytest.mark.parametrize("checks, verified", [
+    (NODE_IN_TEST_DIR + "test('add(-1, 1) is 0', () => assert.equal(add(-1, 1), 0));\n", True),
+    (NODE_IN_TEST_DIR + "test('add(2, 2) is 5', () => assert.equal(add(2, 2), 5));\n", False),
+    (NODE_IN_TEST_DIR + "test('add(-1, 1) is 0', { skip: true }, () => assert.equal(add(-1, 1), 0));\n", False),
+    ("```javascript\n" + NODE_IN_TEST_DIR + "```", False),  # no tests of its own: a file-level entry only
+], ids=["passes", "fails", "skipped", "no-tests"])
+def test_node_checks_next_to_the_tests_run_at_that_path_and_need_execution_evidence(tmp_path, monkeypatch,
+                                                                                    checks, verified):
+    calls = host_docker(monkeypatch)
+    task = execute(tmp_path, node_project(tmp_path), NextToTests({".mjs": checks}, {"src/add.js": NODE_IMPL}))
+    path = task["requirement_tests"].get("path") or ""
+    if verified:
+        assert path.startswith("test/test_requirements_") and not task["requirement_tests"]["content"].startswith("```")
+        assert calls[1] == ["node", "--test", "--test-reporter=tap", path]
+    assert (task["completion_verified"] is True) is verified, task["completion"]
+    assert ("completion_verified" in kinds(task)) is verified
+
+
+def test_where_requirement_checks_may_be_written():
+    from brain.completion import accept_requirement_tests
+    node = {"id": "0123456789abcdef", "goal": "g", "requirement_language": "node"}
+    python = {"id": "0123456789abcdef", "goal": "g"}
+    body = NODE_PASS
+
+    def offer(task, path, content):
+        return accept_requirement_tests(task, json.dumps({"changes": [{"path": path, "content": content}]}))
+    assert offer(node, "test/test_requirements_01234567.test.mjs", body)["path"] == "test/test_requirements_01234567.test.mjs"
+    assert offer(node, "a/b/c/test_requirements_01234567.test.mjs", body)
+    for refused in ("../test_requirements_01234567.test.mjs", "test/../test_requirements_01234567.test.mjs",
+                    "/test_requirements_01234567.test.mjs", "a/b/c/d/test_requirements_01234567.test.mjs",
+                    ".hidden/test_requirements_01234567.test.mjs", "test/test_requirements_99999999.test.mjs",
+                    "test\\test_requirements_01234567.test.mjs"):
+        assert offer(node, refused, body) is None, refused
+    assert offer(node, "test/test_requirements_01234567.test.mjs", "```js\n" + body + "```")["content"] == body
+    fenced = "```python\n" + PY_PASS + "```"
+    assert offer(python, "test_requirements_01234567.py", fenced)["content"].startswith("from calc import add")
+    assert offer(python, "tests/test_requirements_01234567.py", PY_PASS) is None  # Python checks: root only
+
+
+def test_the_sandbox_runs_only_safe_checks_paths(tmp_path):
+    for refused in ("../test_requirements_01234567.test.mjs", "test/../x/test_requirements_01234567.test.mjs",
+                    "tests/test_requirements_01234567.py", "/abs/test_requirements_01234567.test.mjs"):
+        result = sandbox.run_tests(tmp_path, IMAGES, checks=refused)
+        assert result["passed"] is False and result["exit_code"] is None, refused
+
+
+def test_checks_in_a_linked_folder_never_reach_outside_the_copy(tmp_path):
+    """The checks run in a throwaway copy, where a linked folder becomes a real one: whatever the
+    work links, the checks are written inside the copy and nowhere else."""
+    from brain.completion import run_requirement_checks
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    (workspace / "test").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    seen = []
+
+    def run(copy, images, should_cancel=None, checks=None):
+        seen.append((copy / checks).read_text() == NODE_PASS and not (copy / "test").is_symlink())
+        return {"passed": True, "exit_code": 0}
+    run_requirement_checks(workspace, {"path": "test/test_requirements_01234567.test.mjs", "content": NODE_PASS},
+                           run, IMAGES, None)
+    assert seen == [True] and not list((tmp_path / "elsewhere").iterdir())
+
+
+@needs_docker
+def test_node_checks_next_to_the_tests_verify_in_the_real_sandbox(tmp_path):
+    checks = NODE_IN_TEST_DIR + "test('add(-1, 1) is 0', () => assert.equal(add(-1, 1), 0));\n"
+    task = execute(tmp_path, node_project(tmp_path), NextToTests({".mjs": checks}, {"src/add.js": NODE_IMPL}), image=IMAGES)
+    assert task["requirement_tests"]["path"].startswith("test/") and task["completion_verified"] is True
