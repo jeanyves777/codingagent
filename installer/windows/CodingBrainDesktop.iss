@@ -73,7 +73,8 @@ begin
   Result := '';
   ExtractTemporaryFile('Close-CodingBrainDesktop.ps1');
   ReportPath := ExpandConstant('{tmp}\desktop-close-report.txt');
-  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+  // Native PowerShell can inspect 64-bit Python modules even though Setup is 32-bit.
+  if not Exec(ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe'),
     '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
     ExpandConstant('{tmp}\Close-CodingBrainDesktop.ps1') + '" -InstallDir "' +
     ExpandConstant('{app}') + '" -ReportPath "' + ReportPath + '"',

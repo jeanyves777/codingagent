@@ -57,3 +57,14 @@ function Get-Process {
         result, report = self.run_preflight("function Get-Process { throw 'Process query failed' }")
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn('Process query failed', report)
+
+    def test_external_python_loading_installed_dll_blocks_installation(self):
+        result, report = self.run_preflight(r"""
+function Get-Process {
+    [pscustomobject]@{Path='C:\Python\python.exe'; MainWindowHandle=0;
+        ProcessName='python'; Id=456;
+        Modules=@([pscustomobject]@{FileName='C:\Apps\Brain\_internal\libcrypto-3.dll'})}
+}
+""")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('python (PID 456)', report)

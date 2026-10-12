@@ -9,7 +9,21 @@ try {
     function Get-InstalledProcesses {
         @(Get-Process -ErrorAction Stop | Where-Object {
             $processPath = $_.Path
-            $processPath -and $processPath.StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)
+            if ($processPath -and $processPath.StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+            # The installed engine uses an external Python interpreter. Its executable
+            # is outside {app}, but inherited DLL search paths can load bundled DLLs.
+            try {
+                foreach ($module in $_.Modules) {
+                    if ($module.FileName -and $module.FileName.StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                        return $true
+                    }
+                }
+            } catch {
+                # Windows denies module enumeration for protected/unrelated processes.
+            }
+            return $false
         })
     }
 
@@ -26,7 +40,7 @@ try {
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
 
-    $details = 'Still running from the installation folder:' + [Environment]::NewLine +
+    $details = 'Processes using files in the installation folder:' + [Environment]::NewLine +
         (($remaining | ForEach-Object { '{0} (PID {1})' -f $_.ProcessName, $_.Id }) -join [Environment]::NewLine)
     [IO.File]::WriteAllText($ReportPath, $details)
     exit 1
