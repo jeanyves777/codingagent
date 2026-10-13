@@ -138,11 +138,16 @@ if ($older -eq '1') {
 } elseif ($newer -eq '1') {
   Write-Step "Updating the engine $installed -> $bundled (state is backed up; rollback with 'codingbrain rollback')"
   $recovery = Join-Path $PSScriptRoot 'Recover-CodingBrainTasks.py'
-  $wheel = @(Get-ChildItem -LiteralPath $Bundle -File -Filter 'coding_brain-*.whl')
-  if ($wheel.Count -ne 1 -or -not (Test-Path -LiteralPath $recovery)) {
-    Finish 1 'Verified update recovery files are missing. No engine update was attempted.'
+  # Previous installers leave older wheels behind. Select only the manifest version,
+  # whose release files were checksum-verified above; directory contents are not authority.
+  $wheel = Join-Path $Bundle "coding_brain-$bundled-py3-none-any.whl"
+  if (-not (Test-Path -LiteralPath $wheel -PathType Leaf)) {
+    Finish 1 "Verified bundled engine wheel missing: $wheel. No engine update was attempted."
   }
-  & $python -I $recovery --wheel $wheel[0].FullName --home $InstallDir
+  if (-not (Test-Path -LiteralPath $recovery -PathType Leaf)) {
+    Finish 1 "Update recovery script missing: $recovery. No engine update was attempted."
+  }
+  & $python -I $recovery --wheel $wheel --home $InstallDir
   if ($LASTEXITCODE -ne 0) { Finish 1 'Live or unverified coding work still blocks the update.' }
   & $python -I -m brain.local update --source $Bundle --channel dev
   if ($LASTEXITCODE -ne 0) { Finish 1 'The bundled engine update failed. The desktop will not be opened as ready.' }

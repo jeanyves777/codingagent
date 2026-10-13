@@ -19,6 +19,35 @@ SETUP = ROOT / "installer" / "windows" / "Setup-CodingBrain.ps1"
 ISS = ROOT / "installer" / "windows" / "CodingBrainDesktop.iss"
 
 
+@pytest.mark.skipif(sys.platform != 'win32', reason='requires Windows PowerShell')
+@pytest.mark.parametrize('missing', [None, 'wheel', 'recovery'])
+def test_update_selects_manifest_wheel_among_old_installer_files(tmp_path, missing):
+    version = '0.13.0.dev5+desktop44'
+    for older in ('desktop24', 'desktop43', 'desktop999'):
+        (tmp_path / f'coding_brain-0.13.0.dev5+{older}-py3-none-any.whl').write_bytes(b'old')
+    wheel = tmp_path / f'coding_brain-{version}-py3-none-any.whl'
+    recovery = tmp_path / 'Recover-CodingBrainTasks.py'
+    if missing != 'wheel':
+        wheel.write_bytes(b'verified target')
+    if missing != 'recovery':
+        recovery.write_text('# recovery')
+    source = SETUP.read_text(encoding='utf-8')
+    block = source[source.index('  $wheel = Join-Path'):source.index('  & $python -I $recovery')]
+    escaped = str(tmp_path).replace("'", "''")
+    script = tmp_path / 'selection.ps1'
+    script.write_text("$ErrorActionPreference='Stop'\nfunction Finish($code,$message) { Write-Output $message; exit $code }\n"
+        f"$Bundle='{escaped}'\n$bundled='{version}'\n"
+        "$recovery=Join-Path $Bundle 'Recover-CodingBrainTasks.py'\n" + block + '\nWrite-Output $wheel\n')
+    result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', str(script)],
+                            capture_output=True, text=True, timeout=20)
+    if missing:
+        assert result.returncode == 1
+        assert ('engine wheel missing' if missing == 'wheel' else 'recovery script missing') in result.stdout
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == str(wheel)
+
+
 def _probe_module():
     spec = importlib.util.spec_from_file_location("installer_engine_probe", PROBE)
     assert spec and spec.loader
