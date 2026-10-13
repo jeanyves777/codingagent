@@ -31,15 +31,16 @@ class WorkspaceManager:
         snapshot(repository, destination)
         return {"kind": "snapshot", "base_commit": None}
 
-    def commit(self, workspace: Path, task_id: str) -> str:
+    def commit(self, workspace: Path, task_id: str, allow_empty=False) -> str:
         if not self.is_git(workspace):
             raise ValueError("Commits require a Git-backed workspace")
         self._git(workspace, "add", "--all")
-        if not self._git(workspace, "status", "--porcelain"):
+        if not allow_empty and not self._git(workspace, "status", "--porcelain"):
             raise ValueError("No changes to commit")
         result = subprocess.run(["git", "-C", str(workspace), "-c", "user.name=Coding Brain",
                                  "-c", "user.email=coding-brain@localhost", "commit", "-m",
-                                 f"coding-brain: {task_id}"], capture_output=True, text=True, timeout=30)
+                                 f"coding-brain: {task_id}", *(['--allow-empty'] if allow_empty else [])],
+                                capture_output=True, text=True, timeout=30)
         if result.returncode:
             raise ValueError(result.stderr.strip() or "Commit failed")
         return self._git(workspace, "rev-parse", "HEAD")

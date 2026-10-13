@@ -73,6 +73,18 @@ OPERATIONS = {
                       "approve: review, apply in the isolated worktree and test; decline: cancel"),
     "tasks.accept": ("action", {"project_id": ("str", True), "task_id": ("str", True)},
                      "accepts a tested task as a new branch"),
+    "tasks.lifecycle_plan": ("read", {"project_id": ("str", True), "task_id": ("str", True)},
+                             "exact build/verify/apply/run commands for accepted code, with an approval digest"),
+    "tasks.lifecycle_run": ("action", {"project_id": ("str", True), "task_id": ("str", True), "digest": ("str", True)},
+                            "launch the explicitly approved accepted-project workflow; returns a durable receipt"),
+    "tasks.preparation_plan": ("read", {"project_id": ("str", True), "task_id": ("str", True)},
+                               "exact proposed environment preparation commands, before code testing"),
+    "tasks.preparation_run": ("action", {"project_id": ("str", True), "task_id": ("str", True), "digest": ("str", True)},
+                              "launch explicitly approved dependency/toolchain preparation"),
+    "tasks.preparation_status": ("read", {"project_id": ("str", True), "task_id": ("str", True)},
+                                 "recorded environment preparation results"),
+    "tasks.lifecycle_status": ("read", {"project_id": ("str", True), "task_id": ("str", True)},
+                               "recorded workflow results, build artifacts and launch/verification outcomes"),
     "tasks.tool_decision": ("action", {"project_id": ("str", True), "task_id": ("str", True),
                                        "request_id": ("str", True), "decision": ("str", True)},
                             "approve or decline the protected tool request a task is waiting on "
@@ -82,7 +94,7 @@ OPERATIONS = {
 }
 # Additive capabilities within API 1.x that clients detect here rather than from a version number.
 FEATURES = {"tasks.start.attachments", "conversation.stream", "conversation.scope", "conversation.reset",
-            "documents.create"}
+            "documents.create", "tasks.lifecycle"}
 TASK_MILESTONES = {"tasks.start", "tasks.approve", "tasks.accept"}
 LONG = {"documents.create", "conversation.send", "tasks.start", "tasks.approve", "tasks.accept", "tasks.resume", "tasks.tool_decision"}
 CHECK_TYPES = {"str": str, "bool": bool, "int": int, "list": list}
@@ -125,6 +137,8 @@ def task_summary(task: dict) -> dict:
             "failures": [{key: item.get(key) for key in ("attempt", "category", "diagnosis", "summary")}
                          for item in task.get("failure_log", [])][-6:],
             "branch": task.get("branch"), "commit": task.get("commit"),
+            "lifecycle": task.get("proposal", {}).get("lifecycle"),
+            "application": task.get("lifecycle_application"),
             "pending_tool_approval": task.get("pending_approval_id"), "interrupted": interrupted(task)}
 
 
@@ -138,6 +152,7 @@ class Engine:
         self.thread = threading.Thread(target=self.loop.run_forever, daemon=True, name="coding-brain-engine")
         self.thread.start()
         self.lock = threading.Lock()
+        self.lock_for_lifecycle = threading.Lock()
         self._assistant = None
 
     def close(self):
@@ -462,6 +477,11 @@ class Engine:
             raise ApiError("bad_params", "decision must be approve or decline")
         brain = self.brain(project_id)
         task = brain.store.get(task_id)
+        if decision == 'approve' and (task.get('proposal', {}).get('lifecycle') or {}).get('preparation'):
+            prepared = task.get('lifecycle_preparation') or {}
+            result = self.op_tasks_preparation_status(project_id, task_id)
+            if prepared.get('proposal_digest') != digest or not result or result.get('status') != 'completed':
+                raise ApiError('refused', 'Approve and complete this proposal\'s environment preparation before testing')
         if task["status"] != "proposed":
             raise ApiError("refused", f"task is {task['status']}, not waiting for approval")
         if digest != task.get("digest"):
@@ -497,6 +517,74 @@ class Engine:
                 brain.store.save(task)
             return task
         return task_summary(self.run(go()))
+
+    def op_tasks_lifecycle_plan(self, project_id: str, task_id: str):
+        return self._workflow_plan(project_id, task_id)
+
+    def op_tasks_preparation_plan(self, project_id: str, task_id: str):
+        return self._workflow_plan(project_id, task_id, preparation=True)
+
+    def _workflow_plan(self, project_id: str, task_id: str, preparation=False):
+        from .lifecycle import prepare
+        context = self.context(project_id)
+        task = next((t for t in context.tasks() if t['id'] == task_id), None)
+        if task is None:
+            raise ApiError('not_found', 'No accepted task matches this project and task ID')
+        return prepare(task, context.data / 'tasks' / task['id'] / 'workspace', self.layout, preparation=preparation)
+
+    def op_tasks_lifecycle_status(self, project_id: str, task_id: str):
+        return self._workflow_status(project_id, task_id)
+
+    def op_tasks_preparation_status(self, project_id: str, task_id: str):
+        return self._workflow_status(project_id, task_id, preparation=True)
+
+    def _workflow_status(self, project_id: str, task_id: str, preparation=False):
+        from .lifecycle import read_receipt
+        from .session import pid_alive
+        context = self.context(project_id)
+        task = next((t for t in context.tasks() if t['id'] == task_id), None)
+        if task is None:
+            raise ApiError('not_found', 'No task matches this project and task ID')
+        application = task.get('lifecycle_preparation' if preparation else 'lifecycle_application')
+        if not application:
+            return None
+        receipt = Path(application['receipt']).resolve()
+        if not receipt.is_relative_to((context.data / 'tasks' / task['id']).resolve()):
+            raise ApiError('refused', 'Workflow receipt is outside its task directory')
+        result = read_receipt(receipt) if receipt.is_file() else application
+        if result.get('status') in {'starting', 'running'} and application.get('pid') and not pid_alive(application['pid']):
+            result = {**result, 'status': 'failed',
+                      'error': 'Workflow worker exited before completion; inspect ' + str(receipt.parent / 'worker.log')}
+        return result
+
+    def op_tasks_lifecycle_run(self, project_id: str, task_id: str, digest: str):
+        return self._workflow_run(project_id, task_id, digest)
+
+    def op_tasks_preparation_run(self, project_id: str, task_id: str, digest: str):
+        return self._workflow_run(project_id, task_id, digest, preparation=True)
+
+    def _workflow_run(self, project_id: str, task_id: str, digest: str, preparation=False):
+        from .lifecycle import launch, read_receipt
+        import uuid
+        brain = self.brain(project_id)
+        with self.lock_for_lifecycle:
+            task = brain.store.get(task_id)
+            key = 'lifecycle_preparation' if preparation else 'lifecycle_application'
+            previous = task.get(key)
+            if previous:
+                receipt = Path(previous['receipt'])
+                result = self._workflow_status(project_id, task_id, preparation)
+                if result.get('status') != 'failed' and (not preparation or previous.get('proposal_digest') == task.get('digest')):
+                    raise ApiError('refused', 'This workflow was already authorized; inspect its receipt before retrying')
+            payload = self._workflow_plan(project_id, task_id, preparation)
+            if not payload or payload['digest'] != digest:
+                raise ApiError('refused', 'The lifecycle approval does not match the accepted code and commands')
+            directory = brain.workspace(task_id).parent / ('preparation-runs' if preparation else 'lifecycle-runs') / uuid.uuid4().hex
+            application = launch(payload, directory)
+            application['proposal_digest'] = task.get('digest') if preparation else None
+            task[key] = application
+            brain.store.save(task)
+            return application
 
     def op_tasks_tool_decision(self, project_id: str, task_id: str, request_id: str, decision: str, emit=None):
         """A protected tool request is single-use and bound to its task: the service refuses a

@@ -383,7 +383,7 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
             return None
         for _ in range(3):
             evidence = await asyncio.to_thread(
-                run_requirement_checks, workspace, checks, run_tests, self.image,
+                run_requirement_checks, workspace, checks, run_tests, self._test_image(task),
                 lambda: self.store.get(task["id"]).get("cancel_requested", False))
             self._count(task, "requirement_check_runs")
             if evidence.get("cancelled"):
@@ -527,6 +527,8 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                 context["engineering_packet"]["verified_external"] = external
         elif external:
             context = {**context, "verified_external": external}
+        from .local.lifecycle import evidence as workflow_evidence
+        context = {**context, 'project_workflow': workflow_evidence(workspace)}
         if self.project_knowledge:
             # Durable cross-agent project memory: reference data with provenance, never instructions.
             try:
@@ -581,7 +583,12 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
         try:
             proposal = Proposal.model_validate_json(raw)
         except ValueError as error:
-            raise ValueError("Implementer returned an invalid proposal: " + str(error)[:500]) from error
+            raise ProposalInvalid([Diagnostic(
+                "Proposal schema", "proposal", None, str(error)[:3000],
+                "Return corrected proposal JSON. Inspect project_workflow and select its documented "
+                "commands for the requested outcome. For an installed result choose target installed "
+                "and include apply followed by verify; for a running result include run followed by "
+                "verify. Preserve the requested source changes.")]) from error
         return self.store_proposal(task, workspace, proposal, "implementer")
 
     def store_proposal(self, task: dict, workspace: Path, proposal: Proposal, author: str) -> bool:
@@ -596,7 +603,8 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                        ", ".join(repaired))
         cumulative = {item["path"]: item for item in task.get("proposal", {}).get("changes", [])}
         cumulative.update({change.path: change.model_dump() for change in proposal.changes})
-        proposal = Proposal(plan=proposal.plan, changes=list(cumulative.values()))
+        lifecycle = proposal.lifecycle or task.get("proposal", {}).get("lifecycle")
+        proposal = Proposal(plan=proposal.plan, changes=list(cumulative.values()), lifecycle=lifecycle)
         diff, baseline = [], workspace.parent / "baseline"
         for change in proposal.changes:
             target = safe_path(workspace, change.path)
@@ -606,7 +614,7 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
             before = original.read_text(encoding="utf-8") if original.exists() else ""
             diff.extend(difflib.unified_diff(before.splitlines(True), change.content.splitlines(True),
                                              fromfile=change.path, tofile=change.path))
-        task["proposal"] = proposal.model_dump()
+        task["proposal"] = proposal.model_dump(exclude_none=True)
         task["digest"] = hashlib.sha256(json.dumps(task["proposal"], sort_keys=True).encode()).hexdigest()
         task["diff"] = "".join(diff)
         route = getattr(self.model, "last_route", lambda _task_id: None)(task["id"])
@@ -799,7 +807,7 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                                           before=proposal.changes[0].content)
         if diagnostics:
             raise ProposalInvalid(diagnostics, {change.path: change.content for change in effective})
-        return Proposal(plan=proposal.plan, changes=effective), repaired
+        return Proposal(plan=proposal.plan, changes=effective, lifecycle=proposal.lifecycle), repaired
 
     @staticmethod
     def _module_reader(workspace: Path, proposal: Proposal):
@@ -841,7 +849,7 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
             task = self.store.get(task_id)
             if task["status"] != "proposed" or task["digest"] != digest:
                 raise ValueError("Approval requires the current proposed digest")
-            if not task["proposal"]["changes"]:
+            if not task["proposal"]["changes"] and not (task["proposal"].get('lifecycle') or {}).get('steps'):
                 raise ValueError("Analysis-only proposal has no executable changes")
             task["status"] = "running"
             self.event(task, "approved", "Human authorized review, implementation, and testing")
@@ -854,6 +862,9 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                 self.advance_group(task["parent_id"])
             return task
 
+    def _test_image(self, task):
+        return (task.get('proposal', {}).get('lifecycle') or {}).get('sandbox_image') or self.image
+
     async def _execute_loop(self, task: dict):
         """Review, apply, and test; repair with the free worker, escalating to a supervisor only
         after repeated failures and within budget."""
@@ -861,6 +872,12 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
         failures, limit, attempt = 0, self.max_free_attempts, 0
         escalate_after = self.supervision.escalate_after if self.supervision else limit
         while True:
+            if (task.get('proposal', {}).get('lifecycle') or {}).get('preparation') and (
+                    task.get('lifecycle_preparation', {}).get('proposal_digest') != task.get('digest')):
+                task['status'] = 'proposed'
+                self.event(task, 'preparation_required',
+                           'The revised proposal needs separately approved environment preparation before testing')
+                return
             attempt += 1
             self._check_cancelled(task)
             with self.stage(task, "review", agent="reviewer", summary=f"Reviewing the diff (attempt {attempt})"):
@@ -883,7 +900,7 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                 with self.stage(task, "sandbox" if attempt == 1 else "retest", agent="sandbox",
                                 summary=f"Running the tests in the offline sandbox (attempt {attempt})"):
                     evidence = await asyncio.to_thread(
-                        run_tests, workspace, self.image,
+                        run_tests, workspace, self._test_image(task),
                         should_cancel=lambda: self.store.get(task_id).get("cancel_requested", False))
                 if evidence.get("cancelled"):
                     self._check_cancelled(task)
@@ -949,7 +966,7 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                                 "Tests the runner cannot find do not count: write test functions named test_* "
                                 "(Python) or test(...) calls in test files (Node), and do not claim tests exist "
                                 "when the output above shows none ran.")
-                elif evidence["exit_code"] in (None, 5, 125, 126, 127) or sandbox_error(evidence.get("output", "")):
+                elif evidence.get('infrastructure') or evidence["exit_code"] in (None, 5, 125, 126, 127) or sandbox_error(evidence.get("output", "")):
                     # Missing tests or sandbox problems are not the model's fault; never escalate them.
                     # Keep the reason ("Docker is not responding ...") so the user sees what to do.
                     task.setdefault("failures", []).append({"attempt": attempt, "category": "infrastructure"
@@ -997,7 +1014,7 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
         alone = []
         with self.stage(task, "repair", agent="sandbox", summary="Re-running each failing test alone (diagnosis)"):
             for node in failed:
-                result = await asyncio.to_thread(run_tests, workspace, self.image, only=[node])
+                result = await asyncio.to_thread(run_tests, workspace, self._test_image(task), only=[node])
                 if result.get("passed"):
                     alone.append(node)
         if not alone:
@@ -1105,7 +1122,8 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                                summary="Result accepted", dedupe=f"{task['id']}:accepted")
             if task.get("workspace_kind") == "git":
                 task["commit"] = await asyncio.to_thread(
-                    self.manager.commit, self.workspace(task_id), task_id
+                    self.manager.commit, self.workspace(task_id), task_id,
+                    allow_empty=bool((task['proposal'].get('lifecycle') or {}).get('steps'))
                 )
             parent_id = task.get("parent_id")
             if parent_id:

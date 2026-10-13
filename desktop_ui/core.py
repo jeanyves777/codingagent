@@ -53,6 +53,13 @@ def _summary(task: dict, kind: str) -> dict:
                 "summary": "Tests passed in the sandbox. Accept the result on a NEW Git branch?",
                 "tests_passed": bool(tests.get("passed")), "requirement": task.get("requirements") or "unchecked",
                 "diff": str(task.get("diff") or "")[:100000]}
+    if kind in {"lifecycle", "preparation"}:
+        lines = [task['plan']['outcome'], 'Build/run/apply the accepted code with these commands. '
+                 'Save unsaved edits before applying an application update.']
+        lines.extend(f"{s['stage']} ({s['environment']}): " + ' '.join(s['command']) + '\n' + s['reason']
+                     for s in task['resolved_commands'])
+        return {'kind': kind, 'task_id': task['task_id'], 'digest': task['digest'],
+                'summary': '\n\n'.join(lines), 'commands': task['resolved_commands']}
     return {"kind": kind, "task_id": task["id"], "summary": "The agent requests permission for a protected tool.",
             "request_id": task.get("pending_tool_approval")}
 
@@ -141,6 +148,36 @@ def _stopper(job, client, project_id):
     return stop
 
 
+async def run_project_workflow(job, client, project_id, task_id, plan, phase):
+    if not plan or not await wait_approval(job, phase, plan):
+        job.emit('output', 'Project commands were not authorized; the code and recorded plan are preserved.')
+        return 'blocked'
+    application = await asyncio.to_thread(client.call, f'tasks.{phase}_run',
+        {'project_id': project_id, 'task_id': task_id, 'digest': plan['digest']}, None, 60)
+    job.emit('stage', f'Project {phase} started. Receipt: ' + application['receipt'])
+    last_step = None
+    while True:
+        await asyncio.sleep(1)
+        try:
+            result = await asyncio.to_thread(client.call, f'tasks.{phase}_status',
+                {'project_id': project_id, 'task_id': task_id}, None, 60)
+        except EngineError:
+            job.emit('output', 'The app handed off its update. Relaunch after the worker finishes. '
+                     'The durable workflow receipt is ' + application['receipt'])
+            return 'handoff'
+        if result['status'] == 'failed':
+            job.emit('error', result.get('error', 'Project workflow failed'))
+            return 'failed'
+        if result['status'] == 'completed':
+            job.emit('output', 'Project workflow completed; recorded commands and verification steps passed.')
+            return 'completed'
+        steps = result.get('steps') or []
+        observed = [(s['stage'], s['status']) for s in steps]
+        if observed != last_step and steps:
+            job.emit('stage', f"Project workflow: {steps[-1]['stage']} {steps[-1]['status']}")
+            last_step = observed
+
+
 async def execute_goal(job):
     """Plan, show the proposal, apply and test only after approval, accept only after approval."""
     client = client_for(job)
@@ -170,12 +207,19 @@ async def execute_goal(job):
                 job.emit("error", "The engine that ran this task stopped; the task was interrupted and needs a retry.")
                 return "failed"
             if status == "proposed":
-                if not task.get("files"):
+                if not task.get("files") and not task.get('lifecycle'):
                     job.emit("output", str(task.get("plan") or "Analysis completed."))
                     return "completed"
                 allowed = await wait_approval(job, "proposal", task)
                 if not allowed and job.stop_requested.is_set():
                     continue  # stopped while the proposal was shown: cancelled above
+                if allowed and (task.get('lifecycle') or {}).get('preparation'):
+                    preparation = await asyncio.to_thread(client.call, 'tasks.preparation_plan',
+                        {'project_id': project_id, 'task_id': task['id']}, None, 60)
+                    outcome = await run_project_workflow(job, client, project_id, task['id'], preparation, 'preparation')
+                    if outcome != 'completed':
+                        job.emit('output', 'The code proposal is preserved; environment preparation must complete before testing.')
+                        return outcome
                 task = await activity.call(client, "tasks.approve", {
                     "project_id": project_id, "task_id": task["id"], "digest": task["digest"],
                     "decision": "approve" if allowed else "decline"})
@@ -189,6 +233,11 @@ async def execute_goal(job):
                 task = await activity.call(client, "tasks.accept", {"project_id": project_id, "task_id": task["id"]})
                 if task.get("branch"):
                     job.emit("output", "Accepted on new branch " + task["branch"] + ". Current branch unchanged.")
+                if task.get('lifecycle'):
+                    plan = await asyncio.to_thread(client.call, 'tasks.lifecycle_plan',
+                                                   {'project_id': project_id, 'task_id': task['id']}, None, 60)
+                    if plan:
+                        return await run_project_workflow(job, client, project_id, task['id'], plan, 'lifecycle')
                 return "completed"
             elif status == "awaiting_tool_approval":
                 request_id = task.get("pending_tool_approval")

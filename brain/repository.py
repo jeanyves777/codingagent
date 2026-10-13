@@ -2,7 +2,12 @@ from pathlib import Path
 import shutil
 
 EXCLUDED = {".git", ".venv", "venv", "node_modules", "__pycache__", "dist", "build"}
-SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".json", ".toml", ".md", ".txt", ".yaml", ".yml", ".css", ".html"}
+SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".toml", ".md", ".txt",
+            ".yaml", ".yml", ".css", ".html", ".go", ".rs", ".c", ".h", ".cpp", ".hpp", ".cc",
+            ".java", ".kt", ".cs", ".fs", ".rb", ".php", ".swift", ".dart", ".lua", ".sql",
+            ".scala", ".gradle", ".xml", ".properties", ".ini", ".cfg", ".cmake", ".sln", ".csproj",
+            ".fsproj", ".vbproj", ".vb", ".sh", ".ps1", ".cmd", ".bat", ".iss", ".spec", ".vue", ".svelte"}
+SOURCE_NAMES = {"Dockerfile", "Makefile", "Procfile", "CMakeLists.txt", "Gemfile"}
 MAX_FILE = 200_000
 MAX_TOTAL = 20_000_000
 PROTECTED = {"coding-brain.json"}
@@ -17,7 +22,7 @@ def safe_path(root: Path, name: str, allow_protected=False) -> Path:
         raise ValueError("Path is outside the allowed source tree")
     if path.as_posix() in PROTECTED and not allow_protected:
         raise ValueError("Path is controlled by the repository owner")
-    if path.suffix not in SUFFIXES:
+    if path.suffix not in SUFFIXES and path.name not in SOURCE_NAMES:
         raise ValueError("Unsupported source file type")
     current = root
     for part in path.parts:
@@ -41,7 +46,7 @@ def snapshot(source: Path, destination: Path) -> None:
                                  and d not in EXCLUDED and not (Path(base) / d).is_symlink())
         for name in sorted(files):
             file = Path(base) / name
-            if name.startswith(".") or file.suffix not in SUFFIXES or file.is_symlink():
+            if name.startswith(".") or (file.suffix not in SUFFIXES and file.name not in SOURCE_NAMES) or file.is_symlink():
                 continue
             # Explicitly exclude common credential containers, even with text suffixes.
             if any(word in name.lower() for word in ("secret", "credential", "private_key")):

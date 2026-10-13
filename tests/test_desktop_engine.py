@@ -104,6 +104,41 @@ def test_run_task_through_the_engine_with_explicit_approvals(world, desktop, mon
     assert [task["status"] for task in tasks] == ["accepted"]  # the engine's own record, not the UI's
 
 
+def test_accepted_workflow_requires_its_own_command_approval(world, desktop, monkeypatch):
+    http, headers, _ = desktop
+    brain = with_fake_brain(world, monkeypatch)
+    async def propose(repository, goal, memories, context):
+        return json.dumps({'plan': 'Fix x and apply', 'changes': [{'path': 'main.py', 'content': 'x = 2\n'}],
+            'lifecycle': {'outcome': 'Apply and verify', 'target': 'installed', 'steps': [
+                {'stage': stage, 'environment': 'local', 'command': ['${PYTHON}', '-c', 'print("done")'],
+                 'evidence': ['main.py'], 'reason': 'Use inspected project workflow'}
+                for stage in ('apply', 'verify')]}})
+    monkeypatch.setattr(brain.model, 'propose', propose)
+    from brain.local.lifecycle import worker
+    calls = []
+    def launch_now(payload, directory):
+        calls.append(payload)
+        directory.mkdir(parents=True)
+        request, receipt = directory / 'plan.json', directory / 'result.json'
+        request.write_text(json.dumps(payload))
+        assert worker(request, receipt) == 0
+        return {'receipt': str(receipt), 'digest': payload['digest'], 'status': 'starting'}
+    monkeypatch.setattr('brain.local.lifecycle.launch', launch_now)
+    job = http.post('/api/start', json={'message': 'Fix x and apply', 'mode': 'run'}, headers=headers).json()
+    for kind in ('proposal', 'accept', 'lifecycle'):
+        state = wait_for(http, headers, job['id'], lambda j: j['approval'] and j['approval']['kind'] == kind)
+        assert not calls
+        approval = state['job']['approval']
+        if kind == 'lifecycle':
+            assert [step['stage'] for step in approval['commands']] == ['apply', 'verify']
+        response = http.post(f"/api/jobs/{job['id']}/decision",
+            json={'allow': True, 'approval_id': approval['id']}, headers=headers)
+        assert response.status_code == 200
+    wait_for(http, headers, job['id'], lambda j: j['status'] == 'completed')
+    assert len(calls) == 1
+    assert (world['root'] / 'main.py').read_text() == 'x = 1\n'
+
+
 def test_declined_proposal_changes_nothing(world, desktop, monkeypatch):
     http, headers, _ = desktop
     with_fake_brain(world, monkeypatch)

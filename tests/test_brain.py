@@ -97,7 +97,12 @@ def test_path_denied(tmp_path, name):
 
 
 def test_symlink_denied(tmp_path):
-    (tmp_path / "link").symlink_to(tmp_path.parent, target_is_directory=True)
+    try:
+        (tmp_path / "link").symlink_to(tmp_path.parent, target_is_directory=True)
+    except OSError as error:
+        if getattr(error, 'winerror', None) == 1314:
+            pytest.skip('Windows symlink creation requires Developer Mode or elevated privileges')
+        raise
     with pytest.raises(ValueError):
         safe_path(tmp_path, "link/x.py")
 
@@ -480,7 +485,7 @@ def test_node_runner_selects_node_image(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", run)
     result = run_tests(tmp_path, {"python": "py-image", "node": "node-image"})
     assert result["passed"] and result["profile"] == "node"
-    assert "node-image" in commands[0] and commands[0][-4:] == ["npm", "test", "--", "--runInBand"]
+    assert "node-image" in commands[0] and commands[0][-2:] == ["npm", "test"]
 
 
 def test_evaluation_and_learning_export_require_verified_acceptance():
