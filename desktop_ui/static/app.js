@@ -157,10 +157,11 @@
     card.list.scrollTop = card.list.scrollHeight;
   }
 
-  function finishInlineActivity(status) {
+  function finishInlineActivity(status, kind = flow.kind) {
     if (!inlineActivity) return;
     inlineActivity.live = false;
-    inlineActivity.title.textContent = status === 'completed' ? 'Task completed' : `Task ${status}`;
+    inlineActivity.title.textContent = status === 'completed' ?
+      (kind === 'chat' ? 'Chat reply completed' : 'Task completed') : `${kind === 'chat' ? 'Chat' : 'Task'} ${status}`;
     inlineActivity.signal.textContent = 'Recorded activity is available below.';
   }
 
@@ -1555,7 +1556,7 @@
         'Engine update required for chat' : `Task ${job.status}`;
       tickTime();
       if (!running) {
-        finishInlineActivity(job.status);
+        finishInlineActivity(job.status, job.kind);
         if (streaming) finishStream(streaming.text);  // the reply ended without a final copy
         finishFlow(job);
         if (pollTimer) clearInterval(pollTimer);

@@ -32,6 +32,31 @@ class FakeModel:
         return self.replies.pop(0) if self.replies else f"(answer to: {text})"
 
 
+@pytest.mark.parametrize('name', ['calculator', 'recipes'])
+def test_selected_project_feature_and_scope_correction_offer_same_task(world, name):
+    model = FakeModel()
+    bot = assistant(world, model, interactive=False)
+    project = next(p for p in bot.projects() if p['name'] == name)
+    goal = 'I want to add chat history tab in the desktop UI'
+    result = bot.respond(goal, project['id'], 'project')
+    assert result['action']['kind'] == 'task'
+    assert result['action']['root'] == str(world['projects'][name])
+    assert result['action']['goal'] == goal
+    assert 'selected project ' + name in bot.folder_description()
+    followup = bot.respond('IN THE CURRENT PROJECT I HAVE OPEN ' + name, project['id'], 'project')
+    assert followup['action']['goal'] == goal
+    assert followup['action']['project_id'] == project['id']
+    assert no_tasks_anywhere(world)
+
+
+def test_explicit_other_project_takes_precedence_over_selection(world):
+    bot = assistant(world, FakeModel(), interactive=False)
+    selected = next(p for p in bot.projects() if p['name'] == 'calculator')
+    result = bot.respond('Fix the search function in recipes', selected['id'], 'project')
+    assert result['action']['root'] == str(world['projects']['recipes'])
+    assert no_tasks_anywhere(world)
+
+
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     home = tmp_path / "Users" / "Kkoff"

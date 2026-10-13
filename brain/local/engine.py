@@ -318,6 +318,8 @@ class Engine:
         from .assistant import ConversationLog
         with self.lock:
             ConversationLog(self.layout).reset(project_id)
+            if self._assistant is not None and (project_id is None or self._assistant.focus_id() == project_id):
+                self._assistant.proposed_task = None
             if self._assistant is not None and project_id is None:
                 self._assistant.focus = None
         return {"reset": True, "project_id": project_id}

@@ -51,9 +51,9 @@ with sync_playwright() as p:
 
     # Steps replace the bare "Thinking..." while the engine works.
     page.evaluate("window.__push('step', 'Understanding your request')")
-    page.locator('.typing-row .message-content', has_text='Understanding your request').wait_for()
+    page.locator('.inline-activity-heading', has_text='Understanding your request').wait_for()
     page.evaluate("window.__push('step', 'Writing the answer with qwen2.5-coder:7b')")
-    page.locator('.typing-row .message-content', has_text='Writing the answer').wait_for()
+    page.locator('.inline-activity-heading', has_text='Writing the answer').wait_for()
     assert 'Writing the answer' in page.locator('#status-label').inner_text()
 
     # The reply streams into one bubble...
@@ -68,6 +68,7 @@ with sync_playwright() as p:
     page.evaluate("window.__push('output', 'A **decorator** wraps a function: `@cache`'); window.__push('finish', 'Chat completed'); window.__demo.status = 'completed'")
     page.locator('.message-content .inline-code', has_text='@cache').wait_for()
     page.locator('.message.streaming').wait_for(state='detached')
+    page.wait_for_function("document.querySelector('.inline-activity-heading strong').textContent === 'Chat reply completed'")
     assistant = page.locator('.message.assistant').all_inner_texts()
     assert sum('A decorator wraps a function' in text for text in assistant) == 1, assistant
     assert page.locator('.activity-entry', has_text='wraps a function').count() == 1  # the final reply only; deltas are not logged
