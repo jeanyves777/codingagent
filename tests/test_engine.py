@@ -93,6 +93,15 @@ def test_schema_and_info():
     assert schema["operations"]["conversation.send"]["kind"] == "read"
 
 
+def test_new_conversation_drops_the_previous_task_offer(world):
+    engine = world['engine']
+    bot = engine.assistant()
+    bot.focus = world['project']
+    bot.proposed_task = 'An old request'
+    engine.call('conversation.reset', {'project_id': world['project']['id']})
+    assert bot.proposed_task is None
+
+
 def test_info_reports_versions_and_operations(world):
     info = world["engine"].call("engine.info")
     assert info["api_version"] == "1.0" and info["engine_version"] and "tasks.approve" in info["operations"]

@@ -337,6 +337,7 @@ class Assistant:
         self.pending: Pending | None = None
         self.scoping: dict | None = None  # a vague request waiting for the user's answers to scoping questions
         self.focus: dict | None = None  # the project the conversation is about
+        self.proposed_task = None  # conversational offer only; never execution authorization
         self.history = ConversationLog(self.layout)
         self.repository = current_repository(self.cwd)
 
@@ -345,6 +346,8 @@ class Assistant:
         return registry(self.layout)
 
     def folder_description(self) -> str:
+        if self.focus:
+            return f"{self.focus['root']} (selected project {self.focus['name']})"
         if self.repository:
             return f"{self.cwd} (inside the Git project {self.repository.name})"
         return f"{self.cwd} (not a project)"
@@ -356,6 +359,11 @@ class Assistant:
     # routing -------------------------------------------------------------------------------------------
     def route(self, message: str) -> Route:
         text = message.strip()
+        if self.focus and CHANGE.match(text) and not text.endswith('?'):
+            return Route('implement', 'rule', goal=text)
+        if self.focus and self.proposed_task and not text.endswith('?') and re.search(
+                r'(?i)\b(this|current|selected|open)\s+project\b|\bproject\b.*\b(open|selected)\b', text):
+            return Route('implement', 'context', goal=self.proposed_task)
         if GREETING.match(text):
             count = len([item for item in self.projects() if item["exists"]])
             return Route("chat", "rule", reply=(
@@ -563,6 +571,7 @@ class Assistant:
         self.last_context = None
         if scope == "global":
             self.focus = None  # the caller selected no project: never keep an earlier one in focus
+            self.proposed_task = None
         elif project_id:
             self.focus = next((item for item in self.projects() if item["id"] == project_id), self.focus)
         if not text:
@@ -624,11 +633,14 @@ class Assistant:
                     else:
                         result["action"] = {"kind": "task", "project_id": project["id"], "project": project["name"],
                                             "root": project["root"], "goal": route.goal or text}
+                        self.proposed_task = route.goal or text
                         result["needs"] = "confirmation"
                         self.say(f"Task for {project['name']} ({project['root']}): {route.goal or text}. "
                                  "Confirm to start it; nothing changes before you do.")
         finally:
             self.out = speak
+        if (result.get('action') or {}).get('kind') != 'task':
+            self.proposed_task = None
         result["reply"] = "\n".join(line for line in captured if not line.startswith("Say \"do it\""))
         result["context"] = self.last_context  # what the model saw this turn (None when it was not called)
         return result
