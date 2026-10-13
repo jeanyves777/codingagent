@@ -4,6 +4,7 @@ and the JSON-lines transport. Models and the sandbox are fakes here."""
 import io
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -324,7 +325,7 @@ def test_restart_recovers_from_the_journal_without_duplicates(world, monkeypatch
     engine, pid, layout = world["engine"], world["project"]["id"], world["layout"]
     brain = with_fake_brain(world, monkeypatch)
     task = engine.call("tasks.start", {"project_id": pid, "goal": "Fix x"})
-    dead = subprocess.Popen(["true"])
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
     dead.wait()
     stored = brain.store.get(task["id"])
     stored.update(status="testing", owner={**stored["owner"], "pid": dead.pid})

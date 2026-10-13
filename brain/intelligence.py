@@ -1,6 +1,7 @@
 """Structural repository index and call graph for Python, JavaScript, TypeScript, and TSX."""
 from dataclasses import dataclass, asdict
 from pathlib import Path
+import os
 from tree_sitter import Language, Parser
 import tree_sitter_javascript
 import tree_sitter_python
@@ -57,9 +58,15 @@ class Call:
 
 
 def _walk(node):
-    yield node
-    for child in node.children:
-        yield from _walk(child)
+    # Traverse without recursive Python calls or materializing child-node lists.
+    cursor = node.walk()
+    while True:
+        yield cursor.node
+        if cursor.goto_first_child():
+            continue
+        while not cursor.goto_next_sibling():
+            if not cursor.goto_parent():
+                return
 
 
 def _callee(node, source: bytes) -> str | None:
@@ -86,7 +93,16 @@ def _caller(node, source: bytes) -> str:
 
 def build_index(root: Path) -> dict:
     symbols, dependencies, calls, errors = [], [], [], []
-    for path in sorted(root.rglob("*")):
+    paths = []
+    for directory, folders, files in os.walk(root, followlinks=False):
+        # Prune before descending: rglob scanned every virtualenv/build artifact
+        # even though the files were discarded later.
+        folders[:] = sorted(name for name in folders
+                            if not name.startswith(".") and name not in EXCLUDED
+                            and not (Path(directory) / name).is_symlink())
+        paths.extend(Path(directory) / name for name in files
+                     if not name.startswith(".") and Path(name).suffix in LANGUAGES)
+    for path in sorted(paths):
         if not path.is_file() or path.is_symlink() or path.suffix not in LANGUAGES:
             continue
         relative = path.relative_to(root)
