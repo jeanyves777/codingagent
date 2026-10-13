@@ -183,6 +183,15 @@ try {
 
   if ($cmp -eq 0) {
     Write-Host "Installing verified Coding Brain backend $version..."
+    # Read recovery logic from the verified target wheel before invoking an older
+    # installed updater whose guard cannot distinguish crashed tasks from live work.
+    $wheelName = "coding_brain-$version-py3-none-any.whl"
+    if ($Channel -eq 'stable') { [void](Fetch-Asset $release $wheelName $source) }
+    $wheel = Verify-Asset $wheelName $source $sumFile
+    $recovery = Join-Path $PSScriptRoot 'Recover-CodingBrainTasks.py'
+    if (-not (Test-Path -LiteralPath $recovery -PathType Leaf)) { throw 'Task recovery helper is missing.' }
+    & $EnginePython -I $recovery --wheel $wheel --home $BrainHome
+    Fail-If-LastExit 'Task ownership recovery'
     if ($Channel -eq 'preview') {
       # The existing engine updater validates every wheel/constraints/release.json
       # against SHA256SUMS before installation; no GitHub Release tag is faked.

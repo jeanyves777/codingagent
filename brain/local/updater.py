@@ -22,7 +22,7 @@ from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
 from .paths import Layout
-from .session import active_sessions, pid_alive, running_tasks
+from .session import active_sessions, pid_alive, running_tasks, recover_interrupted_tasks
 
 REPOSITORY = "jeanyves777/codingagent"
 REQUIRED = ("release.json", "constraints.txt", "SHA256SUMS")
@@ -314,6 +314,7 @@ def _guard(layout: Layout):
     if sessions:
         raise UpdateError("A Coding Brain session is running (" + ", ".join(
             f"{item['project']} pid {item['pid']}" for item in sessions) + "); finish it, then update")
+    recover_interrupted_tasks(layout)
     tasks = running_tasks(layout)
     if tasks:
         raise UpdateError("Tasks are mid-execution: " + ", ".join(f"{t['project']}:{t['id'][:8]} ({t['status']})"

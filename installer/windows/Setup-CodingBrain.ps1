@@ -137,6 +137,13 @@ if ($older -eq '1') {
   Write-Note 'Newer installed engine passed the conversational API probe; preserving it.'
 } elseif ($newer -eq '1') {
   Write-Step "Updating the engine $installed -> $bundled (state is backed up; rollback with 'codingbrain rollback')"
+  $recovery = Join-Path $PSScriptRoot 'Recover-CodingBrainTasks.py'
+  $wheel = @(Get-ChildItem -LiteralPath $Bundle -File -Filter 'coding_brain-*.whl')
+  if ($wheel.Count -ne 1 -or -not (Test-Path -LiteralPath $recovery)) {
+    Finish 1 'Verified update recovery files are missing. No engine update was attempted.'
+  }
+  & $python -I $recovery --wheel $wheel[0].FullName --home $InstallDir
+  if ($LASTEXITCODE -ne 0) { Finish 1 'Live or unverified coding work still blocks the update.' }
   & $python -I -m brain.local update --source $Bundle --channel dev
   if ($LASTEXITCODE -ne 0) { Finish 1 'The bundled engine update failed. The desktop will not be opened as ready.' }
   $installed = (Get-Content -Raw -LiteralPath $current | ConvertFrom-Json).version
