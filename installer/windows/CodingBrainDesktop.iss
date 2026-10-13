@@ -81,7 +81,7 @@ begin
     '', SW_HIDE, ewWaitUntilTerminated, ExitCode) then
     Result := 'Unable to check whether Coding Brain Desktop is running. Close Coding Brain Desktop and retry Setup.'
   else if ExitCode <> 0 then begin
-    Result := 'Save your work and close Coding Brain Desktop, then click Retry. ' +
+    Result := 'Setup could not stop all processes using Coding Brain files. Close the listed processes and run Setup again. ' +
       'Setup has not updated any files.';
     if LoadStringFromFile(ReportPath, Details) then
       Result := Result + #13#10#13#10 + String(Details);
