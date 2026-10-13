@@ -100,6 +100,17 @@ with sync_playwright() as p:
     assert 28 <= percent < 100, percent
     assert page.locator('#run-progress').is_visible()
     assert page.locator('.stage.state-completed', has_text='Planning').count() == 1
+    # Actual engine activity is visible in the conversation, not only the side panel.
+    card = page.locator('.inline-activity').first
+    assert card.is_visible()
+    assert 'running tests' in card.locator('.inline-activity-heading').inner_text()
+    assert 'qwen2.5-coder:7b' in card.inner_text()
+    assert card.locator('.inline-activity-log li').count() == 6
+    assert page.locator('.typing-row').count() == 0
+    card.locator('summary').click()
+    assert not card.locator('.inline-activity-log').is_visible()
+    card.locator('summary').click()
+    assert card.locator('.inline-activity-log').is_visible()
 
     # Code display: fenced block with language, copy button and highlighting; inline code.
     block = page.locator('.message-content .code-block').first
@@ -111,9 +122,18 @@ with sync_playwright() as p:
     assert page.locator('.message-content script').count() == 0
     page.screenshot(path=str(output))
 
+    # Heartbeats report waiting without inventing new steps; failures remain visible inline.
+    page.evaluate("window.__demo.events.push({seq:8,kind:'heartbeat',message:'Request still in flight; no new output',at:1791662008,job_id:'j1'})")
+    page.wait_for_function("document.querySelector('.inline-activity-signal').textContent.includes('no new output')")
+    assert card.locator('.inline-activity-log li').count() == 6
+    page.evaluate("window.__demo.events.push({seq:9,kind:'stage',message:'Requirements request failed: ReadTimeout',at:1791662009,job_id:'j1',data:{event_type:'model_response',phase:'requirements',status:'FAILED'}})")
+    card.locator('.activity-failed', has_text='ReadTimeout').wait_for()
+
     # Completion fills the bar to 100 %.
-    page.evaluate("window.__demo.events.push({seq:8,kind:'finish',message:'done',at:1791662010,job_id:'j1'}); window.__demo.status='completed'")
+    page.evaluate("window.__demo.events.push({seq:10,kind:'finish',message:'done',at:1791662010,job_id:'j1'}); window.__demo.status='completed'")
     page.wait_for_function("document.getElementById('flow-percent').textContent === '100%'")
+    assert card.locator('.inline-activity-heading strong').inner_text() == 'Task completed'
+    assert card.locator('.inline-activity-log li').count() == 8
 
     # Reconnect: losing the bridge shows a live state and recovers by itself.
     page.evaluate('window.__demo.online = false')

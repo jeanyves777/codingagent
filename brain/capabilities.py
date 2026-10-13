@@ -42,7 +42,21 @@ class CapabilityRegistry:
         properties = item.parameters.get("properties", {})
         if any(key not in arguments for key in required) or any(key not in properties for key in arguments):
             raise ValueError("Capability arguments do not match schema")
-        return item.handler(arguments)
+        from .accounting import emit
+        import time
+        target = str(arguments.get('path', ''))[:200] if name == 'read_file' else ''
+        description = name + (': ' + target if target else '')
+        started = time.monotonic()
+        emit('tool', status='RUNNING', agent='implementer', summary='Inspecting ' + description)
+        try:
+            result = item.handler(arguments)
+        except Exception as error:
+            emit('tool', status='FAILED', agent='implementer', duration=time.monotonic() - started,
+                 summary=description + ' failed: ' + type(error).__name__)
+            raise
+        emit('tool', status='COMPLETED', agent='implementer', duration=time.monotonic() - started,
+             summary='Finished ' + description)
+        return result
 
 
 # Task-scoped, read-only capabilities (knowledge search, symbol lookup) set by the orchestrator

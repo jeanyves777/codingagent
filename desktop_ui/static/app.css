@@ -426,3 +426,16 @@ button.is-loading::before { content:'';display:inline-block;width:12px;height:12
 .ui-recommend{margin:9px 0 0;font-size:11.5px;color:#cfe7df;border-left:3px solid #5fbf9f;padding-left:9px}
 .ui-callout{border-left:4px solid #8ec5ff}.ui-callout p{margin:0;font-size:12px;color:#cfe0dc;line-height:1.55}
 .ui-callout.success{border-left-color:#5fbf9f}.ui-callout.warning{border-left-color:#e9b879}.ui-callout.danger{border-left-color:#f09a8c}
+/* Observable task activity stays inline with the conversation. */
+.inline-activity { min-width: 0; width: 100%; }
+.inline-activity-heading { display: flex; justify-content: space-between; gap: 20px; align-items: baseline; }
+.inline-activity-heading strong { font-size: 15px; overflow-wrap: anywhere; }
+.inline-activity-clock, .inline-activity-signal { color: var(--muted, #91aaa7); font-size: 12px; }
+.inline-activity-signal { margin: 8px 0 16px; }
+.inline-activity summary { cursor: pointer; color: #83dccb; font-size: 13px; padding: 8px 0; }
+.inline-activity-log { list-style: none; margin: 8px 0 0; padding: 0; max-height: 270px; overflow-y: auto; }
+.inline-activity-log li { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 12px; padding: 10px 0; border-top: 1px solid #29403f; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.inline-activity-log time, .inline-activity-log small { color: #91aaa7; font-size: 11px; }
+.inline-activity-log small { display: block; margin-top: 4px; }
+.inline-activity-log .activity-failed { color: #f0aaa0; }
+@media (max-width: 700px) { .inline-activity-heading { flex-direction: column; gap: 5px; } .inline-activity-log li { grid-template-columns: 70px minmax(0, 1fr); } }
