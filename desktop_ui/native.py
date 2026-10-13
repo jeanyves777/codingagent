@@ -82,6 +82,10 @@ class BridgeProcess:
     def _keep_stderr(self, line: str):
         self.stderr_tail = (self.stderr_tail + [line])[-40:]
 
+    def record_ownership(self, stop_owned: bool = False):
+        if self.child is not None and self.child.poll() is None:
+            record_process_ownership(self.root, self.child.pid, stop_owned=stop_owned)
+
     def start(self, timeout: int = 30) -> str:
         if self.child is not None:
             raise RuntimeError("Desktop service is already running")
@@ -114,6 +118,7 @@ class BridgeProcess:
             if type(port) is not int or not 1024 <= port <= 65535 or not isinstance(token, str) or len(token) < 32:
                 raise RuntimeError("Invalid desktop bridge handshake")
             self.address = f"http://127.0.0.1:{port}/#token={quote(token, safe='')}"
+            self.record_ownership()
             threading.Thread(target=self._drain, args=(self.child.stdout,), daemon=True).start()
             threading.Thread(target=self._drain, args=(self.child.stderr, self._keep_stderr), daemon=True).start()
             return self.address
@@ -169,12 +174,17 @@ class BridgeProcess:
 
     def stop(self):
         self.stopping.set()
+        try:
+            self.record_ownership(stop_owned=True)
+        except RuntimeError as error:
+            self._keep_stderr(str(error))  # Ownership recording must never prevent shutdown.
         child, self.child = self.child, None
         self.address = None
         if child is None:
             return
         if child.poll() is None:
-            child.terminate()
+            if child.poll() is None:
+                child.terminate()
             try:
                 child.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -184,6 +194,25 @@ class BridgeProcess:
             child.stdout.close()
         if child.stderr:
             child.stderr.close()
+
+
+def record_process_ownership(root: Path, child_pid: int, stop_owned: bool = False):
+    if os.name != 'nt' or not getattr(sys, 'frozen', False):
+        return
+    checker = root / 'desktop_ui' / 'Record-CodingBrainOwnership.ps1'
+    install = Path(sys.executable).resolve().parent
+    try:
+        command = ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', str(checker), '-InstallDir', str(install), '-DesktopPid', str(os.getpid()),
+            '-BridgePid', str(child_pid)]
+        if stop_owned:
+            command.append('-StopOwned')
+        result = subprocess.run(command, capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        if result.returncode:
+            raise RuntimeError('Could not register desktop process ownership: ' + result.stderr[-300:])
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError('Could not register desktop process ownership') from error
 
 
 def failure_page(reason: str) -> str:
@@ -198,6 +227,9 @@ def failure_page(reason: str) -> str:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Coding Brain native desktop workspace")
     parser.add_argument("--self-test", action="store_true", help="Check packaged files without launching GUI")
+    parser.add_argument("--ownership-probe-python", help=argparse.SUPPRESS)
+    parser.add_argument("--ownership-probe-dll", help=argparse.SUPPRESS)
+    parser.add_argument("--ownership-probe-ready", help=argparse.SUPPRESS)
     parser.add_argument("--url", help="Developer mode: open an existing local bridge")
     args = parser.parse_args(argv)
     try:
@@ -211,6 +243,25 @@ def main(argv=None) -> int:
             webview_available = importlib.util.find_spec("webview") is not None
             if getattr(sys, "frozen", False) and not webview_available:
                 raise RuntimeError("Native WebView dependency is missing from packaged executable")
+            if args.ownership_probe_python:
+                if os.name != 'nt' or not getattr(sys, 'frozen', False) or not args.ownership_probe_dll or not args.ownership_probe_ready:
+                    raise RuntimeError('Ownership probe requires the packaged Windows desktop and all probe arguments')
+                child = subprocess.Popen([args.ownership_probe_python, '-u', '-c',
+                    "import ctypes,sys,time; dll=ctypes.WinDLL(sys.argv[1]); print('LOADED',flush=True); time.sleep(120)",
+                    args.ownership_probe_dll], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW)
+                try:
+                    if child.stdout.readline().strip() != 'LOADED':
+                        raise RuntimeError('Ownership probe could not load the installed DLL')
+                    record_process_ownership(root, child.pid)
+                    Path(args.ownership_probe_ready).write_text(json.dumps({'pid': child.pid}), encoding='utf-8')
+                except BaseException:
+                    child.kill()
+                    child.wait(timeout=10)
+                    raise
+                finally:
+                    child.stdout.close()
+                    child.stderr.close()
             result = json.dumps({"native_assets": True, "root": str(root),
                                  "webview_available": webview_available})
             # A PyInstaller --windowed EXE has no stdout on Windows.
@@ -255,7 +306,7 @@ def main(argv=None) -> int:
         error = "Coding Brain Desktop: " + str(exc)
         if sys.stderr is not None:
             sys.stderr.write(error + "\n")
-        elif os.name == "nt":
+        elif os.name == "nt" and not args.self_test:
             try:
                 import ctypes
                 ctypes.windll.user32.MessageBoxW(None, error, "Coding Brain Desktop", 0x10)
