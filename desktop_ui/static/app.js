@@ -15,6 +15,7 @@
   let submitting = false;
   let polling = false;
   let typingRow = null;
+  let inlineActivity = null;
   let engineInfo = null;
   let engineNoticeDismissed = false;
   let engineRefresh = null;
@@ -98,7 +99,7 @@
 
   function showTyping() {
     if (typingRow) return;
-    const bubble = message('CODING BRAIN', 'Thinking…', 'assistant');
+    const bubble = message('CODING BRAIN', 'Starting…', 'assistant');
     typingRow = bubble.closest('.message');
     typingRow.classList.add('typing-row');
     typingRow.setAttribute('role','status');
@@ -110,12 +111,57 @@
 
   // The "Thinking" bubble names the step the engine reports (understanding, reading, writing).
   function typingStep(text) {
-    if (!typingRow) showTyping();
-    const content = typingRow.querySelector('.message-content');
-    const dots = content.querySelector('.typing-dots');
     chatStep = text;
-    content.replaceChildren(text + '…', ...(dots ? [dots] : []));
     $('status-label').textContent = text + '…';
+  }
+
+  function inlineActivityEvent(event) {
+    if (!['start','step','stage','decision','approval','error','finish','heartbeat'].includes(event.kind)) return;
+    hideTyping();
+    if (!inlineActivity) {
+      const content = message('CODING BRAIN · LIVE ACTIVITY', '', 'assistant');
+      content.classList.add('inline-activity');
+      const heading = document.createElement('div'); heading.className = 'inline-activity-heading';
+      const title = document.createElement('strong'); title.textContent = 'Starting the task';
+      const clock = document.createElement('span'); clock.className = 'inline-activity-clock';
+      heading.append(title, clock);
+      const signal = document.createElement('p'); signal.className = 'inline-activity-signal';
+      signal.setAttribute('role', 'status'); signal.setAttribute('aria-live', 'polite');
+      const details = document.createElement('details'); details.open = true;
+      const summary = document.createElement('summary'); summary.textContent = 'Activity log';
+      const list = document.createElement('ol'); list.className = 'inline-activity-log';
+      details.append(summary, list); content.append(heading, signal, details);
+      inlineActivity = {title, clock, signal, summary, list, count:0, started:Date.now(), updated:Date.now(), live:true};
+    }
+    const card = inlineActivity;
+    card.updated = Date.now();
+    if (event.kind === 'heartbeat' || event.data?.event_type === 'heartbeat') {
+      card.signal.textContent = event.message;
+      return;
+    }
+    card.signal.textContent = 'Receiving engine activity';
+    card.title.textContent = String(event.message).slice(0, 240);
+    const item = document.createElement('li');
+    const time = document.createElement('time');
+    const date = new Date((event.at || Date.now()/1000)*1000);
+    time.dateTime = date.toISOString(); time.textContent = date.toLocaleTimeString();
+    const text = document.createElement('div'); text.textContent = String(event.message).slice(0, 1500);
+    const metadata = [event.data?.agent, event.data?.provider, event.data?.model].filter(Boolean);
+    if (metadata.length) {
+      const owner = document.createElement('small'); owner.textContent = metadata.join(' · '); text.append(owner);
+    }
+    if (event.kind === 'error' || event.data?.status === 'FAILED') item.classList.add('activity-failed');
+    item.append(time, text); card.list.append(item); card.count++;
+    while (card.list.children.length > 80) card.list.firstChild.remove();
+    card.summary.textContent = `Activity log · ${card.count} updates`;
+    card.list.scrollTop = card.list.scrollHeight;
+  }
+
+  function finishInlineActivity(status) {
+    if (!inlineActivity) return;
+    inlineActivity.live = false;
+    inlineActivity.title.textContent = status === 'completed' ? 'Task completed' : `Task ${status}`;
+    inlineActivity.signal.textContent = 'Recorded activity is available below.';
   }
 
   function hideTyping() {
@@ -1324,6 +1370,7 @@
     WAITING_APPROVAL: 'Waiting for you', CANCELLED: 'Cancelled', PENDING: 'Pending'};
 
   function resetFlow(kind) {
+    inlineActivity = null; // Keep the previous task's recorded card in the conversation.
     flow = {kind, stages: {}, agents: {}, progress: kind === 'chat' ? 0 : 2, current: null, status: 'running'};
     renderFlow();
   }
@@ -1457,6 +1504,11 @@
   }
 
   function tickTime() {
+    if (inlineActivity?.live) {
+      const elapsed = Math.floor((Date.now() - inlineActivity.started)/1000);
+      const quiet = Math.floor((Date.now() - inlineActivity.updated)/1000);
+      inlineActivity.clock.textContent = `${Math.floor(elapsed/60)}m ${elapsed%60}s · update ${quiet}s ago`;
+    }
     if (activeJob && startedAt) {
       const seconds = Math.floor(Date.now() / 1000 - startedAt);
       $('status-time').textContent = Math.floor(seconds / 60) + 'm ' + String(seconds % 60).padStart(2, '0') + 's';
@@ -1478,6 +1530,7 @@
         if (displayedEvents.has(event.seq)) continue;
         displayedEvents.add(event.seq);
         if (event.kind === 'delta') { streamDelta(event.message); continue; }  // not an activity line
+        inlineActivityEvent(event);
         if (event.kind === 'step') typingStep(event.message);
         if (event.kind === 'context') { try { describeContext(JSON.parse(event.message)); } catch { /* older engine */ } continue; }
         if (event.kind === 'action') { try { showAction(JSON.parse(event.message)); } catch { /* malformed */ } continue; }
@@ -1502,6 +1555,7 @@
         'Engine update required for chat' : `Task ${job.status}`;
       tickTime();
       if (!running) {
+        finishInlineActivity(job.status);
         if (streaming) finishStream(streaming.text);  // the reply ended without a final copy
         finishFlow(job);
         if (pollTimer) clearInterval(pollTimer);
@@ -1537,6 +1591,7 @@
   }
 
   function endLostJob(text) {
+    finishInlineActivity('disconnected');
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = null;
     activeJob = null;

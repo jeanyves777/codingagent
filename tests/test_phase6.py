@@ -5,6 +5,20 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
+
+
+def test_file_inspection_reports_observable_activity_without_file_contents(tmp_path):
+    from brain.accounting import bind
+    from brain.capabilities import repository_capabilities
+    (tmp_path / 'main.py').write_text('private_file_contents = 1\n')
+    registry = repository_capabilities(tmp_path)
+    events = []
+    with bind(lambda event_type, **fields: events.append((event_type, fields))):
+        assert 'private_file_contents' in registry.invoke('read_file', {'path': 'main.py'})
+    assert [fields['status'] for _, fields in events] == ['RUNNING', 'COMPLETED']
+    assert all(event_type == 'tool' for event_type, _ in events)
+    assert 'main.py' in events[0][1]['summary']
+    assert 'private_file_contents' not in str(events)
 from brain import sandbox
 from brain.anthropic_model import AnthropicModel, FALLBACK_BETA
 from brain.factory import build_brain_from_env
