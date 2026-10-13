@@ -40,6 +40,7 @@ Source: "..\..\dist\CodingBrainDesktop\*"; DestDir: "{app}"; Flags: ignoreversio
 Source: "{#EngineBundle}\*"; DestDir: "{app}\engine"; Flags: ignoreversion
 Source: "Setup-CodingBrain.ps1"; DestDir: "{app}\engine"; Flags: ignoreversion
 Source: "Verify-CodingBrainEngine.py"; DestDir: "{app}\engine"; Flags: ignoreversion
+Source: "..\..\desktop_ui\Recover-CodingBrainTasks.py"; DestDir: "{app}\engine"; Flags: ignoreversion
 Source: "Setup-CodingBrain.cmd"; DestDir: "{app}\engine"; Flags: ignoreversion
 #endif
 

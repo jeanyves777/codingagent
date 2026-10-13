@@ -272,6 +272,9 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
         source = self.repository(task["repository"])
         workspace = self.workspace(task["id"])
         task["status"] = "planning"
+        # Persist ownership before Git/indexing can crash the process. Without it
+        # the updater cannot distinguish abandoned planning from live work.
+        task["owner"] = self.owner
         self.store.save(task)
         try:
             with self.stage(task, "project_validation", summary="Validating Git and preparing an isolated worktree"):

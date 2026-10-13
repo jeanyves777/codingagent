@@ -23,6 +23,7 @@ def package(installer: Path, desktop: Path, engine: Path, output: Path) -> None:
     engine_files = {p.name: p.read_bytes() for p in engine.iterdir() if p.is_file() and p.name != 'SHA256SUMS'}
     for name in ('Setup-CodingBrain.ps1', 'Setup-CodingBrain.cmd', 'Verify-CodingBrainEngine.py'):
         engine_files[name] = (ROOT / 'installer/windows' / name).read_bytes()
+    engine_files['Recover-CodingBrainTasks.py'] = (ROOT / 'desktop_ui/Recover-CodingBrainTasks.py').read_bytes()
     engine_files['SHA256SUMS'] = ''.join(
         f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, data in sorted(engine_files.items())).encode('ascii')
     files = {'CodingBrain-Setup.exe': installer.read_bytes()}
