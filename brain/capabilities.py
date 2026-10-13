@@ -63,6 +63,13 @@ def read_only(name: str, description: str, properties: dict, handler) -> Capabil
 
 def repository_capabilities(root) -> CapabilityRegistry:
     registry = CapabilityRegistry()
+    def workflow_evidence(_arguments):
+        import json
+        from .local.lifecycle import evidence
+        return json.dumps(evidence(root))
+    registry.register(read_only('project_workflow',
+        'Inspect manifests, build/run scripts and documentation to infer a workflow from the project and goal; '
+        'does not run commands or change files.', {}, workflow_evidence))
     definitions = [
         ("list_files", "List allowed source paths", {}),
         ("read_file", "Read an allowed source file", {"path": {"type": "string"}}),

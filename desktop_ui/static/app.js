@@ -1241,6 +1241,19 @@
       files.textContent = 'Proposed files: ' + details.files.join(', ');
       box.append(files);
     }
+    if (details?.commands?.length) {
+      for (const step of details.commands) {
+        const card = document.createElement('div');
+        const label = document.createElement('strong');
+        label.textContent = `${step.stage} · ${step.environment}`;
+        card.append(label, codeBlock(JSON.stringify(step.command, null, 2), 'json', {title:'Exact command arguments'}));
+        const evidence = document.createElement('p'); evidence.className = 'muted';
+        evidence.textContent = 'Based on: ' + (step.evidence || []).join(', ') +
+          (step.sandbox_image ? ' · Sandbox image: ' + step.sandbox_image : '');
+        card.append(evidence);
+        box.append(card);
+      }
+    }
     if (details?.diff) {
       const reveal = document.createElement('details');
       const summary = document.createElement('summary');

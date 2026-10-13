@@ -10,9 +10,12 @@ from pathlib import Path
 
 DEFAULTS = {
     "python": ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"],
-    "node": ["npm", "test", "--", "--runInBand"],
+    "node": ["npm", "test"],
+    "rust": ["cargo", "test"], "go": ["go", "test", "./..."],
+    "java": ["mvn", "test"], "dotnet": ["dotnet", "test"], "custom": ["make", "test"],
 }
-ALLOWED_EXECUTABLES = {"python", "pytest", "npm", "node", "npx", "pnpm", "yarn"}
+ALLOWED_EXECUTABLES = {"python", "pytest", "npm", "node", "npx", "pnpm", "yarn", "cargo", "go",
+                       "dotnet", "mvn", "gradle", "make", "cmake", "ctest", "ruby", "php"}
 
 
 def profile(workspace: Path) -> dict:
@@ -24,8 +27,13 @@ def profile(workspace: Path) -> dict:
         name = config.get("test_profile", "python")
         command = config.get("test_command", DEFAULTS.get(name))
     else:
-        name = "node" if (workspace / "package.json").exists() and not (workspace / "pyproject.toml").exists() else "python"
-        command = DEFAULTS[name]
+        from .local.project import commands
+        import shlex
+        declared = commands(workspace).get('test')
+        fallback = 'node' if (workspace / 'package.json').is_file() else 'python'
+        command = shlex.split(declared) if declared else DEFAULTS[fallback]
+        name = {'npm':'node', 'pnpm':'node', 'yarn':'node', 'cargo':'rust', 'go':'go',
+                'mvn':'java', 'gradle':'java', 'dotnet':'dotnet', 'make':'custom'}.get(command[0], 'python')
     if name not in DEFAULTS or not isinstance(command, list) or not 1 <= len(command) <= 20:
         raise ValueError("Invalid sandbox profile")
     if command[0] not in ALLOWED_EXECUTABLES or any(not isinstance(arg, str) or len(arg) > 300 for arg in command):
@@ -129,8 +137,9 @@ def run_tests(workspace: Path, images: str | dict, should_cancel=None, only=None
         selected = {**selected, "command": [*selected["command"], *only]}
     image = images if isinstance(images, str) else images.get(selected["name"])
     if not image:
-        return {"passed": False, "exit_code": None, "profile": selected["name"],
-                "output": "No sandbox image configured for profile"}
+        return {"passed": False, "exit_code": None, "profile": selected["name"], "infrastructure": True,
+                "output": "No sandbox image configured for detected profile " + selected['name'] +
+                          ". Prepare an image with the project's toolchain and dependencies before retrying."}
     name = "coding-brain-" + uuid.uuid4().hex
     command = ["docker", "run", "--rm", "--pull=never", "--name", name,
                "--network=none", "--read-only", "--cap-drop=ALL",
@@ -172,7 +181,7 @@ def run_tests(workspace: Path, images: str | dict, should_cancel=None, only=None
 BUILD_TIMEOUT = 300
 
 
-def run_build(workspace: Path, images: str | dict, command: list, output: Path) -> dict:
+def run_build(workspace: Path, images: str | dict, command: list, output: Path, timeout: int = BUILD_TIMEOUT) -> dict:
     """A frontend preview build in the same offline sandbox as the tests. The project stays
     read-only; the build may write only to /out (and a private /tmp)."""
     selected = profile(workspace)
@@ -196,7 +205,7 @@ def run_build(workspace: Path, images: str | dict, command: list, output: Path) 
               image, *command]
     with tempfile.TemporaryFile() as log:
         try:
-            code = subprocess.run(docker, stdout=log, stderr=subprocess.STDOUT, timeout=BUILD_TIMEOUT).returncode
+            code = subprocess.run(docker, stdout=log, stderr=subprocess.STDOUT, timeout=timeout).returncode
         except subprocess.TimeoutExpired:
             _remove(name)
             return {"passed": False, "output": "Preview build timed out"}

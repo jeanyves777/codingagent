@@ -48,7 +48,7 @@ def test_anthropic_tool_loop_uses_registry_and_fallbacks(tmp_path):
     first, second = messages.sent
     assert first["model"] == "claude-opus-5-5" and first["fallbacks"] == "default"
     assert first["betas"] == [FALLBACK_BETA]
-    assert {tool["name"] for tool in first["tools"]} == {"list_files", "read_file", "search"}
+    assert {tool["name"] for tool in first["tools"]} == {"list_files", "read_file", "search", "project_workflow"}
     results = second["messages"][-1]["content"]
     assert results[0]["tool_use_id"] == "call_1" and results[0]["content"] == "x = 1\n"
     assert not results[0]["is_error"]

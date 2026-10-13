@@ -1,5 +1,6 @@
 """Validated contracts for proposals and delegated task graphs."""
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing import Literal
 from .repository import MAX_FILE
 
 
@@ -9,10 +10,53 @@ class Change(BaseModel):
     content: str = Field(max_length=MAX_FILE)
 
 
+class LifecycleStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    stage: Literal['prepare', 'build', 'verify', 'apply', 'run']
+    environment: Literal['sandbox', 'local'] = 'sandbox'
+    command: list[str] = Field(min_length=1, max_length=40)
+    reason: str = Field(min_length=1, max_length=1000)
+    evidence: list[str] = Field(default_factory=list, max_length=12)
+    outputs: list[str] = Field(default_factory=list, max_length=12)
+    timeout: int = Field(default=300, ge=1, le=3600)
+    background: bool = False
+    sandbox_image: str | None = Field(default=None, max_length=200, pattern=r'^[A-Za-z0-9][A-Za-z0-9._/:@-]*$')
+
+
+class LifecyclePlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    outcome: str = Field(min_length=1, max_length=2000)
+    target: Literal['artifact', 'running', 'installed'] = 'artifact'
+    steps: list[LifecycleStep] = Field(default_factory=list, max_length=16)
+    preparation: list[LifecycleStep] = Field(default_factory=list, max_length=8)
+    sandbox_image: str | None = Field(default=None, max_length=200, pattern=r'^[A-Za-z0-9][A-Za-z0-9._/:@-]*$')
+
+    @model_validator(mode='after')
+    def complete_workflow(self):
+        if any(s.stage not in {'prepare', 'verify'} or s.background for s in self.preparation):
+            raise ValueError('Preparation may set up dependencies and verify them; it cannot apply or launch the result')
+        stages = [step.stage for step in self.steps]
+        if not stages:
+            return self
+        if self.target == 'artifact' and not any(s.stage == 'build' and s.outputs for s in self.steps):
+            raise ValueError('An artifact goal needs a build step with actual output file/directory paths')
+        if self.target == 'running' and 'run' not in stages:
+            raise ValueError('A running goal needs a run step')
+        if self.target == 'installed' and 'apply' not in stages:
+            raise ValueError('An installed goal needs an apply step; passing code tests does not install the result')
+        if self.target in {'running', 'installed'}:
+            action = 'run' if self.target == 'running' else 'apply'
+            index = stages.index(action)
+            if 'verify' not in stages[index + 1:]:
+                raise ValueError('The running/installed result needs a subsequent verification step')
+        return self
+
+
 class Proposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
     plan: str = Field(min_length=1, max_length=10_000)
     changes: list[Change] = Field(max_length=10)
+    lifecycle: LifecyclePlan | None = None
 
 
 class Assignment(BaseModel):

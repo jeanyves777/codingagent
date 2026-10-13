@@ -134,6 +134,8 @@ def classify_test_failure(evidence: dict) -> dict:
     output, code = evidence.get("output", ""), evidence.get("exit_code")
     if evidence.get("cancelled"):
         category = "cancelled"
+    elif evidence.get('infrastructure'):
+        category = 'infrastructure'
     elif code is None:
         category = "timeout" if "timed out" in output else "infrastructure"
     elif code in (125, 126, 127):

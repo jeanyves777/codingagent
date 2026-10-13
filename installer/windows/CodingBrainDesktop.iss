@@ -6,7 +6,12 @@
 #define CodingBrainVersion "0.1.0-preview"
 #endif
 ; dist\engine-bundle is produced by scripts/build_release.py from the same commit.
+#ifndef EngineBundle
 #define EngineBundle "..\..\dist\engine-bundle"
+#endif
+#ifndef DesktopBundle
+#define DesktopBundle "..\..\dist\CodingBrainDesktop"
+#endif
 #if FileExists(EngineBundle + "\release.json")
 #define WithEngine
 #endif
@@ -35,7 +40,7 @@ MinVersion=10.0
 
 [Files]
 Source: "Close-CodingBrainDesktop.ps1"; Flags: dontcopy
-Source: "..\..\dist\CodingBrainDesktop\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#DesktopBundle}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 #ifdef WithEngine
 Source: "{#EngineBundle}\*"; DestDir: "{app}\engine"; Flags: ignoreversion
 Source: "Setup-CodingBrain.ps1"; DestDir: "{app}\engine"; Flags: ignoreversion

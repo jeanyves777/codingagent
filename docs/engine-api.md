@@ -107,6 +107,22 @@ installed does not mean a provider is ready.
 
 ## Testing the contract
 
+Proposals can include a goal-derived `lifecycle` from inspected project manifests, documentation
+and scripts. No repository-name dispatch is used. `tasks.preparation_plan` shows dependency/toolchain
+commands before testing; `tasks.preparation_run` requires their exact digest and a separate approval.
+Preparation cannot change tracked project source, and its receipt is bound to the proposal digest.
+The task-specific `sandbox_image` applies to code and requirement tests.
+
+After passing tests and acceptance, `tasks.lifecycle_plan` resolves the build/verify/apply/run
+commands, evidence and output paths. `tasks.lifecycle_run` requires that plan's digest and starts
+a separate worker. `tasks.lifecycle_status` and `tasks.preparation_status` read durable receipts,
+including failed commands and artifact hashes, across engine restarts. Source identity is checked
+before execution and application; recorded artifact hashes are checked again before application.
+An installed outcome requires application followed by verification; a running outcome requires
+launch followed by verification. Neither a launched process nor passing code tests proves that an
+update was installed. Failed steps stop later commands. The desktop presents these command approvals
+separately from code acceptance.
+
 - `python -m pytest tests/test_engine.py`: the contract in-process, with fakes (validation,
   conversation that never executes, digest-bound single-use approval, two simultaneous tasks with
   separate live feeds, stop during a running sandbox over one stdio session, restart recovery).
