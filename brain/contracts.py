@@ -52,10 +52,29 @@ class LifecyclePlan(BaseModel):
         return self
 
 
+class Edit(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    path: str = Field(min_length=1, max_length=300)
+    old: str | None = Field(default=None, min_length=1, max_length=16000)
+    new: str = Field(max_length=16000)
+    start_line: int | None = Field(default=None, ge=1, le=1000000)
+    end_line: int | None = Field(default=None, ge=1, le=1000000)
+
+    @model_validator(mode='after')
+    def location(self):
+        if self.old is not None:
+            if self.start_line is not None or self.end_line is not None:
+                raise ValueError('Use an exact old snippet OR an inspected line range')
+        elif self.start_line is None or self.end_line is None or self.end_line < self.start_line:
+            raise ValueError('An edit requires a nonempty old snippet or a valid start_line/end_line range')
+        return self
+
+
 class Proposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
     plan: str = Field(min_length=1, max_length=10_000)
     changes: list[Change] = Field(max_length=10)
+    edits: list[Edit] = Field(default_factory=list, max_length=20)
     lifecycle: LifecyclePlan | None = None
 
 

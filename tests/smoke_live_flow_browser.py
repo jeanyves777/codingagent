@@ -122,15 +122,19 @@ with sync_playwright() as p:
     assert page.locator('.message-content script').count() == 0
     page.screenshot(path=str(output))
 
+    page.evaluate("window.__demo.events.push({seq:8,kind:'stage',message:'Received 120 output chunks, 480 characters',at:Date.now()/1000,job_id:'j1',data:{event_type:'model_progress',status:'RUNNING'}})")
+    page.wait_for_function("document.querySelector('.inline-activity-signal').textContent.includes('120 output chunks')")
+    assert card.locator('.inline-activity-log li').count() == 6  # Measurements do not bury stage history.
+
     # Heartbeats report waiting without inventing new steps; failures remain visible inline.
-    page.evaluate("window.__demo.events.push({seq:8,kind:'heartbeat',message:'Request still in flight; no new output',at:1791662008,job_id:'j1'})")
+    page.evaluate("window.__demo.events.push({seq:9,kind:'heartbeat',message:'Request still in flight; no new output',at:1791662008,job_id:'j1'})")
     page.wait_for_function("document.querySelector('.inline-activity-signal').textContent.includes('no new output')")
     assert card.locator('.inline-activity-log li').count() == 6
-    page.evaluate("window.__demo.events.push({seq:9,kind:'stage',message:'Requirements request failed: ReadTimeout',at:1791662009,job_id:'j1',data:{event_type:'model_response',phase:'requirements',status:'FAILED'}})")
+    page.evaluate("window.__demo.events.push({seq:10,kind:'stage',message:'Requirements request failed: ReadTimeout',at:1791662009,job_id:'j1',data:{event_type:'model_response',phase:'requirements',status:'FAILED'}})")
     card.locator('.activity-failed', has_text='ReadTimeout').wait_for()
 
     # Completion fills the bar to 100 %.
-    page.evaluate("window.__demo.events.push({seq:10,kind:'finish',message:'done',at:1791662010,job_id:'j1'}); window.__demo.status='completed'")
+    page.evaluate("window.__demo.events.push({seq:11,kind:'finish',message:'done',at:1791662010,job_id:'j1'}); window.__demo.status='completed'")
     page.wait_for_function("document.getElementById('flow-percent').textContent === '100%'")
     assert card.locator('.inline-activity-heading strong').inner_text() == 'Task completed'
     assert card.locator('.inline-activity-log li').count() == 8

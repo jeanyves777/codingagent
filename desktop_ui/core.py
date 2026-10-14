@@ -119,8 +119,8 @@ class Activity:
     def _heartbeat(self):
         while not self.closed.wait(1):
             if self.busy.is_set() and time.monotonic() - self.last >= self.quiet:
-                self.job.emit("heartbeat", f"Still working ({self.job.status}); no new engine event for "
-                                           f"{int(time.monotonic() - self.last)}s")
+                self.job.emit("heartbeat", f"Waiting for an engine update ({self.job.status}); last received event "
+                                           f"{int(time.monotonic() - self.last)}s ago")
                 self.last = time.monotonic()
 
     async def call(self, client, op, params, timeout=None):

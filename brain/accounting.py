@@ -51,6 +51,7 @@ class request:
     async def __aenter__(self):
         import asyncio
         self.started = time.monotonic()
+        self.observed = None
         emit("model_request", status="RUNNING", agent=self.agent, provider=self.provider, model=self.model,
              summary=self.summary or f"{self.role} request", data={"role": self.role})
         self._beat = asyncio.ensure_future(self._heartbeat()) if SINK.get() is not None else None
@@ -60,18 +61,22 @@ class request:
         import asyncio
         while True:
             await asyncio.sleep(HEARTBEAT_SECONDS)
+            detail = (f"{self.observed['chunks']} output chunks, {self.observed['characters']} characters; "
+                      f"last output {int(time.monotonic()-self.observed['last_output'])}s ago") if self.observed else 'no output measurements yet'
             emit("heartbeat", status="RUNNING", agent=self.agent, provider=self.provider, model=self.model,
                  duration=time.monotonic() - self.started,
-                 summary=f"{self.role} request in flight for {int(time.monotonic() - self.started)} s",
+                 summary=f"{self.role} request open for {int(time.monotonic() - self.started)}s; {detail}",
                  data={"role": self.role})
 
     async def __aexit__(self, kind, error, traceback):
+        import asyncio
         if self._beat:
             self._beat.cancel()
         failed = kind is not None
-        emit("model_response", status="FAILED" if failed else "COMPLETED", agent=self.agent, provider=self.provider,
+        cancelled = kind is not None and issubclass(kind, asyncio.CancelledError)
+        emit("model_response", status="CANCELLED" if cancelled else "FAILED" if failed else "COMPLETED", agent=self.agent, provider=self.provider,
              model=self.model, duration=time.monotonic() - self.started,
-             summary=(f"{self.role} request failed: {kind.__name__}: {str(error)[:300]}" if failed
+             summary=(f"{self.role} request cancelled" if cancelled else f"{self.role} request failed: {kind.__name__}: {str(error)[:300]}" if failed
                       else f"{self.role} response received"), data={"role": self.role})
         return False
 
@@ -79,7 +84,7 @@ class request:
 def record(entry_type: str, /, **fields):
     """Report one event: inference, route, fallback, or escalation. A no-op outside collection."""
     if entry_type in {"inference", "fallback", "escalation", "route"}:
-        emit(entry_type, status="COMPLETED" if entry_type != "fallback" else "RETRYING",
+        emit(entry_type, status="FAILED" if fields.get('ok') is False else "COMPLETED" if entry_type != "fallback" else "RETRYING",
              agent=AGENTS.get(fields.get("role", ""), fields.get("role")), provider=fields.get("provider"),
              model=fields.get("model") or fields.get("to"), summary=_describe(entry_type, fields), data=fields)
     log = INFERENCE_LOG.get()

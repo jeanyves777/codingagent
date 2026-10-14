@@ -131,11 +131,12 @@
       const summary = document.createElement('summary'); summary.textContent = 'Activity log';
       const list = document.createElement('ol'); list.className = 'inline-activity-log';
       details.append(summary, list); content.append(heading, signal, details);
-      inlineActivity = {title, clock, signal, summary, list, count:0, started:Date.now(), updated:Date.now(), live:true};
+      inlineActivity = {title, clock, signal, summary, list, count:0, started:startedAt ? startedAt*1000 : Date.now(), updated:Date.now(), live:true};
     }
     const card = inlineActivity;
-    card.updated = Date.now();
-    if (event.kind === 'heartbeat' || event.data?.event_type === 'heartbeat') {
+    card.updated = Math.min(Date.now(), (event.at || Date.now()/1000)*1000);
+    if (event.kind === 'heartbeat' || event.data?.event_type === 'heartbeat' ||
+        (event.data?.event_type === 'model_progress' && event.data?.status === 'RUNNING')) {
       card.signal.textContent = event.message;
       return;
     }

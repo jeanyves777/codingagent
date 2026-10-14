@@ -8,6 +8,7 @@ import re
 import shutil
 import time
 import uuid
+import httpx
 from datetime import datetime, timezone
 from pathlib import Path
 from . import accounting
@@ -320,6 +321,8 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
                 raw = await self.model.propose(workspace, requirement_goal(task), [], context)
         except Exception as error:
             self.record_usage(task, started, before)
+            if isinstance(error, (TimeoutError, httpx.TimeoutException)):
+                raise  # A stalled model is not successful requirement generation; stop this task.
             self.event(task, "requirement_checks_skipped", f"{type(error).__name__}: {str(error)[:300]}")
             return
         after = self.usage_counters()
@@ -592,6 +595,51 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
         return self.store_proposal(task, workspace, proposal, "implementer")
 
     def store_proposal(self, task: dict, workspace: Path, proposal: Proposal, author: str) -> bool:
+        if proposal.edits:
+            patched = {change.path: change.content for change in proposal.changes}
+            modes = {}
+            occupied = {}
+            for edit in sorted(proposal.edits, key=lambda item: (item.path, -(item.start_line or 0))):
+                if edit.path in {change.path for change in proposal.changes}:
+                    raise ProposalInvalid([Diagnostic('Edit', edit.path, None,
+                        'Do not mix replacements and edits for the same file', 'Use one representation')])
+                content = patched.get(edit.path)
+                if content is None:
+                    try:
+                        content = safe_path(workspace, edit.path).read_text(encoding='utf-8')
+                    except (OSError, ValueError) as error:
+                        raise ProposalInvalid([Diagnostic('Edit', edit.path, None,
+                            'The edit target is missing or not an allowed source file',
+                            'Inspect an existing allowed source file; use changes for a new file')]) from error
+                mode = 'snippet' if edit.old is not None else 'lines'
+                if edit.path in modes and modes[edit.path] != mode:
+                    raise ProposalInvalid([Diagnostic('Edit', edit.path, None,
+                        'Do not mix line ranges and snippets for one file', 'Use one representation per file')])
+                modes[edit.path] = mode
+                if edit.old is None:
+                    lines = content.splitlines(True)
+                    if edit.end_line > len(lines) or any(edit.start_line <= end and edit.end_line >= start
+                            for start,end in occupied.get(edit.path, [])):
+                        raise ProposalInvalid([Diagnostic('Edit', edit.path, edit.start_line,
+                            'Line range is out of bounds or overlaps another edit', 'Inspect and select disjoint existing lines')],
+                            {edit.path: content})
+                    occupied.setdefault(edit.path, []).append((edit.start_line, edit.end_line))
+                    replacement = edit.new
+                    if replacement and lines[edit.end_line-1].endswith('\n') and not replacement.endswith('\n'):
+                        replacement += '\n'
+                    patched[edit.path] = ''.join(lines[:edit.start_line-1]) + replacement + ''.join(lines[edit.end_line:])
+                    continue
+                if content.count(edit.old) != 1:
+                    first = edit.old.splitlines()[0].strip()
+                    lines = content.splitlines()
+                    closest = difflib.get_close_matches(first, [line.strip() for line in lines], n=1, cutoff=.5)
+                    line_number = next((i+1 for i,line in enumerate(lines) if closest and line.strip() == closest[0]), None)
+                    raise ProposalInvalid([Diagnostic('Edit', edit.path, line_number,
+                        'The old snippet must match exactly once', 'Read the relevant file lines and use a unique exact snippet')],
+                        {edit.path: content})
+                patched[edit.path] = content.replace(edit.old, edit.new, 1)
+            proposal = Proposal(plan=proposal.plan, changes=[{'path': p, 'content': c} for p,c in patched.items()],
+                                lifecycle=proposal.lifecycle)
         paths = [change.path for change in proposal.changes]
         if len(paths) != len(set(paths)):
             raise ValueError("Duplicate changed paths")
@@ -615,6 +663,7 @@ class Brain(ActivityMixin, OrchestrationMixin, SupervisionMixin, PublishingMixin
             diff.extend(difflib.unified_diff(before.splitlines(True), change.content.splitlines(True),
                                              fromfile=change.path, tofile=change.path))
         task["proposal"] = proposal.model_dump(exclude_none=True)
+        task['proposal'].pop('edits', None)  # Edits were materialized and validated; retain the stable stored contract.
         task["digest"] = hashlib.sha256(json.dumps(task["proposal"], sort_keys=True).encode()).hexdigest()
         task["diff"] = "".join(diff)
         route = getattr(self.model, "last_route", lambda _task_id: None)(task["id"])
