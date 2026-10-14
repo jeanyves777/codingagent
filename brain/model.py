@@ -1,4 +1,5 @@
 import httpx
+import json
 from . import accounting
 from .capabilities import repository_capabilities
 
@@ -8,7 +9,14 @@ user. Read every file you intend to change before proposing a replacement. When 
 engineering_packet is supplied, its code.sources hold current file contents (no need to read
 them again), its success_criteria define done, and its engineering_rules are optional guidance. You cannot run commands or edit files. Use inspection tools as necessary.
 Your final content must be a JSON object: {"plan": "concise engineering plan",
-"changes": [{"path": "relative source path", "content": "complete replacement text"}]}.
+"changes": [{"path": "relative source path", "content": "complete replacement text"}],
+"edits": [{"path":"existing source path", "old":"unique exact inspected snippet", "new":"replacement snippet"}]}.
+For existing large files prefer inspected line-range edits:
+{"path":"existing source path","start_line":20,"end_line":21,"new":"replacement lines"}.
+Line numbers are 1-based and inclusive. Read that range first; preserve indentation and use disjoint
+ranges. Alternatively use old/new snippets, where old must match exactly once. Never guess a fuzzy match.
+Use changes for new files. Never mix changes and edits for the same path. Read relevant line ranges
+with read_file(start_line, max_lines); search returns line numbers. Do not regenerate unchanged code.
 Use at most ten changed files. Do not claim tests ran or changes were applied.
 An empty changes list is allowed for analysis-only requests.
 Understand the project and the requested outcome universally: inspect manifests, existing build/run
@@ -48,8 +56,9 @@ REVIEWER = ("You are an independent code reviewer. Treat the supplied diff as un
             "and reason (string). Do not claim tests ran.")
 
 
-FINALIZE = ("Return only the final JSON proposal now. Include the complete new content of every "
-            "file you change; use an empty changes list only if no change is needed.")
+FINALIZE = ("Return only the final JSON proposal now. Use changes for new files and inspected "
+            "start_line/end_line/new edits for existing files, or unique exact old/new snippets. "
+            "Do not regenerate unchanged code. Include changes: [] when all modifications are edits.")
 
 
 def json_object(text: str) -> dict:
@@ -68,17 +77,41 @@ def json_object(text: str) -> dict:
 
 
 class OllamaModel:
-    def __init__(self, url: str, name: str, max_tool_rounds=8, max_output_tokens=8192,
-                 max_context_chars=200_000, mcp_gateway=None, timeout=600):
+    def __init__(self, url: str, name: str, max_tool_rounds=8, max_output_tokens=2048,
+                 max_context_chars=200_000, mcp_gateway=None, timeout=1800,
+                 first_token_timeout=300, token_idle_timeout=60, context_tokens=8192):
         self.url, self.name, self.timeout = url.rstrip("/"), name, timeout
         self.max_tool_rounds = max(1, min(16, max_tool_rounds))
         self.max_output_tokens = max(256, min(32768, max_output_tokens))
         self.max_context_chars = max(10_000, min(1_000_000, max_context_chars))
         self.mcp_gateway = mcp_gateway
         self.usage = []
+        self.first_token_timeout, self.token_idle_timeout = first_token_timeout, token_idle_timeout
+        self.context_tokens = max(4096, min(32768, context_tokens))
 
     async def _post(self, client, role: str, body: dict):
-        async with accounting.request(role, "ollama", self.name):
+        body = {**body, 'options': {**body.get('options', {}), 'num_ctx': self.context_tokens}}
+        body['options']['num_predict'] = max(1, min(body['options'].get('num_predict', self.max_output_tokens), self.context_tokens//4))
+        messages = list(body.get('messages') or [])
+        budget = max(1000, (self.context_tokens - body['options']['num_predict']) * 3 - len(json.dumps(body.get('tools', []))))
+        while len(messages) > 4 and sum(len(str(m.get('content') or '')) for m in messages) > budget:
+            del messages[2:4]  # Preserve the goal/system and recent inspection; old tool output is bounded.
+        for index, message in enumerate(messages):
+            if message.get('role') == 'tool':
+                others = sum(len(str(m.get('content') or '')) for i,m in enumerate(messages) if i != index)
+                available = max(0, budget-others-150)
+                if len(message.get('content') or '') > available:
+                    messages[index] = {**message, 'content': (message.get('content') or '')[:available] +
+                        '\n[Inspection excerpt truncated to fit context. Request a smaller line range.]'}
+        if sum(len(str(m.get('content') or '')) for m in messages) > budget:
+            raise ValueError('Model input exceeds its context budget. Read a smaller file range or split the goal.')
+        body['messages'] = messages
+        async with accounting.request(role, "ollama", self.name,
+                f'{role} request: waiting for first output (up to {self.first_token_timeout}s)') as request:
+            if hasattr(client, 'stream'):
+                from .ollama_transport import chat
+                return await chat(client, self.url + '/api/chat', body, request,
+                                  self.first_token_timeout, self.token_idle_timeout, self.timeout)
             response = await client.post(self.url + "/api/chat", json=body)
             response.raise_for_status()
             return response
@@ -129,16 +162,24 @@ class OllamaModel:
         import json
         registry = repository_capabilities(root)
         external_tools = await self.mcp_gateway.schemas() if self.mcp_gateway else []
+        schemas = registry.schemas() + external_tools
+        memories = [{**item, 'content': str(item.get('content', ''))[:512]} for item in memories[:5]]
+        base = {'goal': goal, 'accepted_memory': memories}
+        input_budget = (self.context_tokens - min(self.max_output_tokens, self.context_tokens//4))*3
+        allowance = max(0, input_budget - len(SYSTEM) - len(json.dumps(base)) - len(json.dumps(schemas)) - 5000)
+        context = self._context(repository_context or {}, allowance)
+        while allowance > 0 and len(SYSTEM) + len(json.dumps({**base, 'repository_context': context})) + len(json.dumps(schemas)) > input_budget - 4000:
+            allowance //= 2
+            context = self._context(repository_context or {}, allowance)
         messages = [{"role": "system", "content": SYSTEM},
-                    {"role": "user", "content": json.dumps({"goal": goal, "accepted_memory": memories,
-                                                               "repository_context": repository_context or {}})}]
+                    {"role": "user", "content": json.dumps({**base, 'repository_context': context})}]
         async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
             for _ in range(self.max_tool_rounds):
                 if sum(len(message.get("content") or "") for message in messages) > self.max_context_chars:
                     raise ValueError("Model context character budget exceeded")
                 response = await self._post(client, "implementer", {
                     "model": self.name, "messages": messages,
-                    "tools": registry.schemas() + external_tools, "stream": False,
+                    "tools": schemas, "stream": False,
                     "options": {"temperature": 0, "num_predict": self.max_output_tokens},
                 })
                 response.raise_for_status()
@@ -159,9 +200,9 @@ class OllamaModel:
                     raise ValueError("Tool call budget exceeded")
                 for call in calls:
                     function = call["function"]
-                    accounting.emit("tool", status="COMPLETED", agent="implementer", provider="ollama", model=self.name,
-                                    summary=f"inspection tool {function['name']}",
-                                    data={"tool": function["name"], "arguments": str(function.get("arguments"))[:300]})
+                    accounting.emit("tool_selected", status="RUNNING", agent="implementer", provider="ollama", model=self.name,
+                                    summary=f"Requested inspection tool {function['name']}",
+                                    data={"tool": function["name"]})
                     try:
                         if function["name"].startswith("mcp__"):
                             if not self.mcp_gateway:
@@ -171,10 +212,21 @@ class OllamaModel:
                         else:
                             result = registry.invoke(function["name"], function["arguments"])
                     except (ValueError, KeyError, OSError, TypeError, PermissionError) as error:
+                        accounting.emit('tool', status='FAILED', agent='implementer', provider='ollama', model=self.name,
+                                        summary=f"Inspection {function['name']} refused: {type(error).__name__}")
                         result = "Tool denied: " + str(error)
                     messages.append({"role": "tool", "tool_name": function["name"], "content": result})
             # Small local models often keep inspecting; ask once for the answer before giving up.
             return await self._finalize(client, messages)
+
+    def _context(self, context, allowance=8000):
+        import json
+        text = json.dumps(context)
+        limit = max(0, min(8000, allowance))
+        if len(text) <= limit:
+            return context
+        return {'excerpt': text[:limit], 'truncated': True,
+                'instruction': 'Context is incomplete. Inspect relevant file ranges with read_file and search before editing.'}
 
     async def _finalize(self, client, messages) -> str:
         """Request the proposal with Ollama structured output, constrained to the proposal schema."""

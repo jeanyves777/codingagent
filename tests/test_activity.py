@@ -47,7 +47,7 @@ class FakeOllama:
                 time.sleep(owner.delay)
                 body = json.dumps({"model": "fake-coder:7b", "message": {"role": "assistant",
                                                                         "content": json.dumps(reply)},
-                                   "prompt_eval_count": 1234, "eval_count": 56}).encode()
+                                   "prompt_eval_count": 1234, "eval_count": 56, "done": True}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))

@@ -52,7 +52,7 @@ KINDS = {
     "project_memory_unavailable": ("memory", "FAILED", "coding_brain"), "proposal_failed": ("proposal", "FAILED", "implementer"),
     "published": ("acceptance", "COMPLETED", "coding_brain"),
     "requirement_checks_written": ("requirements", "COMPLETED", "implementer"),
-    "requirement_checks_skipped": ("requirements", "COMPLETED", "implementer"),
+    "requirement_checks_skipped": ("requirements", "SKIPPED", "implementer"),
     "requirement_checks_rejected": ("requirements", "FAILED", "coding_brain"),
     "requirement_checks_discarded": ("completion_verification", "COMPLETED", "coding_brain"),
     "requirement_checks_failed": ("completion_verification", "FAILED", "coding_brain"),
@@ -120,8 +120,11 @@ class ActivityMixin:
                                summary=f"{PHASES.get(phase, phase)} failed: {type(error).__name__}: {str(error)[:400]}")
             raise
         else:
-            self.journal_event(task, "stage", phase=phase, status="COMPLETED", agent=agent,
-                               duration=time.monotonic() - started, summary=f"{PHASES.get(phase, phase)} done")
+            skipped = phase == 'requirements' and not task.get('requirement_tests')
+            self.journal_event(task, "stage", phase=phase, status="SKIPPED" if skipped else "COMPLETED", agent=agent,
+                               duration=time.monotonic() - started,
+                               summary='Requirement checks were not generated; goal verification is unchecked' if skipped
+                                       else f"{PHASES.get(phase, phase)} done")
         finally:
             PHASE.reset(token)
 

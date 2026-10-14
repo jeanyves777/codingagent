@@ -67,9 +67,12 @@ def snapshot(source: Path, destination: Path) -> None:
 def inspect(root: Path, tool: str, arguments: dict) -> str:
     files = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
     if tool == "list_files":
-        return "\n".join(files)[:16_000]
+        return "\n".join(files)[:4000]
     if tool == "read_file":
-        return safe_path(root, arguments["path"]).read_text(encoding="utf-8")[:16_000]
+        start, count = arguments.get('start_line', 1), arguments.get('max_lines', 120)
+        if type(start) is not int or type(count) is not int or start < 1 or not 1 <= count <= 200:
+            raise ValueError('Invalid file line range')
+        return ''.join(safe_path(root, arguments['path']).read_text(encoding='utf-8').splitlines(True)[start-1:start-1+count])[:4000]
     if tool == "search":
         query = arguments["query"]
         if not isinstance(query, str) or not query or len(query) > 200:
@@ -78,7 +81,7 @@ def inspect(root: Path, tool: str, arguments: dict) -> str:
         for name in files:
             try:
                 lines = safe_path(root, name).read_text(encoding="utf-8").splitlines()
-            except UnicodeError:
+            except (UnicodeError, ValueError, OSError):
                 continue
             for number, line in enumerate(lines, 1):
                 if query in line:
