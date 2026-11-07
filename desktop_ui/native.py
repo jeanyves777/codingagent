@@ -207,8 +207,11 @@ def record_process_ownership(root: Path, child_pid: int, stop_owned: bool = Fals
             '-BridgePid', str(child_pid)]
         if stop_owned:
             command.append('-StopOwned')
+        # Started from PowerShell 7 (pwsh), the inherited PSModulePath points Windows PowerShell 5.1
+        # at modules it cannot load, and Get-FileHash disappears. Let it build its own default.
+        env = {key: value for key, value in os.environ.items() if key.upper() != 'PSMODULEPATH'}
         result = subprocess.run(command, capture_output=True, text=True, timeout=15,
-            creationflags=subprocess.CREATE_NO_WINDOW)
+            creationflags=subprocess.CREATE_NO_WINDOW, env=env)
         if result.returncode:
             raise RuntimeError('Could not register desktop process ownership: ' + result.stderr[-300:])
     except (OSError, subprocess.TimeoutExpired) as error:
