@@ -117,6 +117,8 @@
 
   function inlineActivityEvent(event) {
     if (!['start','step','stage','decision','approval','error','finish','heartbeat'].includes(event.kind)) return;
+    // A finish with no earlier activity (a plain chat reply) has nothing to record; don't add an empty card.
+    if (event.kind === 'finish' && !inlineActivity) return;
     hideTyping();
     if (!inlineActivity) {
       const content = message('CODING BRAIN · LIVE ACTIVITY', '', 'assistant');

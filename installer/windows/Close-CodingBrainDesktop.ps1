@@ -65,11 +65,19 @@ try {
         } catch { return $false }
         return $false
     }
+    # A DLL loaded through a short (8.3) path is listed in that form, while GetFullPath
+    # expands the install root to its long form; compare both in the long form.
+    function Get-LongForm($path) {
+        if ($path -and $path.Contains('~')) {
+            try { return [IO.Path]::GetFullPath($path) } catch { }
+        }
+        return $path
+    }
     function Get-InstalledProcesses {
         $script:processInfo = @{}
         Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object { $script:processInfo[[int]$_.ProcessId] = $_ }
         @(Get-Process -ErrorAction Stop | Where-Object {
-            $processPath = $_.Path
+            $processPath = Get-LongForm $_.Path
             if ($processPath -and $processPath.StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)) {
                 return $true
             }
@@ -77,7 +85,8 @@ try {
             # is outside {app}, but inherited DLL search paths can load bundled DLLs.
             try {
                 foreach ($module in $_.Modules) {
-                    if ($module.FileName -and $module.FileName.StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                    $moduleName = Get-LongForm $module.FileName
+                    if ($moduleName -and $moduleName.StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)) {
                         return $true
                     }
                 }
