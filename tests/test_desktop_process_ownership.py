@@ -9,6 +9,12 @@ import sys
 import pytest
 
 
+def windows_powershell_env():
+    # Setup runs the preflight outside PowerShell 7; CI steps run in pwsh, whose PSModulePath
+    # would make Windows PowerShell 5.1 lose Get-FileHash.
+    return {key: value for key, value in os.environ.items() if key.upper() != 'PSMODULEPATH'}
+
+
 @pytest.mark.skipif(os.name != 'nt' or not os.environ.get('CB_DESKTOP_NATIVE_EXE'),
                     reason='requires the compiled Windows desktop')
 def test_compiled_desktop_registers_owned_orphan_and_preflight_stops_it(tmp_path):
@@ -27,7 +33,7 @@ def test_compiled_desktop_registers_owned_orphan_and_preflight_stops_it(tmp_path
     try:
         result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
             '-File', str(script), '-InstallDir', str(exe.parent), '-ReportPath', str(tmp_path / 'report.txt')],
-            capture_output=True, text=True, timeout=90)
+            capture_output=True, text=True, timeout=90, env=windows_powershell_env())
         report = (tmp_path / 'report.txt').read_text() if (tmp_path / 'report.txt').exists() else ''
         assert result.returncode == 0, result.stderr + report
         remaining = subprocess.run(['powershell.exe', '-NoProfile', '-Command',

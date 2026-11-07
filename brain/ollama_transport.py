@@ -24,7 +24,10 @@ async def chat(client, url, body, request, first_timeout, idle_timeout, total_ti
                     if budget <= 0:
                         raise TimeoutError('Model output deadline exceeded')
                     try:
-                        line = await asyncio.wait_for(anext(lines), budget)
+                        # Not wait_for: on Python 3.11 it can swallow a cancellation (Stop) when the
+                        # next line arrives at the same moment, and the stream then keeps running.
+                        async with asyncio.timeout(budget):
+                            line = await anext(lines)
                     except StopAsyncIteration:
                         raise httpx.ReadError('Ollama closed its stream without a completed response')
                     if not line:
